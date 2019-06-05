@@ -1,0 +1,8 @@
+[package]
+name = "rr_channels"
+version = "0.1.0"
+authors = ["gatowololo"]
+edition = "2018"
+
+[dependencies]
+crossbeam-channel = "0.3"
