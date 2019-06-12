@@ -10,7 +10,7 @@ use lazy_static::lazy_static;
 use std::fs::{remove_file, File};
 
 use env_logger;
-use log::{debug, trace};
+use log::trace;
 
 pub mod crossbeam_select;
 
@@ -111,6 +111,27 @@ lazy_static! {
 /// Given the token stream for a crossbeam::select!() and the index indetifier $index,
 /// generate a match statement on the index calling the appropriate channel and code
 /// to execute.
+/// It basically turns code of the form:
+///
+///  rr_channels::rr_select! {
+///    recv(r1) -> x => println!("receiver 1: {:?}", x),
+///    recv(r2) -> y => println!("receiver 2: {:?}", y),
+///  }
+///
+/// Into:
+///
+///  if(index == 0){
+///    let x = r1.recv();
+///    println!("receiver 1: {:?}", x),
+///    return;
+///  }
+///  if(index == 1){
+///    let y = r2.recv();
+///    println!("receiver 2: {:?}", y),
+///    return;
+///  }
+///
+/// In the future we may generalize it to accept more patterns.
 #[macro_export]
 macro_rules! make_replay {
     // Parse input as expected by crossbeam_channel::select!().
@@ -157,8 +178,15 @@ macro_rules! rr_select {
                 WRITE_LOG_FILE.
                     lock().
                     unwrap().
-                    write_fmt(format_args!("{} {} {}\n", get_det_id(), get_select_id(), index));
-                debug!("det_id: {}, select_id: {}, index: {}", get_det_id(), get_select_id(), index);
+                    write_fmt(format_args!("{} {} {}\n",
+                                           get_det_id(),
+                                           get_select_id(),
+                                           index)).
+                    expect("Unable to write to log file.");
+                debug!("det_id: {}, select_id: {}, index: {}",
+                       get_det_id(),
+                       get_select_id(),
+                       index);
                 inc_select_id();
             }
             // Query our log to see what index was selected!() during the replay phase.
@@ -195,7 +223,7 @@ pub fn get_det_id() -> u32 {
 
 /// TODO Mark as mutable somewhere?
 pub fn get_select_id() -> u32 {
-    SELECT_ID.with(|id| { *id.borrow() })
+    SELECT_ID.with(|id| *id.borrow())
 }
 
 pub fn inc_select_id() {

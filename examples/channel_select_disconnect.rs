@@ -1,5 +1,4 @@
 use crossbeam_channel::unbounded;
-use rr_channels::rr_select;
 
 fn main() {
     let (s1, r1) = unbounded();
