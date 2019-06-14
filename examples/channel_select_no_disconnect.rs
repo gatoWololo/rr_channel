@@ -1,8 +1,6 @@
-use crossbeam_channel::unbounded;
-
 fn main() {
-    let (s1, r1) = unbounded();
-    let (s2, r2) = unbounded();
+    let (s1, mut r1) = rr_channels::unbounded();
+    let (s2, mut r2) = rr_channels::unbounded();
 
     // Keep copies around to avoid disconnecting channel.
     // Else we end up getting spurious RecvError from channel.

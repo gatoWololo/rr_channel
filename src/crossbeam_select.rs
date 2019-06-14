@@ -605,9 +605,9 @@ macro_rules! crossbeam_channel_internal {
         (recv($r:expr) -> $res:pat => $recv_body:tt,)
         (default() => $default_body:tt,)
     ) => {{
-        match $r {
+        match $r.receiver {
             ref _r => {
-                let _r: &crossbeam_channel::Receiver<_> = _r;
+                let _r: &rr_channels::Receiver<_> = _r;
                 match _r.try_recv() {
                     ::std::result::Result::Err(crossbeam_channel::TryRecvError::Empty) => {
                         $default_body
@@ -626,7 +626,7 @@ macro_rules! crossbeam_channel_internal {
         (recv($r:expr) -> $res:pat => $body:tt,)
         ()
     ) => {{
-        match $r {
+        match $r.receiver {
             ref _r => {
                 let _r: &crossbeam_channel::Receiver<_> = _r;
                 let _res = _r.recv();
@@ -640,7 +640,7 @@ macro_rules! crossbeam_channel_internal {
         (recv($r:expr) -> $res:pat => $recv_body:tt,)
         (default($timeout:expr) => $default_body:tt,)
     ) => {{
-        match $r {
+        match $r.receiver {
             ref _r => {
                 let _r: &crossbeam_channel::Receiver<_> = _r;
                 match _r.recv_timeout($timeout) {
@@ -908,7 +908,7 @@ macro_rules! crossbeam_channel_internal {
         (($i:tt $var:ident) $($labels:tt)*)
         ($($cases:tt)*)
     ) => {{
-        match $r {
+        match $r.receiver {
             ref _r => {
                 #[allow(unsafe_code)]
                 let $var: &crossbeam_channel::Receiver<_> = unsafe {
@@ -945,7 +945,7 @@ macro_rules! crossbeam_channel_internal {
             ref _s => {
                 #[allow(unsafe_code)]
                 let $var: &crossbeam_channel::Sender<_> = unsafe {
-                    let _s: &crossbeam_channel::Sender<_> = _s;
+                    let _s: &crossbeam_channel::Sender<_> = _s.sender;
 
                     // Erase the lifetime so that `sel` can be dropped early even without NLL.
                     unsafe fn unbind<'a, T>(x: &T) -> &'a T {
@@ -974,13 +974,23 @@ macro_rules! crossbeam_channel_internal {
         ([$i:tt] recv($r:ident) -> $res:pat => $body:tt, $($tail:tt)*)
     ) => {{
         if $oper.index() == $i {
-            let index = $oper.index();
-            let _res = $oper.recv($r);
+            let mut receive_thread = None;
+            let index = $oper.index() as u32;
+            let _res: Result<_, _>;
+            match $oper.recv($r) {
+                Ok((thread_id, msg)) => {
+                    _res = Ok(msg);
+                    receive_thread = thread_id;
+                }
+                e@Err(_) => {
+                    _res = e.map(|t| t.1);
+                }
+            }
             ::std::mem::drop($sel);
-
             let $res = _res;
             $body
-            return index;
+
+            return (index, receive_thread);
         } else {
             crossbeam_channel_internal! {
                 @complete
@@ -1003,7 +1013,7 @@ macro_rules! crossbeam_channel_internal {
 
             let $res = _res;
             $body
-            return index;
+            // panic!("RR channels on send not supported.");
         } else {
             crossbeam_channel_internal! {
                 @complete

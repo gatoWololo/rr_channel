@@ -1,19 +1,35 @@
-use crossbeam_channel::unbounded;
+/// Spawn 10 channels.
+/// We spawn 100 threads which share the sencer end of those 10 threads for a total
+/// of 100 senders.
+/// A single thread selects 1000 messages from the 10 receiver ends.
+use rr_channels;
 
 fn main() {
     let mut receivers = Vec::new();
-    for i in 0..10 {
-        let (s, r) = unbounded();
-        receivers.push(r);
+    let mut senders = Vec::new();
 
-        rr_channels::spawn(move || {
-            for _ in 0..10 {
-                s.send(i).unwrap()
-            }
-        });
+    for _ in 0..10 {
+        let (s, r) = rr_channels::unbounded();
+        receivers.push(r);
+        senders.push(s);
+    }
+    // Copy senders to avoid disconnecting.
+    let sender2 = senders.clone();
+
+    for _ in 0..10 {
+        let shared = senders.pop().unwrap();
+        for _ in 0..10 {
+            // Ten threads have the receiver end of this channel.
+            let s2 = shared.clone();
+            rr_channels::spawn(move || {
+                for j in 0..10 {
+                    s2.send(j).unwrap()
+                }
+            });
+        }
     }
 
-    for _ in 0..100 {
+    for _ in 0..1000 {
         rr_channels::rr_select! {
             recv(receivers[0]) -> x => println!("receiver 0: {:?}", x),
             recv(receivers[1]) -> y => println!("receiver 1: {:?}", y),

@@ -1,8 +1,7 @@
-use crossbeam_channel::unbounded;
-
+/// Send messages with the possibility to disconnect.
 fn main() {
-    let (s1, r1) = unbounded();
-    let (s2, r2) = unbounded();
+    let (s1, mut r1) = rr_channels::unbounded();
+    let (s2, mut r2) = rr_channels::unbounded();
 
     rr_channels::spawn(move || {
         for _ in 0..30 {
