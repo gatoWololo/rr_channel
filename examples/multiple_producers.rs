@@ -5,8 +5,8 @@ use std::{thread, time};
 use rand::Rng;
 
 fn main() {
-    let (s, mut r) = rr_channels::unbounded();
-    let (mut _s2, mut r2) = rr_channels::unbounded::<i32>();
+    let (s, r) = rr_channels::unbounded();
+    let (_s2, r2) = rr_channels::unbounded::<i32>();
     // Avoid hanving channel disconnect.
     let _s = s.clone();
 
@@ -33,7 +33,7 @@ fn main() {
     });
 
     for _ in 0..40 {
-        rr_channels::rr_select! {
+        rr_channels::select! {
             recv(r) -> x => println!("Got value: {:?}", x),
             recv(r2) -> x => println!("Got value: {:?}", x),
         }

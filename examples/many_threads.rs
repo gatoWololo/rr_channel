@@ -30,7 +30,7 @@ fn main() {
     }
 
     for _ in 0..1000 {
-        rr_channels::rr_select! {
+        rr_channels::select! {
             recv(receivers[0]) -> x => println!("receiver 0: {:?}", x),
             recv(receivers[1]) -> y => println!("receiver 1: {:?}", y),
             recv(receivers[2]) -> y => println!("receiver 2: {:?}", y),

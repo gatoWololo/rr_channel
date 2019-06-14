@@ -1,6 +1,7 @@
+
 fn main() {
-    let (s1, mut r1) = rr_channels::unbounded();
-    let (s2, mut r2) = rr_channels::unbounded();
+    let (s1, r1) = rr_channels::unbounded();
+    let (s2, r2) = rr_channels::unbounded();
 
     // Keep copies around to avoid disconnecting channel.
     // Else we end up getting spurious RecvError from channel.
@@ -19,7 +20,7 @@ fn main() {
     });
 
     for _ in 0..60 {
-        rr_channels::rr_select! {
+        rr_channels::select! {
             recv(r1) -> x => println!("receiver 1: {:?}", x),
             recv(r2) -> y => println!("receiver 2: {:?}", y),
         }

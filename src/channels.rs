@@ -9,6 +9,8 @@ use crossbeam_channel::RecvError;
 use crate::ENV_LOGGER;
 use crate::RECORD_MODE;
 
+use std::cell::RefCell;
+
 pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
     // Init log, happens once, lazily.
     // Users always have to make channels before using the rest of this code.
@@ -19,7 +21,7 @@ pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
     let mode = *RECORD_MODE;
 
     (Sender {sender, mode },
-     Receiver{buffer: HashMap::new(), receiver, mode })
+     Receiver{buffer: RefCell::new(HashMap::new()), receiver: receiver, mode })
 }
 
 
@@ -31,6 +33,8 @@ pub struct Sender<T>{
 
 
 impl<T> Sender<T> {
+    /// Send our det thread id along with the actual message for both
+    /// record and replay. On NoRR send None.
     pub fn send(&self, msg: T) -> Result<(), SendError<T>> {
         match self.mode {
             RecordReplayMode::Replay | RecordReplayMode::Record => {
@@ -46,29 +50,20 @@ impl<T> Sender<T> {
                     map_err(|e| SendError(e.into_inner().1))
             }
         }
-
     }
 }
 
 pub struct Receiver<T>{
-    // /// Should be set before calling recv(). Will panic if not set.
-    // /// We do not return an error to keep apperances with crossbeam_channels
-    // /// API.
-    // expected_id: Option<DetThreadId>,
-    /// We could buffer multiple values for a given thread.
-    buffer: HashMap<DetThreadId, VecDeque<T>>,
+    /// Buffer holding values from the "wrong" thread on replay mode.
+    /// Crossbeam works with inmutable references, so we wrap in a RefCell
+    /// to hide our mutation.
+    buffer: RefCell<HashMap<DetThreadId, VecDeque<T>>>,
     pub receiver: crossbeam_channel::Receiver<(Option<DetThreadId>, T)>,
     mode: RecordReplayMode,
 }
 
 impl<T> Receiver<T> {
-    // pub fn set_expected_id(&mut self, expected_id: DetThreadId) {
-    //     if self.mode != RecordReplayMode::Replay {
-    //         panic!("Expected id only makes sense in Replay mode");
-    //     }
-    //     self.expected_id = Some(expected_id);
-    // }
-    pub fn recv(&mut self) -> Result<(DetThreadId, T), RecvError> {
+    pub fn recv(&self) -> Result<(DetThreadId, T), RecvError> {
         if self.mode != RecordReplayMode::Record {
             panic!("record_recv should only be called in record mode.");
         }
@@ -76,7 +71,8 @@ impl<T> Receiver<T> {
             map(|(id, msg)| (id.expect("None sent through channel on record."), msg))
     }
 
-    pub fn replay_recv(&mut self, sender: &Option<DetThreadId>) -> Result<T, RecvError> {
+    /// TODO: Move borrow_mut() outside the loop.
+    pub fn replay_recv(&self, sender: &Option<DetThreadId>) -> Result<T, RecvError> {
         // Expected an error, just fake it like we got the error.
         if sender.is_none() {
             trace!("User waiting fro RecvError. Created artificial error.");
@@ -85,14 +81,15 @@ impl<T> Receiver<T> {
 
         let sender: &_ = sender.as_ref().unwrap();
         // Check our buffer to see if this value is already here.
-        if let Some(entries) = self.buffer.get_mut(sender) {
+        if let Some(entries) = self.buffer.borrow_mut().get_mut(sender) {
             if let Some(entry) = entries.pop_front() {
                 debug!("Recv message found in buffer.");
                 return Ok(entry);
             }
         }
 
-        // Nope, keep receiving until we find it.
+        // Loop until we get the message we're waiting for. All "wrong" messages are
+        // buffered into self.buffer.
         loop {
             match self.receiver.recv() {
                 Ok((det_id, msg)) => {
@@ -107,7 +104,9 @@ impl<T> Receiver<T> {
                     // We got a message from the wrong thread.
                     else {
                         debug!("Wrong value found. Queing value for thread: {:?}", det_id);
-                        let queue = self.buffer.entry(det_id).or_insert(VecDeque::new());
+                        // ensure we don't drop temporary reference.
+                        let mut borrow = self.buffer.borrow_mut();
+                        let queue = borrow.entry(det_id).or_insert(VecDeque::new());
                         queue.push_back(msg);
                     }
                 }

@@ -1,8 +1,8 @@
 /// Two threads send their message through their own individual channels.
 /// A 3rd thread creates a 4th thread which receives messages.
 fn main() {
-    let (s0, mut r0) = rr_channels::unbounded();
-    let (s1, mut r1) = rr_channels::unbounded();
+    let (s0, r0) = rr_channels::unbounded();
+    let (s1, r1) = rr_channels::unbounded();
 
     let h0 = rr_channels::spawn(move || {
         for _ in 0..10 {
@@ -23,7 +23,7 @@ fn main() {
         // Spawn a secondary thread just for funsies.
         rr_channels::spawn(move || {
             for _ in 0..20 {
-                rr_channels::rr_select! {
+                rr_channels::select! {
                     recv(r0) -> x => println!("receiver 0: {:?}", x),
                     recv(r1) -> y => println!("receiver 1: {:?}", y),
                 }
