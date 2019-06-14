@@ -14,7 +14,7 @@ fn main() {
         senders.push(s);
     }
     // Copy senders to avoid disconnecting.
-    let sender2 = senders.clone();
+    let _sender2 = senders.clone();
 
     for _ in 0..10 {
         let shared = senders.pop().unwrap();
