@@ -7,11 +7,11 @@ pub fn get_det_id() -> DetThreadId {
     DET_ID.with(|di| di.borrow().clone())
 }
 
-/// TODO Mark as mutable somewhere?
 pub fn get_select_id() -> u32 {
     SELECT_ID.with(|id| *id.borrow())
 }
 
+/// TODO I want to express that this is mutable somehow.
 pub fn inc_select_id() {
     SELECT_ID.with(|id| {
         *id.borrow_mut() += 1;

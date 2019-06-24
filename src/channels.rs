@@ -8,6 +8,7 @@ use std::collections::VecDeque;
 use crossbeam_channel::RecvError;
 use crate::ENV_LOGGER;
 use crate::RECORD_MODE;
+use crate::record_replay::{get_message_and_log, ReceiveType, get_log_entry};
 
 use std::cell::RefCell;
 
@@ -27,7 +28,7 @@ pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
 
 #[derive(Clone)]
 pub struct Sender<T>{
-    pub sender: crossbeam_channel::Sender<(Option<DetThreadId>, T)>,
+    pub(crate) sender: crossbeam_channel::Sender<(Option<DetThreadId>, T)>,
     mode: RecordReplayMode,
 }
 
@@ -40,9 +41,9 @@ impl<T> Sender<T> {
             RecordReplayMode::Replay | RecordReplayMode::Record => {
                 let det_id = Some(get_det_id());
                 trace!("Sending our id via channel: {:?}", det_id);
-                self.sender.send((det_id, msg)).
-                // crossbeam.send() returns Result<(), SendError<(DetThreadId, T)>>,
+                // crossbeam::send() returns Result<(), SendError<(DetThreadId, T)>>,
                 // we want to make this opaque to the user. Just return the T on error.
+                self.sender.send((det_id, msg)).
                     map_err(|e| SendError(e.into_inner().1))
             }
             RecordReplayMode::NoRR => {
@@ -58,17 +59,36 @@ pub struct Receiver<T>{
     /// Crossbeam works with inmutable references, so we wrap in a RefCell
     /// to hide our mutation.
     buffer: RefCell<HashMap<DetThreadId, VecDeque<T>>>,
-    pub receiver: crossbeam_channel::Receiver<(Option<DetThreadId>, T)>,
+    pub(crate) receiver: crossbeam_channel::Receiver<(Option<DetThreadId>, T)>,
     mode: RecordReplayMode,
 }
 
 impl<T> Receiver<T> {
-    pub fn recv(&self) -> Result<(DetThreadId, T), RecvError> {
-        if self.mode != RecordReplayMode::Record {
-            panic!("record_recv should only be called in record mode.");
+    pub fn recv(&self) -> Result<T, RecvError> {
+        match self.mode {
+            RecordReplayMode::Record => {
+                let received = self.receiver.recv();
+                let msg = get_message_and_log(ReceiveType::DirectChannelRecv, received);
+                msg
+            }
+            RecordReplayMode::Replay => {
+                // Query our log to see what index was selected!() during the replay phase.
+                let (index, sender_id) = get_log_entry(get_det_id(), get_select_id());
+                inc_select_id();
+
+                match index {
+                    ReceiveType::Select(index) => {
+                        panic!("Expected a ReceiveType::DirectChannelRecv.");
+                    }
+                    ReceiveType::DirectChannelRecv => {
+                        self.replay_recv(&sender_id)
+                    }
+                }
+            }
+            RecordReplayMode::NoRR => {
+                unimplemented!()
+            }
         }
-        self.receiver.recv().
-            map(|(id, msg)| (id.expect("None sent through channel on record."), msg))
     }
 
     /// TODO: Move borrow_mut() outside the loop.

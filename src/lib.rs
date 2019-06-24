@@ -17,7 +17,7 @@ pub use det_id::{DetIdSpawner, DetThreadId, get_det_id, get_select_id,
 pub use select::{Select, SelectedOperation};
 
 /// A singleton instance exists globally for the current mode via lazy_static global variable.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RecordReplayMode {
     Record,
     Replay,

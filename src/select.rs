@@ -1,30 +1,24 @@
 use crate::{Receiver, Sender, RECORD_MODE, RecordReplayMode};
 use crate::det_id::{get_det_id, DetThreadId};
 use crate::det_id::get_select_id;
-use crate::record_replay::LogEntry;
-use crate::record_replay::WRITE_LOG_FILE;
 use crate::det_id::inc_select_id;
-use std::io::Write;
-use crate::record_replay::RECORDED_INDICES;
-
+use crate::record_replay::{get_message_and_log, ReceiveType, get_log_entry};
 use crossbeam_channel::SendError;
 use crossbeam_channel::RecvError;
 use log::{debug, trace};
+
 
 /// Wrapper type around crossbeam's Select.
 pub struct Select<'a> {
     selector: crossbeam_channel::Select<'a>,
     mode: RecordReplayMode,
-    // Keep track of how many channel ends have been "added".
-    // TODO may not be needed at all.
-    index: usize,
 }
 
 impl<'a> Select<'a> {
     /// Creates an empty list of channel operations for selection.
     pub fn new() -> Select<'a> {
         let mode = *RECORD_MODE;
-        Select { mode, selector: crossbeam_channel::Select::new(), index: 0}
+        Select { mode, selector: crossbeam_channel::Select::new()}
     }
 
     /// Adds a send operation.
@@ -52,18 +46,19 @@ impl<'a> Select<'a> {
             }
             RecordReplayMode::Replay => {
                 // Query our log to see what index was selected!() during the replay phase.
-                let key = (get_det_id(), get_select_id());
-                trace!("Replaying for our_thread: {:?}, sender_thread {:?}",
-                       key.0, key.1);
-                let (index, sender_id) = RECORDED_INDICES.get(& key).
-                    expect("Unable to fetch key.");
-
-                trace!("Index fetched: {}", index);
-                trace!("Sender Id fetched: {:?}", sender_id);
-
+                let (index, sender_id) = get_log_entry(get_det_id(), get_select_id());
                 inc_select_id();
-                SelectedOperation::Replay(
-                    ReplaySelectedOperation {index: *index, expected_thread: sender_id})
+
+                match index {
+                    ReceiveType::DirectChannelRecv => {
+                        panic!("Expected a ReceiveType::Select.");
+                    }
+                    ReceiveType::Select(index) => {
+                        SelectedOperation::Replay(
+                            ReplaySelectedOperation {index: *index,
+                                                     expected_thread: sender_id})
+                    }
+                }
             }
             RecordReplayMode::NoRR => {
                 SelectedOperation::Record(self.selector.select())
@@ -76,15 +71,17 @@ impl<'a> Select<'a> {
     }
 }
 
-/// "Fake" selected operation used in replay.
+/// "Fake" selected operation used in Replay.
 pub struct ReplaySelectedOperation<'a> {
+    /// Index of channel selected by select! on record. Fetched from our record log.
+    /// The select! macro uses this field to match on the correct branch during record.
     index: u32,
+    /// Holds the DetThreadId we're waiting for. Or None if we're expecting
+    /// a disconnect errror.
     expected_thread: &'a Option<DetThreadId>,
 }
 
 pub enum SelectedOperation<'a> {
-    /// Holds the DetThreadId we're waiting for. Or None if we're expecting
-    /// a disconnect errror.
     Replay(ReplaySelectedOperation<'a>),
     Record(crossbeam_channel::SelectedOperation<'a>),
     // TODO add variant for "no record"!!!
@@ -140,34 +137,16 @@ impl<'a> SelectedOperation<'a> {
         match self {
             // We do not use the select API at all on replays. Wait for correct
             // message to come by receving on channel directly.
-            // replay_recv  // takes care of proper buffering.
+            // replay_recv takes care of proper buffering.
             SelectedOperation::Replay(dummy_select) => {
                 r.replay_recv(dummy_select.expected_thread)
             }
 
             // Record value we get from direct use of Select API
             SelectedOperation::Record(selected) => {
-                let (sender_thread, ret_val) = match selected.recv(&r.receiver) {
-                    Err(e) => (None, Err(e)),
-                    Ok((sender_thread, msg)) => (sender_thread, Ok(msg)),
-                };
-
-                // Write our (DET_ID, SELECT_ID) -> index to our log file
-                let current_thread = get_det_id();
-                let select_id = get_select_id();
-                let entry: LogEntry = LogEntry { current_thread, sender_thread,
-                                                 select_id , index };
-                let serialized = serde_json::to_string(&entry).unwrap();
-
-                WRITE_LOG_FILE.
-                    lock().
-                    unwrap().
-                    write_fmt(format_args!("{}\n", serialized)).
-                    expect("Unable to write to log file.");
-
-                debug!("Logged entry: {:?}", entry);
-                inc_select_id();
-                ret_val
+                let received = selected.recv(&r.receiver);
+                let msg = get_message_and_log(ReceiveType::Select(index), received);
+                msg
             }
         }
     }

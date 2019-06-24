@@ -2,7 +2,6 @@
 /// Channel two is never used.
 fn main() {
     let (s, r) = rr_channels::unbounded();
-    let (_s2, r2) = rr_channels::unbounded::<i32>();
     // Avoid having channel disconnect.
     let _s = s.clone();
 
@@ -25,9 +24,7 @@ fn main() {
     });
 
     for _ in 0..40 {
-        rr_channels::select! {
-            recv(r) -> x => println!("Got value: {:?}", x),
-            recv(r2) -> x => println!("Got value: {:?}", x),
-        }
+        let val = r.recv();
+        println!("Got value: {:?}", val);
     }
 }
