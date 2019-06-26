@@ -11,10 +11,13 @@ mod det_id;
 mod record_replay;
 
 pub use record_replay::{LogEntry, WRITE_LOG_FILE, RECORDED_INDICES};
-pub use channels::{unbounded, Sender, Receiver};
+pub use channels::{unbounded, bounded, Sender, Receiver, after, never};
 pub use det_id::{DetIdSpawner, DetThreadId, get_det_id, get_select_id,
                  inc_select_id, spawn};
 pub use select::{Select, SelectedOperation};
+pub use crossbeam_channel::RecvTimeoutError;
+pub use crossbeam_channel::TryRecvError;
+pub use crossbeam_channel::RecvError;
 
 /// A singleton instance exists globally for the current mode via lazy_static global variable.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

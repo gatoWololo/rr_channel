@@ -9,8 +9,19 @@ use crossbeam_channel::RecvError;
 use crate::ENV_LOGGER;
 use crate::RECORD_MODE;
 use crate::record_replay::{get_message_and_log, ReceiveType, get_log_entry};
+use std::time::Duration;
+use std::time::Instant;
+use crossbeam_channel::{TryRecvError, RecvTimeoutError};
 
 use std::cell::RefCell;
+
+pub fn bounded<T>(cap: usize) -> (Sender<T>, Receiver<T>) {
+    unimplemented!()
+}
+
+pub fn never<T>() -> Receiver<T> {
+    unimplemented!()
+}
 
 pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
     // Init log, happens once, lazily.
@@ -26,14 +37,26 @@ pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
 }
 
 
-#[derive(Clone)]
 pub struct Sender<T>{
     pub(crate) sender: crossbeam_channel::Sender<(Option<DetThreadId>, T)>,
     mode: RecordReplayMode,
 }
 
+/// crossbeam_channel::Sender does not derive clone. Instead it implements it,
+/// this is to avoid the constraint that T must be Clone.
+impl<T> Clone for Sender<T> {
+    fn clone(&self) -> Self {
+        Sender { sender: self.sender.clone(), mode: self.mode.clone() }
+    }
+}
+
 
 impl<T> Sender<T> {
+    // fn from(sender: crossbeam_channel::Sender<T>) -> Sender<T> {
+        // let mode = *RECORD_MODE;
+        // Sender { sender, mode }
+    // }
+
     /// Send our det thread id along with the actual message for both
     /// record and replay. On NoRR send None.
     pub fn send(&self, msg: T) -> Result<(), SendError<T>> {
@@ -136,4 +159,16 @@ impl<T> Receiver<T> {
             }
         }
     }
+
+    pub fn try_recv(&self) -> Result<T, TryRecvError> {
+        unimplemented!()
+    }
+
+    pub fn recv_timeout(&self, timeout: Duration) -> Result<T, RecvTimeoutError> {
+        unimplemented!()
+    }
+}
+
+pub fn after(duration: Duration) -> Receiver<Instant> {
+    unimplemented!()
 }
