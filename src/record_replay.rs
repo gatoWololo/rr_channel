@@ -10,7 +10,7 @@ use std::fs::remove_file;
 use std::collections::HashMap;
 use std::io::BufRead;
 use log::debug;
-use crossbeam_channel::RecvError;
+use crossbeam_channel::TryRecvError;
 use crate::det_id::get_det_id;
 use crate::det_id::get_select_id;
 use crate::det_id::inc_select_id;
@@ -19,29 +19,78 @@ use serde::{Serialize, Deserialize};
 // TODO use environment variables to generalize this.
 const LOG_FILE_NAME: &str = "/home/gatowololo/det_file.txt";
 
-/// Unique Identifier for entries in our log. Useful for easy serialize/deserialize
-/// into our log.
-
-/// We determinize not only select!() but also MPSC channels. On select!() we need the
-/// index of the channel to read from. On direct .recv() from MPSC channels we just
-/// read directly.
+/// Record representing a sucessful select from a channel. Used in replay mode.
 #[derive(Serialize, Deserialize, Debug)]
-pub enum ReceiveType {
-    Select(u32),
-    DirectChannelRecv,
+pub enum SelectEvent {
+    Success {
+        /// For multiple producer channels we need to diffentiate who the sender was.
+        /// As the index only tells us the correct receiver end, but not who the sender was.
+        sender_thread: DetThreadId,
+        /// Index of selected channel for select!()
+        selected_index: usize
+    },
+    RecvError {
+        /// Index of selected channel for select!(). We still need this even onf RecvError
+        /// as user might call .index() method on SelectedOperation and we need to be able
+        /// to return the real index.
+        selected_index: usize
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub enum ReceiveEvent {
+    Success {
+        /// For multiple producer channels we need to diffentiate who the sender was.
+        /// As the index only tells us the correct receiver end, but not who the sender was.
+        sender_thread: DetThreadId,
+    },
+    RecvError,
+}
+
+/// Record representing results of calling Receiver::try_recv()
+#[derive(Serialize, Deserialize, Debug)]
+pub enum TryRecvEvent {
+    Success {
+        /// For multiple producer channels we need to diffentiate who the sender was.
+        /// As the index only tells us the correct receiver end, but not who the sender was.
+        sender_thread: DetThreadId,
+    },
+    Disconnected,
+    Empty
+}
+
+/// Record representing results of calling Receiver::recv_timeout()
+#[derive(Serialize, Deserialize, Debug)]
+pub enum RecvTimeoutEvent {
+    Success {
+        /// For multiple producer channels we need to diffentiate who the sender was.
+        /// As the index only tells us the correct receiver end, but not who the sender was.
+        sender_thread: DetThreadId,
+    },
+    Disconnected,
+    Timedout
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct LogEntry {
+    /// Thread performing the operation's unique ID.
+    /// (current_thread, select_id) form a unique key per entry in our map and log.
     pub current_thread: DetThreadId,
-    /// For multiple producer channels we need to diffentiate who the sender was.
-    /// As the index only tells us the correct receiver end, but not who the sender was.
-    pub sender_thread: Option<DetThreadId>,
     /// Unique per-thread identifier given to every select dynamic instance.
     /// (current_thread, select_id) form a unique key per entry in our map and log.
     pub select_id: u32,
-    /// Index of selected channel for select!()
-    pub index: ReceiveType,
+    pub event: RecordedEvent,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub enum RecordedEvent {
+    SelectReady {
+        select_index: usize
+    },
+    Select(SelectEvent),
+    Receive(ReceiveEvent),
+    TryRecv(TryRecvEvent),
+    RecvTimeout(RecvTimeoutEvent)
 }
 
 lazy_static! {
@@ -67,7 +116,7 @@ lazy_static! {
     /// Lazily initialized on replay mode.
     /// Maps (our_thread: DetThreadId, SELECT_ID: u32) ->
     ///      (index: u32, sender_thread: DetThreadId)
-    pub static ref RECORDED_INDICES: HashMap<(DetThreadId, u32), (ReceiveType, Option<DetThreadId>)> = {
+    pub static ref RECORDED_INDICES: HashMap<(DetThreadId, u32), RecordedEvent> = {
         trace!("Initializing RECORDED_INDICES lazy static.");
         use std::io::BufReader;
 
@@ -80,8 +129,7 @@ lazy_static! {
             let line = line.expect("Unable to read recorded log file");
             let entry: LogEntry = serde_json::from_str(&line).
                 expect("Malformed log entry.");
-            recorded_indices.insert((entry.current_thread, entry.select_id),
-                                    (entry.index, entry.sender_thread));
+            recorded_indices.insert((entry.current_thread, entry.select_id), entry.event);
         }
 
         trace!("{:?}", recorded_indices);
@@ -91,29 +139,13 @@ lazy_static! {
 
 /// Unwrap rr_channels return value from calling .recv() and log results. Should only
 /// be called in Record Mode.
-pub fn get_message_and_log<T>(index: ReceiveType,
-                              received: Result<(Option<DetThreadId>, T), RecvError>)
-                              -> Result<T, RecvError> {
+pub fn log(event: RecordedEvent) {
     use std::io::Write;
-
-    let (sender_thread, msg) : (Option<DetThreadId>, Result<T, RecvError>) =
-        match received {
-            // Err(e) on the RHS is not the same type as Err(e) LHS.
-            Err(e) => (None, Err(e)),
-
-            Ok((sender_thread, msg)) => {
-                if sender_thread.is_none() {
-                    panic!("sender_thread expected on Record mode.");
-                }
-                (sender_thread, Ok(msg))
-            }
-        };
 
     // Write our (DET_ID, SELECT_ID) -> index to our log file
     let current_thread = get_det_id();
     let select_id = get_select_id();
-    let entry: LogEntry = LogEntry { current_thread, sender_thread,
-                                     select_id , index };
+    let entry: LogEntry = LogEntry { current_thread, select_id, event };
     let serialized = serde_json::to_string(&entry).unwrap();
 
     WRITE_LOG_FILE.
@@ -124,18 +156,15 @@ pub fn get_message_and_log<T>(index: ReceiveType,
 
     debug!("Logged entry: {:?}", entry);
     inc_select_id();
-    msg
 }
 
 pub fn get_log_entry<'a>(our_thread: DetThreadId, select_id: u32)
-                     -> (&'a ReceiveType, &'a Option<DetThreadId>) {
+                     -> (&'a RecordedEvent) {
     trace!("Replaying for our_thread: {:?}, sender_thread {:?}",
            our_thread, select_id);
-    let (index, sender_id) = RECORDED_INDICES.get(& (our_thread, select_id)).
+    let event = RECORDED_INDICES.get(& (our_thread, select_id)).
         expect("Unable to fetch key.");
 
-    trace!("Index fetched: {:?}", index);
-    trace!("Sender Id fetched: {:?}", sender_id);
-
-    (index, sender_id)
+    trace!("Event fetched: {:?}", event);
+    event
 }

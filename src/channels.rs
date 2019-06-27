@@ -8,20 +8,12 @@ use std::collections::VecDeque;
 use crossbeam_channel::RecvError;
 use crate::ENV_LOGGER;
 use crate::RECORD_MODE;
-use crate::record_replay::{get_message_and_log, ReceiveType, get_log_entry};
+use crate::record_replay::{self, RecordedEvent, ReceiveEvent, TryRecvEvent, RecvTimeoutEvent};
 use std::time::Duration;
 use std::time::Instant;
 use crossbeam_channel::{TryRecvError, RecvTimeoutError};
 
 use std::cell::RefCell;
-
-pub fn bounded<T>(cap: usize) -> (Sender<T>, Receiver<T>) {
-    unimplemented!()
-}
-
-pub fn never<T>() -> Receiver<T> {
-    unimplemented!()
-}
 
 pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
     // Init log, happens once, lazily.
@@ -38,7 +30,7 @@ pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
 
 
 pub struct Sender<T>{
-    pub(crate) sender: crossbeam_channel::Sender<(Option<DetThreadId>, T)>,
+    pub(crate) sender: crossbeam_channel::Sender<(DetThreadId, T)>,
     mode: RecordReplayMode,
 }
 
@@ -52,28 +44,18 @@ impl<T> Clone for Sender<T> {
 
 
 impl<T> Sender<T> {
-    // fn from(sender: crossbeam_channel::Sender<T>) -> Sender<T> {
-        // let mode = *RECORD_MODE;
-        // Sender { sender, mode }
-    // }
-
     /// Send our det thread id along with the actual message for both
     /// record and replay. On NoRR send None.
     pub fn send(&self, msg: T) -> Result<(), SendError<T>> {
-        match self.mode {
-            RecordReplayMode::Replay | RecordReplayMode::Record => {
-                let det_id = Some(get_det_id());
-                trace!("Sending our id via channel: {:?}", det_id);
-                // crossbeam::send() returns Result<(), SendError<(DetThreadId, T)>>,
-                // we want to make this opaque to the user. Just return the T on error.
-                self.sender.send((det_id, msg)).
-                    map_err(|e| SendError(e.into_inner().1))
-            }
-            RecordReplayMode::NoRR => {
-                self.sender.send((None, msg)).
-                    map_err(|e| SendError(e.into_inner().1))
-            }
-        }
+        // We send the det_id even when running in RecordReplayMode::NoRR,
+        // but that's okay. It makes logic a little simpler.
+        let det_id = get_det_id();
+        trace!("Sending our id via channel: {:?}", det_id);
+
+        // crossbeam::send() returns Result<(), SendError<(DetThreadId, T)>>,
+        // we want to make this opaque to the user. Just return the T on error.
+        self.sender.send((det_id, msg)).
+            map_err(|e| SendError(e.into_inner().1))
     }
 }
 
@@ -82,7 +64,7 @@ pub struct Receiver<T>{
     /// Crossbeam works with inmutable references, so we wrap in a RefCell
     /// to hide our mutation.
     buffer: RefCell<HashMap<DetThreadId, VecDeque<T>>>,
-    pub(crate) receiver: crossbeam_channel::Receiver<(Option<DetThreadId>, T)>,
+    pub(crate) receiver: crossbeam_channel::Receiver<(DetThreadId, T)>,
     mode: RecordReplayMode,
 }
 
@@ -90,22 +72,38 @@ impl<T> Receiver<T> {
     pub fn recv(&self) -> Result<T, RecvError> {
         match self.mode {
             RecordReplayMode::Record => {
-                let received = self.receiver.recv();
-                let msg = get_message_and_log(ReceiveType::DirectChannelRecv, received);
-                msg
+                match self.receiver.recv() {
+                    // Disconnected channel returned RecvError.
+                    Err(e) => {
+                        let event = RecordedEvent::Receive(ReceiveEvent::RecvError);
+                        record_replay::log(event);
+                        // Err(e) on the RHS is not the same type as Err(e) LHS.
+                        Err(e)
+                    }
+                    // Read value, log information needed for replay later.
+                    Ok((sender_thread, msg)) => {
+                        let event =
+                            RecordedEvent::Receive(ReceiveEvent::Success {
+                                sender_thread: sender_thread });
+                        record_replay::log(event);
+                        Ok(msg)
+                    }
+                }
             }
+
             RecordReplayMode::Replay => {
-                // Query our log to see what index was selected!() during the replay phase.
-                let (index, sender_id) = get_log_entry(get_det_id(), get_select_id());
+                let event = record_replay::get_log_entry(get_det_id(), get_select_id());
                 inc_select_id();
 
-                match index {
-                    ReceiveType::Select(index) => {
-                        panic!("Expected a ReceiveType::DirectChannelRecv.");
+                match event {
+                    RecordedEvent::Receive(ReceiveEvent::Success{sender_thread}) => {
+                        Ok(self.replay_recv(&sender_thread))
                     }
-                    ReceiveType::DirectChannelRecv => {
-                        self.replay_recv(&sender_id)
+                    RecordedEvent::Receive(ReceiveEvent::RecvError) => {
+                        trace!("Saw RecvError on record, creating artificial one.");
+                        return Err(RecvError);
                     }
+                    _ => panic!("Unexpected event: {:?} in replay for recv()"),
                 }
             }
             RecordReplayMode::NoRR => {
@@ -115,19 +113,12 @@ impl<T> Receiver<T> {
     }
 
     /// TODO: Move borrow_mut() outside the loop.
-    pub fn replay_recv(&self, sender: &Option<DetThreadId>) -> Result<T, RecvError> {
-        // Expected an error, just fake it like we got the error.
-        if sender.is_none() {
-            trace!("User waiting fro RecvError. Created artificial error.");
-            return Err(RecvError);
-        }
-
-        let sender: &_ = sender.as_ref().unwrap();
+    pub fn replay_recv(&self, sender: &DetThreadId) -> T {
         // Check our buffer to see if this value is already here.
         if let Some(entries) = self.buffer.borrow_mut().get_mut(sender) {
             if let Some(entry) = entries.pop_front() {
                 debug!("Recv message found in buffer.");
-                return Ok(entry);
+                return entry;
             }
         }
 
@@ -136,13 +127,10 @@ impl<T> Receiver<T> {
         loop {
             match self.receiver.recv() {
                 Ok((det_id, msg)) => {
-                    let det_id = det_id.
-                        expect("None was sent as det_id in record/replay mode!");
-
                     // We found the message from the expected thread!
                     if det_id == *sender {
                         debug!("Recv message found through recv()");
-                        return Ok(msg);
+                        return msg;
                     }
                     // We got a message from the wrong thread.
                     else {
@@ -170,5 +158,13 @@ impl<T> Receiver<T> {
 }
 
 pub fn after(duration: Duration) -> Receiver<Instant> {
+    unimplemented!()
+}
+
+pub fn bounded<T>(cap: usize) -> (Sender<T>, Receiver<T>) {
+    unimplemented!()
+}
+
+pub fn never<T>() -> Receiver<T> {
     unimplemented!()
 }

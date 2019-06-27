@@ -2,7 +2,7 @@ use crate::{Receiver, Sender, RECORD_MODE, RecordReplayMode};
 use crate::det_id::{get_det_id, DetThreadId};
 use crate::det_id::get_select_id;
 use crate::det_id::inc_select_id;
-use crate::record_replay::{get_message_and_log, ReceiveType, get_log_entry};
+use crate::record_replay::{self, get_log_entry, RecordedEvent, SelectEvent, ReceiveEvent};
 use crossbeam_channel::SendError;
 use crossbeam_channel::RecvError;
 use log::{debug, trace};
@@ -46,18 +46,14 @@ impl<'a> Select<'a> {
             }
             RecordReplayMode::Replay => {
                 // Query our log to see what index was selected!() during the replay phase.
-                let (index, sender_id) = get_log_entry(get_det_id(), get_select_id());
+                let event = get_log_entry(get_det_id(), get_select_id());
                 inc_select_id();
 
-                match index {
-                    ReceiveType::DirectChannelRecv => {
-                        panic!("Expected a ReceiveType::Select.");
+                match event {
+                    RecordedEvent::Select(select_entry) => {
+                        SelectedOperation::Replay(select_entry)
                     }
-                    ReceiveType::Select(index) => {
-                        SelectedOperation::Replay(
-                            ReplaySelectedOperation {index: *index,
-                                                     expected_thread: sender_id})
-                    }
+                    e => panic!("Unexpected event entry from replay select: {:?}", e),
                 }
             }
             RecordReplayMode::NoRR => {
@@ -71,18 +67,8 @@ impl<'a> Select<'a> {
     }
 }
 
-/// "Fake" selected operation used in Replay.
-pub struct ReplaySelectedOperation<'a> {
-    /// Index of channel selected by select! on record. Fetched from our record log.
-    /// The select! macro uses this field to match on the correct branch during record.
-    index: u32,
-    /// Holds the DetThreadId we're waiting for. Or None if we're expecting
-    /// a disconnect errror.
-    expected_thread: &'a Option<DetThreadId>,
-}
-
 pub enum SelectedOperation<'a> {
-    Replay(ReplaySelectedOperation<'a>),
+    Replay(&'a SelectEvent),
     Record(crossbeam_channel::SelectedOperation<'a>),
     // TODO add variant for "no record"!!!
 }
@@ -100,10 +86,14 @@ pub enum SelectedOperation<'a> {
 /// [`recv`]: struct.SelectedOperation.html#method.recv
 impl<'a> SelectedOperation<'a> {
     /// Returns the index of the selected operation.
+    /// We don't log calls to this method as they will always be determinstic.
     pub fn index(&self) -> usize {
         match self {
-            SelectedOperation::Replay(dummy_select) => {
-                dummy_select.index as usize
+            SelectedOperation::Replay(SelectEvent::Success{ selected_index, .. }) => {
+                *selected_index
+            }
+            SelectedOperation::Replay(SelectEvent::RecvError{ selected_index, .. }) => {
+                *selected_index
             }
             SelectedOperation::Record(selected) =>{
                 selected.index()
@@ -133,20 +123,36 @@ impl<'a> SelectedOperation<'a> {
     ///
     /// Panics if an incorrect [`Receiver`] reference is passed.
     pub fn recv<T>(self, r: &Receiver<T>) -> Result<T, RecvError> {
-        let index = self.index() as u32;
+        let selected_index = self.index();
         match self {
+            // Record value we get from direct use of Select API
+            SelectedOperation::Record(selected) => {
+                match selected.recv(&r.receiver) {
+                    // Disconnected channel returned RecvError.
+                    Err(e) => {
+                        let event = RecordedEvent::Select(
+                            SelectEvent::RecvError {selected_index});
+                        record_replay::log(event);
+                        // Err(e) on the RHS is not the same type as Err(e) LHS.
+                        Err(e)
+                    }
+                    // Read value, log information needed for replay later.
+                    Ok((sender_thread, msg)) => {
+                        let event = RecordedEvent::Select(
+                            SelectEvent::Success { sender_thread, selected_index });
+                        record_replay::log(event);
+                        Ok(msg)
+                    }
+                }
+            }
             // We do not use the select API at all on replays. Wait for correct
             // message to come by receving on channel directly.
             // replay_recv takes care of proper buffering.
-            SelectedOperation::Replay(dummy_select) => {
-                r.replay_recv(dummy_select.expected_thread)
+            SelectedOperation::Replay(SelectEvent::Success{ sender_thread, .. }) => {
+                Ok(r.replay_recv(sender_thread))
             }
-
-            // Record value we get from direct use of Select API
-            SelectedOperation::Record(selected) => {
-                let received = selected.recv(&r.receiver);
-                let msg = get_message_and_log(ReceiveType::Select(index), received);
-                msg
+            SelectedOperation::Replay(SelectEvent::RecvError{..}) => {
+                Err(RecvError)
             }
         }
     }
