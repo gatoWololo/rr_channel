@@ -22,10 +22,11 @@ pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
     *ENV_LOGGER;
 
     let (sender, receiver) = crossbeam_channel::unbounded();
+    let receiver = Flavor::Unbounded(receiver);
     let mode = *RECORD_MODE;
 
     (Sender {sender, mode },
-     Receiver{buffer: RefCell::new(HashMap::new()), receiver: receiver, mode })
+     Receiver{buffer: RefCell::new(HashMap::new()), receiver, mode })
 }
 
 
@@ -64,31 +65,72 @@ pub struct Receiver<T>{
     /// Crossbeam works with inmutable references, so we wrap in a RefCell
     /// to hide our mutation.
     buffer: RefCell<HashMap<DetThreadId, VecDeque<T>>>,
-    pub(crate) receiver: crossbeam_channel::Receiver<(DetThreadId, T)>,
+    pub(crate) receiver: Flavor<T>,
     mode: RecordReplayMode,
+}
+
+/// Holds different channels types which may have slightly different types.
+/// This is just the complexity cost of piggybacking off crossbeam_channels
+/// and their API so much.
+pub enum Flavor<T> {
+    Unbounded(crossbeam_channel::Receiver<(DetThreadId, T)>),
+    After(crossbeam_channel::Receiver<T>),
+    Bounded(crossbeam_channel::Receiver<(DetThreadId, T)>),
+}
+
+/// Helper macro to generate methods for Flavor. Calls appropriate channel method.
+/// On case of Flavor::After inserts get_det_id() as the sender_thread_id in order
+/// to have the correct type.
+macro_rules! generate_channel_method {
+    ($method:ident, $error_type:ty) => {
+        pub fn $method(&self) -> Result<(DetThreadId, T), $error_type> {
+            match self {
+                Flavor::Unbounded(receiver) | Flavor::Bounded(receiver) => receiver.$method(),
+                Flavor::After(receiver) => {
+                    match receiver.$method() {
+                        Ok(msg) => Ok((get_det_id(), msg)),
+                        e => e.map(|_| unreachable!()),
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl<T> Flavor<T> {
+    generate_channel_method!(recv, RecvError);
+    generate_channel_method!(try_recv, TryRecvError);
+
+    pub fn recv_timeout(&self, duration: Duration) ->
+        Result<(DetThreadId, T), RecvTimeoutError> {
+            match self {
+                Flavor::Unbounded(receiver) => receiver.recv_timeout(duration),
+                Flavor::After(receiver) => {
+                    match receiver.recv_timeout(duration) {
+                        Ok(msg) => Ok((get_det_id(), msg)),
+                        e => e.map(|_| unreachable!()),
+                    }
+                }
+                Flavor::Bounded(receiver) => receiver.recv_timeout(duration),
+            }
+        }
 }
 
 impl<T> Receiver<T> {
     pub fn recv(&self) -> Result<T, RecvError> {
         match self.mode {
             RecordReplayMode::Record => {
-                match self.receiver.recv() {
-                    // Disconnected channel returned RecvError.
-                    Err(e) => {
-                        let event = RecordedEvent::Receive(ReceiveEvent::RecvError);
-                        record_replay::log(event);
-                        // Err(e) on the RHS is not the same type as Err(e) LHS.
-                        Err(e)
-                    }
+                let (result, event) = match self.receiver.recv() {
+                    // Err(e) on the RHS is not the same type as Err(e) LHS.
+                    Err(e) => (Err(e), ReceiveEvent::RecvError),
+
                     // Read value, log information needed for replay later.
                     Ok((sender_thread, msg)) => {
-                        let event =
-                            RecordedEvent::Receive(ReceiveEvent::Success {
-                                sender_thread: sender_thread });
-                        record_replay::log(event);
-                        Ok(msg)
+                        (Ok(msg), ReceiveEvent::Success { sender_thread })
                     }
-                }
+                };
+                record_replay::log(RecordedEvent::Receive(event));
+                result
             }
 
             RecordReplayMode::Replay => {
@@ -150,23 +192,20 @@ impl<T> Receiver<T> {
 
     pub fn try_recv(&self) -> Result<T, TryRecvError> {
         match self.mode {
-            // Call crossbeam_channel method and record results.
+            // Call crossbeam_channel::try_recv() directly and record results.
             RecordReplayMode::Record => {
                 let (result, event) = match self.receiver.try_recv() {
-                    Err(error) => {
-                        let event = match error {
-                            TryRecvError::Disconnected => TryRecvEvent::Disconnected,
-                            TryRecvError::Empty => TryRecvEvent::Empty,
-                        };
-                        (Err(error), RecordedEvent::TryRecv(event))
+                    Err(TryRecvError::Disconnected) => {
+                        (Err(TryRecvError::Disconnected), TryRecvEvent::Disconnected)
+                    }
+                    Err(TryRecvError::Empty) => {
+                        (Err(TryRecvError::Empty), TryRecvEvent::Empty)
                     }
                     Ok((sender_thread, msg)) => {
-                        let event = RecordedEvent::TryRecv(TryRecvEvent::Success {
-                            sender_thread: sender_thread });
-                        (Ok(msg), event)
+                        (Ok(msg), TryRecvEvent::Success { sender_thread })
                     }
                 };
-                record_replay::log(event);
+                record_replay::log(RecordedEvent::TryRecv(event));
                 result
             }
             RecordReplayMode::Replay => {
@@ -196,7 +235,7 @@ impl<T> Receiver<T> {
     }
 
     pub fn recv_timeout(&self, timeout: Duration) -> Result<T, RecvTimeoutError> {
-                match self.mode {
+        match self.mode {
             // Call crossbeam_channel method and record results.
             RecordReplayMode::Record => {
                 let (result, event) = match self.receiver.recv_timeout(timeout) {
@@ -205,15 +244,13 @@ impl<T> Receiver<T> {
                             RecvTimeoutError::Disconnected => RecvTimeoutEvent::Disconnected,
                             RecvTimeoutError::Timeout => RecvTimeoutEvent::Timedout
                         };
-                        (Err(error), RecordedEvent::RecvTimeout(event))
+                        (Err(error), event)
                     }
                     Ok((sender_thread, msg)) => {
-                        let event = RecordedEvent::RecvTimeout(RecvTimeoutEvent::Success {
-                            sender_thread: sender_thread });
-                        (Ok(msg), event)
+                        (Ok(msg), RecvTimeoutEvent::Success{ sender_thread })
                     }
                 };
-                record_replay::log(event);
+                record_replay::log(RecordedEvent::RecvTimeout(event));
                 result
             }
             RecordReplayMode::Replay => {
@@ -245,7 +282,15 @@ impl<T> Receiver<T> {
 }
 
 pub fn after(duration: Duration) -> Receiver<Instant> {
-    unimplemented!()
+    // Init log, happens once, lazily.
+    // Users always have to make channels before using the rest of this code.
+    // So we put it here.
+    *ENV_LOGGER;
+    let mode = *RECORD_MODE;
+
+    Receiver{buffer: RefCell::new(HashMap::new()),
+             receiver: Flavor::After(crossbeam_channel::after(duration)),
+             mode }
 }
 
 pub fn bounded<T>(cap: usize) -> (Sender<T>, Receiver<T>) {
@@ -253,5 +298,13 @@ pub fn bounded<T>(cap: usize) -> (Sender<T>, Receiver<T>) {
 }
 
 pub fn never<T>() -> Receiver<T> {
-    unimplemented!()
+    // Init log, happens once, lazily.
+    // Users always have to make channels before using the rest of this code.
+    // So we put it here.
+    *ENV_LOGGER;
+    let mode = *RECORD_MODE;
+
+    Receiver{buffer: RefCell::new(HashMap::new()),
+             receiver: Flavor::Bounded(crossbeam_channel::never()),
+             mode }
 }

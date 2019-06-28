@@ -6,6 +6,7 @@ use crate::record_replay::{self, get_log_entry, RecordedEvent, SelectEvent, Rece
 use crossbeam_channel::SendError;
 use crossbeam_channel::RecvError;
 use log::{debug, trace};
+use crate::channels::Flavor;
 
 
 /// Wrapper type around crossbeam's Select.
@@ -33,7 +34,10 @@ impl<'a> Select<'a> {
         // We don't really need this on replay... Just returning a fake "dummy index"
         // would be enough. It still must be the "correct" index otherwise the select!
         // macro will pick the wrong match arm when picking index.
-        self.selector.recv(&r.receiver)
+        match &r.receiver {
+            Flavor::Bounded(r) | Flavor::Unbounded(r) => self.selector.recv(& r),
+            Flavor::After(r) => self.selector.recv(& r),
+        }
     }
 
     pub fn select(&mut self) -> SelectedOperation<'a> {
@@ -109,9 +113,7 @@ impl<'a> SelectedOperation<'a> {
     /// We don't log calls to this method as they will always be determinstic.
     pub fn index(&self) -> usize {
         match self {
-            SelectedOperation::Replay(SelectEvent::Success{ selected_index, .. }) => {
-                *selected_index
-            }
+            SelectedOperation::Replay(SelectEvent::Success{ selected_index, .. }) |
             SelectedOperation::Replay(SelectEvent::RecvError{ selected_index, .. }) => {
                 *selected_index
             }
@@ -145,25 +147,29 @@ impl<'a> SelectedOperation<'a> {
     pub fn recv<T>(self, r: &Receiver<T>) -> Result<T, RecvError> {
         let selected_index = self.index();
         match self {
-            // Record value we get from direct use of Select API
+            // Record value we get from direct use of Select API recv().
             SelectedOperation::Record(selected) => {
-                match selected.recv(&r.receiver) {
-                    // Disconnected channel returned RecvError.
-                    Err(e) => {
-                        let event = RecordedEvent::Select(
-                            SelectEvent::RecvError {selected_index});
-                        record_replay::log(event);
-                        // Err(e) on the RHS is not the same type as Err(e) LHS.
-                        Err(e)
-                    }
+                // Our channel flavors return slightly different values...
+                // consolidate that here.
+                let msg = match &r.receiver {
+                    Flavor::Bounded(receiver) |
+                    Flavor::Unbounded(receiver) => selected.recv(receiver),
+                    Flavor::After(receiver) =>
+                        selected.recv(receiver).map(|msg| (get_det_id(), msg)),
+                };
+
+                let (msg, select_event) = match msg {
                     // Read value, log information needed for replay later.
                     Ok((sender_thread, msg)) => {
-                        let event = RecordedEvent::Select(
-                            SelectEvent::Success { sender_thread, selected_index });
-                        record_replay::log(event);
-                        Ok(msg)
+                        (Ok(msg), SelectEvent::Success { sender_thread, selected_index })
                     }
-                }
+                    // Err(e) on the RHS is not the same type as Err(e) LHS.
+                    Err(e) => {
+                        (Err(e), SelectEvent::RecvError {selected_index})
+                    }
+                };
+                record_replay::log(RecordedEvent::Select(select_event));
+                msg
             }
             // We do not use the select API at all on replays. Wait for correct
             // message to come by receving on channel directly.
@@ -177,3 +183,4 @@ impl<'a> SelectedOperation<'a> {
         }
     }
 }
+
