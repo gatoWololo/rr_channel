@@ -149,11 +149,98 @@ impl<T> Receiver<T> {
     }
 
     pub fn try_recv(&self) -> Result<T, TryRecvError> {
-        unimplemented!()
+        match self.mode {
+            // Call crossbeam_channel method and record results.
+            RecordReplayMode::Record => {
+                let (result, event) = match self.receiver.try_recv() {
+                    Err(error) => {
+                        let event = match error {
+                            TryRecvError::Disconnected => TryRecvEvent::Disconnected,
+                            TryRecvError::Empty => TryRecvEvent::Empty,
+                        };
+                        (Err(error), RecordedEvent::TryRecv(event))
+                    }
+                    Ok((sender_thread, msg)) => {
+                        let event = RecordedEvent::TryRecv(TryRecvEvent::Success {
+                            sender_thread: sender_thread });
+                        (Ok(msg), event)
+                    }
+                };
+                record_replay::log(event);
+                result
+            }
+            RecordReplayMode::Replay => {
+                let event = record_replay::get_log_entry(get_det_id(), get_select_id());
+                inc_select_id();
+
+                match event {
+                    RecordedEvent::TryRecv(TryRecvEvent::Success{sender_thread}) => {
+                        Ok(self.replay_recv(&sender_thread))
+                    }
+                    RecordedEvent::TryRecv(TryRecvEvent::Empty) => {
+                        trace!("Record had TryRecvError::Empty, creating artificial one.");
+                        return Err(TryRecvError::Empty);
+                    }
+                    RecordedEvent::TryRecv(TryRecvEvent::Disconnected) => {
+                        trace!("Record had TryRecvError::Disconnected, creating \
+                                artificial one.");
+                        return Err(TryRecvError::Disconnected);
+                    }
+                    _ => panic!("Unexpected event: {:?} in replay for try_recv()"),
+                }
+            }
+            RecordReplayMode::NoRR => {
+                unimplemented!()
+            }
+        }
     }
 
     pub fn recv_timeout(&self, timeout: Duration) -> Result<T, RecvTimeoutError> {
-        unimplemented!()
+                match self.mode {
+            // Call crossbeam_channel method and record results.
+            RecordReplayMode::Record => {
+                let (result, event) = match self.receiver.recv_timeout(timeout) {
+                    Err(error) => {
+                        let event = match error {
+                            RecvTimeoutError::Disconnected => RecvTimeoutEvent::Disconnected,
+                            RecvTimeoutError::Timeout => RecvTimeoutEvent::Timedout
+                        };
+                        (Err(error), RecordedEvent::RecvTimeout(event))
+                    }
+                    Ok((sender_thread, msg)) => {
+                        let event = RecordedEvent::RecvTimeout(RecvTimeoutEvent::Success {
+                            sender_thread: sender_thread });
+                        (Ok(msg), event)
+                    }
+                };
+                record_replay::log(event);
+                result
+            }
+            RecordReplayMode::Replay => {
+                let event = record_replay::get_log_entry(get_det_id(), get_select_id());
+                inc_select_id();
+
+                match event {
+                    RecordedEvent::RecvTimeout(RecvTimeoutEvent::Success{sender_thread}) => {
+                        Ok(self.replay_recv(&sender_thread))
+                    }
+                    RecordedEvent::RecvTimeout(RecvTimeoutEvent::Timedout) => {
+                        trace!("Record had RecvTimeoutError::Timeout, creating \
+                                artificial one.");
+                        return Err(RecvTimeoutError::Timeout);
+                    }
+                    RecordedEvent::RecvTimeout(RecvTimeoutEvent::Disconnected) => {
+                        trace!("Record had RecvTimeoutError::Disconnected, creating \
+                                artificial one.");
+                        return Err(RecvTimeoutError::Disconnected);
+                    }
+                    _ => panic!("Unexpected event: {:?} in replay for try_recv()"),
+                }
+            }
+            RecordReplayMode::NoRR => {
+                unimplemented!()
+            }
+        }
     }
 }
 

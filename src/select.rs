@@ -63,7 +63,27 @@ impl<'a> Select<'a> {
     }
 
     pub fn ready(&mut self) -> usize {
-        unimplemented!()
+        match self.mode {
+            RecordReplayMode::Record => {
+                let select_index = self.selector.ready();
+                record_replay::log(RecordedEvent::SelectReady{ select_index });
+                select_index
+            }
+            RecordReplayMode::Replay => {
+                let event = get_log_entry(get_det_id(), get_select_id());
+                inc_select_id();
+
+                match event {
+                    RecordedEvent::SelectReady{select_index} => {
+                        *select_index
+                    }
+                    e => panic!("Unexpected event RecordedEvent from ready(): {:?}", e),
+                }
+            }
+            RecordReplayMode::NoRR => {
+                unimplemented!()
+            }
+        }
     }
 }
 
