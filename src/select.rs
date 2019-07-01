@@ -1,8 +1,8 @@
 use crate::{Receiver, Sender, RECORD_MODE, RecordReplayMode};
-use crate::det_id::{get_det_id, DetThreadId};
+use crate::det_id::{get_det_id};
 use crate::det_id::get_select_id;
 use crate::det_id::inc_select_id;
-use crate::record_replay::{self, get_log_entry, RecordedEvent, SelectEvent, ReceiveEvent};
+use crate::record_replay::{self, get_log_entry, RecordedEvent, SelectEvent, FlavorMarker};
 use crossbeam_channel::SendError;
 use crossbeam_channel::RecvError;
 use log::{debug, trace};
@@ -35,8 +35,9 @@ impl<'a> Select<'a> {
         // would be enough. It still must be the "correct" index otherwise the select!
         // macro will pick the wrong match arm when picking index.
         match &r.receiver {
-            Flavor::Bounded(r) | Flavor::Unbounded(r) => self.selector.recv(& r),
             Flavor::After(r) => self.selector.recv(& r),
+            Flavor::Bounded(r) | Flavor::Unbounded(r) => self.selector.recv(& r),
+            Flavor::Never(r) => self.selector.recv(& r),
         }
     }
 
@@ -50,12 +51,13 @@ impl<'a> Select<'a> {
             }
             RecordReplayMode::Replay => {
                 // Query our log to see what index was selected!() during the replay phase.
-                let event = get_log_entry(get_det_id(), get_select_id());
+                // Flavor type not check on Select::select() but on Select::recv()
+                let (event, flavor) = get_log_entry(get_det_id(), get_select_id());
                 inc_select_id();
 
                 match event {
                     RecordedEvent::Select(select_entry) => {
-                        SelectedOperation::Replay(select_entry)
+                        SelectedOperation::Replay(select_entry, flavor)
                     }
                     e => panic!("Unexpected event entry from replay select: {:?}", e),
                 }
@@ -70,11 +72,13 @@ impl<'a> Select<'a> {
         match self.mode {
             RecordReplayMode::Record => {
                 let select_index = self.selector.ready();
-                record_replay::log(RecordedEvent::SelectReady{ select_index });
+                record_replay::log(RecordedEvent::SelectReady{ select_index },
+                                   FlavorMarker::None);
                 select_index
             }
             RecordReplayMode::Replay => {
-                let event = get_log_entry(get_det_id(), get_select_id());
+                // No channel flavor.
+                let (event, _) = get_log_entry(get_det_id(), get_select_id());
                 inc_select_id();
 
                 match event {
@@ -92,7 +96,7 @@ impl<'a> Select<'a> {
 }
 
 pub enum SelectedOperation<'a> {
-    Replay(&'a SelectEvent),
+    Replay(&'a SelectEvent, FlavorMarker),
     Record(crossbeam_channel::SelectedOperation<'a>),
     // TODO add variant for "no record"!!!
 }
@@ -113,8 +117,8 @@ impl<'a> SelectedOperation<'a> {
     /// We don't log calls to this method as they will always be determinstic.
     pub fn index(&self) -> usize {
         match self {
-            SelectedOperation::Replay(SelectEvent::Success{ selected_index, .. }) |
-            SelectedOperation::Replay(SelectEvent::RecvError{ selected_index, .. }) => {
+            SelectedOperation::Replay(SelectEvent::Success{ selected_index, .. }, _ ) |
+            SelectedOperation::Replay(SelectEvent::RecvError{ selected_index, .. }, _) => {
                 *selected_index
             }
             SelectedOperation::Record(selected) =>{
@@ -152,10 +156,12 @@ impl<'a> SelectedOperation<'a> {
                 // Our channel flavors return slightly different values...
                 // consolidate that here.
                 let msg = match &r.receiver {
-                    Flavor::Bounded(receiver) |
-                    Flavor::Unbounded(receiver) => selected.recv(receiver),
                     Flavor::After(receiver) =>
                         selected.recv(receiver).map(|msg| (get_det_id(), msg)),
+                    Flavor::Bounded(receiver) |
+                    Flavor::Unbounded(receiver) => selected.recv(receiver),
+                    Flavor::Never(receiver) => selected.recv(receiver),
+
                 };
 
                 let (msg, select_event) = match msg {
@@ -168,16 +174,22 @@ impl<'a> SelectedOperation<'a> {
                         (Err(e), SelectEvent::RecvError {selected_index})
                     }
                 };
-                record_replay::log(RecordedEvent::Select(select_event));
+                record_replay::log(RecordedEvent::Select(select_event), r.flavor());
                 msg
             }
             // We do not use the select API at all on replays. Wait for correct
             // message to come by receving on channel directly.
             // replay_recv takes care of proper buffering.
-            SelectedOperation::Replay(SelectEvent::Success{ sender_thread, .. }) => {
+            SelectedOperation::Replay(SelectEvent::Success{ sender_thread, .. }, flavor) => {
+                if flavor != r.flavor() {
+                    panic!("Expected {:?}, saw {:?}", flavor, r.flavor());
+                }
                 Ok(r.replay_recv(sender_thread))
             }
-            SelectedOperation::Replay(SelectEvent::RecvError{..}) => {
+            SelectedOperation::Replay(SelectEvent::RecvError{..}, flavor) => {
+                if flavor != r.flavor() {
+                    panic!("Expected {:?}, saw {:?}", flavor, r.flavor());
+                }
                 Err(RecvError)
             }
         }

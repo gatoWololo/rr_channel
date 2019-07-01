@@ -54,9 +54,16 @@ for example in examples:
     # Run multiple times to be sure...
     for _ in range(10):
         record = cargo_run_record(example)
-        replay = cargo_run_replay(example)
+
+        try:
+            replay = cargo_run_replay(example)
+        except:
+            # Some examples are expected to fail on replay.
+            # This is fine.
+            if "failure_expected" in example:
+                continue
 
         if record != replay:
-            print("Outputs between record and replay differ!")
+            print("ERROR: Outputs between record and replay differ!")
             sys.exit(1)
     print("[10/10] OK!")

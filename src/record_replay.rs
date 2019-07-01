@@ -10,7 +10,6 @@ use std::fs::remove_file;
 use std::collections::HashMap;
 use std::io::BufRead;
 use log::debug;
-use crossbeam_channel::TryRecvError;
 use crate::det_id::get_det_id;
 use crate::det_id::get_select_id;
 use crate::det_id::inc_select_id;
@@ -71,6 +70,15 @@ pub enum RecvTimeoutEvent {
     Timedout
 }
 
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Copy, Clone)]
+pub enum FlavorMarker {
+    Unbounded,
+    After,
+    Bounded,
+    Never,
+    None,
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct LogEntry {
     /// Thread performing the operation's unique ID.
@@ -80,12 +88,15 @@ pub struct LogEntry {
     /// (current_thread, select_id) form a unique key per entry in our map and log.
     pub select_id: u32,
     pub event: RecordedEvent,
+    pub channel: FlavorMarker,
 }
+
+
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum RecordedEvent {
     SelectReady {
-        select_index: usize
+        select_index: usize,
     },
     Select(SelectEvent),
     Receive(ReceiveEvent),
@@ -114,9 +125,7 @@ lazy_static! {
 
     /// Global map holding all indexes from the record phase.
     /// Lazily initialized on replay mode.
-    /// Maps (our_thread: DetThreadId, SELECT_ID: u32) ->
-    ///      (index: u32, sender_thread: DetThreadId)
-    pub static ref RECORDED_INDICES: HashMap<(DetThreadId, u32), RecordedEvent> = {
+    pub static ref RECORDED_INDICES: HashMap<(DetThreadId, u32), (RecordedEvent, FlavorMarker)> = {
         trace!("Initializing RECORDED_INDICES lazy static.");
         use std::io::BufReader;
 
@@ -129,7 +138,8 @@ lazy_static! {
             let line = line.expect("Unable to read recorded log file");
             let entry: LogEntry = serde_json::from_str(&line).
                 expect("Malformed log entry.");
-            recorded_indices.insert((entry.current_thread, entry.select_id), entry.event);
+            recorded_indices.insert((entry.current_thread, entry.select_id),
+                                    (entry.event, entry.channel));
         }
 
         trace!("{:?}", recorded_indices);
@@ -139,13 +149,13 @@ lazy_static! {
 
 /// Unwrap rr_channels return value from calling .recv() and log results. Should only
 /// be called in Record Mode.
-pub fn log(event: RecordedEvent) {
+pub fn log(event: RecordedEvent, channel: FlavorMarker) {
     use std::io::Write;
 
     // Write our (DET_ID, SELECT_ID) -> index to our log file
     let current_thread = get_det_id();
     let select_id = get_select_id();
-    let entry: LogEntry = LogEntry { current_thread, select_id, event };
+    let entry: LogEntry = LogEntry { current_thread, select_id, event, channel };
     let serialized = serde_json::to_string(&entry).unwrap();
 
     WRITE_LOG_FILE.
@@ -159,12 +169,12 @@ pub fn log(event: RecordedEvent) {
 }
 
 pub fn get_log_entry<'a>(our_thread: DetThreadId, select_id: u32)
-                     -> (&'a RecordedEvent) {
+                     -> (&'a RecordedEvent, FlavorMarker) {
     trace!("Replaying for our_thread: {:?}, sender_thread {:?}",
            our_thread, select_id);
-    let event = RECORDED_INDICES.get(& (our_thread, select_id)).
+    let (event, flavor) = RECORDED_INDICES.get(& (our_thread, select_id)).
         expect("Unable to fetch key.");
 
     trace!("Event fetched: {:?}", event);
-    event
+    (event, *flavor)
 }

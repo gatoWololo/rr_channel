@@ -8,7 +8,8 @@ use std::collections::VecDeque;
 use crossbeam_channel::RecvError;
 use crate::ENV_LOGGER;
 use crate::RECORD_MODE;
-use crate::record_replay::{self, RecordedEvent, ReceiveEvent, TryRecvEvent, RecvTimeoutEvent};
+use crate::record_replay::{self, RecordedEvent, ReceiveEvent, TryRecvEvent,
+                           RecvTimeoutEvent, FlavorMarker};
 use std::time::Duration;
 use std::time::Instant;
 use crossbeam_channel::{TryRecvError, RecvTimeoutError};
@@ -60,22 +61,14 @@ impl<T> Sender<T> {
     }
 }
 
-pub struct Receiver<T>{
-    /// Buffer holding values from the "wrong" thread on replay mode.
-    /// Crossbeam works with inmutable references, so we wrap in a RefCell
-    /// to hide our mutation.
-    buffer: RefCell<HashMap<DetThreadId, VecDeque<T>>>,
-    pub(crate) receiver: Flavor<T>,
-    mode: RecordReplayMode,
-}
-
 /// Holds different channels types which may have slightly different types.
 /// This is just the complexity cost of piggybacking off crossbeam_channels
 /// and their API so much.
 pub enum Flavor<T> {
-    Unbounded(crossbeam_channel::Receiver<(DetThreadId, T)>),
     After(crossbeam_channel::Receiver<T>),
     Bounded(crossbeam_channel::Receiver<(DetThreadId, T)>),
+    Never(crossbeam_channel::Receiver<(DetThreadId, T)>),
+    Unbounded(crossbeam_channel::Receiver<(DetThreadId, T)>),
 }
 
 /// Helper macro to generate methods for Flavor. Calls appropriate channel method.
@@ -85,13 +78,15 @@ macro_rules! generate_channel_method {
     ($method:ident, $error_type:ty) => {
         pub fn $method(&self) -> Result<(DetThreadId, T), $error_type> {
             match self {
-                Flavor::Unbounded(receiver) | Flavor::Bounded(receiver) => receiver.$method(),
                 Flavor::After(receiver) => {
                     match receiver.$method() {
                         Ok(msg) => Ok((get_det_id(), msg)),
                         e => e.map(|_| unreachable!()),
                     }
                 }
+                Flavor::Bounded(receiver) | Flavor::Unbounded(receiver) =>
+                    receiver.$method(),
+                Flavor::Never(receiver) => receiver.$method(),
             }
         }
     }
@@ -104,7 +99,6 @@ impl<T> Flavor<T> {
     pub fn recv_timeout(&self, duration: Duration) ->
         Result<(DetThreadId, T), RecvTimeoutError> {
             match self {
-                Flavor::Unbounded(receiver) => receiver.recv_timeout(duration),
                 Flavor::After(receiver) => {
                     match receiver.recv_timeout(duration) {
                         Ok(msg) => Ok((get_det_id(), msg)),
@@ -112,8 +106,20 @@ impl<T> Flavor<T> {
                     }
                 }
                 Flavor::Bounded(receiver) => receiver.recv_timeout(duration),
+                Flavor::Never(receiver) => receiver.recv_timeout(duration),
+                Flavor::Unbounded(receiver) => receiver.recv_timeout(duration),
+
             }
         }
+}
+
+pub struct Receiver<T>{
+    /// Buffer holding values from the "wrong" thread on replay mode.
+    /// Crossbeam works with inmutable references, so we wrap in a RefCell
+    /// to hide our mutation.
+    buffer: RefCell<HashMap<DetThreadId, VecDeque<T>>>,
+    pub(crate) receiver: Flavor<T>,
+    mode: RecordReplayMode,
 }
 
 impl<T> Receiver<T> {
@@ -129,19 +135,28 @@ impl<T> Receiver<T> {
                         (Ok(msg), ReceiveEvent::Success { sender_thread })
                     }
                 };
-                record_replay::log(RecordedEvent::Receive(event));
+                record_replay::log(RecordedEvent::Receive(event), self.flavor());
                 result
             }
 
             RecordReplayMode::Replay => {
-                let event = record_replay::get_log_entry(get_det_id(), get_select_id());
+                let (event, flavor) =
+                    record_replay::get_log_entry(get_det_id(), get_select_id());
                 inc_select_id();
 
+                if flavor != self.flavor() {
+                    panic!("Expected {:?}, saw {:?}", flavor, self.flavor());
+                }
+
                 match event {
-                    RecordedEvent::Receive(ReceiveEvent::Success{sender_thread}) => {
+                    RecordedEvent::Receive(
+                        ReceiveEvent::Success{sender_thread}) => {
                         Ok(self.replay_recv(&sender_thread))
                     }
                     RecordedEvent::Receive(ReceiveEvent::RecvError) => {
+                        if flavor != self.flavor() {
+                            panic!("Expected {:?}, saw {:?}", flavor, self.flavor());
+                        }
                         trace!("Saw RecvError on record, creating artificial one.");
                         return Err(RecvError);
                     }
@@ -205,12 +220,17 @@ impl<T> Receiver<T> {
                         (Ok(msg), TryRecvEvent::Success { sender_thread })
                     }
                 };
-                record_replay::log(RecordedEvent::TryRecv(event));
+                record_replay::log(RecordedEvent::TryRecv(event), self.flavor());
                 result
             }
             RecordReplayMode::Replay => {
-                let event = record_replay::get_log_entry(get_det_id(), get_select_id());
+                let (event, flavor) =
+                    record_replay::get_log_entry(get_det_id(), get_select_id());
                 inc_select_id();
+
+                if flavor != self.flavor() {
+                    panic!("Expected {:?}, saw {:?}", flavor, self.flavor());
+                }
 
                 match event {
                     RecordedEvent::TryRecv(TryRecvEvent::Success{sender_thread}) => {
@@ -250,12 +270,17 @@ impl<T> Receiver<T> {
                         (Ok(msg), RecvTimeoutEvent::Success{ sender_thread })
                     }
                 };
-                record_replay::log(RecordedEvent::RecvTimeout(event));
+                record_replay::log(RecordedEvent::RecvTimeout(event), self.flavor());
                 result
             }
             RecordReplayMode::Replay => {
-                let event = record_replay::get_log_entry(get_det_id(), get_select_id());
+                let (event, flavor) =
+                    record_replay::get_log_entry(get_det_id(), get_select_id());
                 inc_select_id();
+
+                if flavor != self.flavor() {
+                    panic!("Expected {:?}, saw {:?}", flavor, self.flavor());
+                }
 
                 match event {
                     RecordedEvent::RecvTimeout(RecvTimeoutEvent::Success{sender_thread}) => {
@@ -277,6 +302,15 @@ impl<T> Receiver<T> {
             RecordReplayMode::NoRR => {
                 unimplemented!()
             }
+        }
+    }
+
+    pub(crate) fn flavor(&self) -> FlavorMarker {
+        match self.receiver {
+            Flavor::Unbounded(_) => FlavorMarker::Unbounded,
+            Flavor::After(_) => FlavorMarker::After,
+            Flavor::Bounded(_) => FlavorMarker::Bounded,
+            Flavor::Never(_) => FlavorMarker::Never,
         }
     }
 }
@@ -305,6 +339,6 @@ pub fn never<T>() -> Receiver<T> {
     let mode = *RECORD_MODE;
 
     Receiver{buffer: RefCell::new(HashMap::new()),
-             receiver: Flavor::Bounded(crossbeam_channel::never()),
+             receiver: Flavor::Never(crossbeam_channel::never()),
              mode }
 }
