@@ -25,14 +25,18 @@ pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
     let (sender, receiver) = crossbeam_channel::unbounded();
     let receiver = Flavor::Unbounded(receiver);
     let mode = *RECORD_MODE;
+    let channel_type = FlavorMarker::Unbounded;
 
-    (Sender {sender, mode },
+    (Sender {sender, mode, channel_type },
      Receiver{buffer: RefCell::new(HashMap::new()), receiver, mode })
 }
 
 
 pub struct Sender<T>{
     pub(crate) sender: crossbeam_channel::Sender<(DetThreadId, T)>,
+    // Unlike Receiver, whose channels may have different types, the Sender always
+    // has the same channel type. So we just keep a marker around.
+    pub(crate) channel_type: FlavorMarker,
     mode: RecordReplayMode,
 }
 
@@ -40,7 +44,14 @@ pub struct Sender<T>{
 /// this is to avoid the constraint that T must be Clone.
 impl<T> Clone for Sender<T> {
     fn clone(&self) -> Self {
-        Sender { sender: self.sender.clone(), mode: self.mode.clone() }
+        // We are not sure how to do MPSC bounded channels as our current buffering
+        // approach break the semantics of bounded channels: i.e. for a full channel,
+        // the sender should block. Instead we just support single consumer channel.
+        if self.channel_type == FlavorMarker::Bounded {
+            panic!("MPSC for bounded channels not supported!");
+        }
+        Sender { sender: self.sender.clone(), mode: self.mode.clone(),
+                 channel_type: FlavorMarker::Unbounded }
     }
 }
 
@@ -328,7 +339,18 @@ pub fn after(duration: Duration) -> Receiver<Instant> {
 }
 
 pub fn bounded<T>(cap: usize) -> (Sender<T>, Receiver<T>) {
-    unimplemented!()
+    // Init log, happens once, lazily.
+    // Users always have to make channels before using the rest of this code.
+    // So we put it here.
+    *ENV_LOGGER;
+
+    let (sender, receiver) = crossbeam_channel::bounded(cap);
+    let receiver = Flavor::Bounded(receiver);
+    let mode = *RECORD_MODE;
+    let channel_type = FlavorMarker::Bounded;
+
+    (Sender {sender, mode, channel_type },
+     Receiver{buffer: RefCell::new(HashMap::new()), receiver, mode })
 }
 
 pub fn never<T>() -> Receiver<T> {
