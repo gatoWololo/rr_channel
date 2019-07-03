@@ -10,16 +10,16 @@ use std::fs::remove_file;
 use std::collections::HashMap;
 use std::io::BufRead;
 use log::debug;
-use crate::det_id::get_det_id;
-use crate::det_id::get_select_id;
-use crate::det_id::inc_select_id;
+use crate::thread::get_det_id;
+use crate::thread::get_select_id;
+use crate::thread::inc_select_id;
 use serde::{Serialize, Deserialize};
 
 // TODO use environment variables to generalize this.
 const LOG_FILE_NAME: &str = "/home/gatowololo/det_file.txt";
 
 /// Record representing a sucessful select from a channel. Used in replay mode.
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum SelectEvent {
     Success {
         /// For multiple producer channels we need to diffentiate who the sender was.
@@ -36,7 +36,7 @@ pub enum SelectEvent {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum ReceiveEvent {
     Success {
         /// For multiple producer channels we need to diffentiate who the sender was.
@@ -47,7 +47,7 @@ pub enum ReceiveEvent {
 }
 
 /// Record representing results of calling Receiver::try_recv()
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum TryRecvEvent {
     Success {
         /// For multiple producer channels we need to diffentiate who the sender was.
@@ -59,7 +59,7 @@ pub enum TryRecvEvent {
 }
 
 /// Record representing results of calling Receiver::recv_timeout()
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum RecvTimeoutEvent {
     Success {
         /// For multiple producer channels we need to diffentiate who the sender was.
@@ -89,11 +89,14 @@ pub struct LogEntry {
     pub select_id: u32,
     pub event: RecordedEvent,
     pub channel: FlavorMarker,
+    pub real_thread_id: String,
+    pub pid: u32,
+    pub type_name: String
 }
 
 
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum RecordedEvent {
     SelectReady {
         select_index: usize,
@@ -136,10 +139,20 @@ lazy_static! {
 
         for line in log.lines() {
             let line = line.expect("Unable to read recorded log file");
-            let entry: LogEntry = serde_json::from_str(&line).
-                expect("Malformed log entry.");
-            recorded_indices.insert((entry.current_thread, entry.select_id),
-                                    (entry.event, entry.channel));
+            let entry: LogEntry = serde_json::from_str(&line).expect("Malformed log entry.");
+
+            let key = (entry.current_thread.clone(), entry.select_id);
+            let value = (entry.event.clone(), entry.channel);
+
+            let prev = recorded_indices.insert(key, value);
+            if prev.is_some() {
+                panic!("Failed to replay. Adding key-value ({:?}, {:?}) but previous value \
+                        {:?} already exited. Hashmap entries should be unique.",
+                       (entry.current_thread, entry.select_id),
+                       (entry.event, entry.channel),
+                       prev);
+            }
+
         }
 
         trace!("{:?}", recorded_indices);
@@ -149,13 +162,15 @@ lazy_static! {
 
 /// Unwrap rr_channels return value from calling .recv() and log results. Should only
 /// be called in Record Mode.
-pub fn log(event: RecordedEvent, channel: FlavorMarker) {
+pub fn log(event: RecordedEvent, channel: FlavorMarker, type_name: &str) {
     use std::io::Write;
 
     // Write our (DET_ID, SELECT_ID) -> index to our log file
     let current_thread = get_det_id();
     let select_id = get_select_id();
-    let entry: LogEntry = LogEntry { current_thread, select_id, event, channel };
+    let tid = format!("{:?}", ::std::thread::current().id());
+    let pid = std::process::id();
+    let entry: LogEntry = LogEntry { current_thread, select_id, event, channel, real_thread_id: tid, pid, type_name: type_name.to_owned() };
     let serialized = serde_json::to_string(&entry).unwrap();
 
     WRITE_LOG_FILE.
@@ -172,8 +187,10 @@ pub fn get_log_entry<'a>(our_thread: DetThreadId, select_id: u32)
                      -> (&'a RecordedEvent, FlavorMarker) {
     trace!("Replaying for our_thread: {:?}, sender_thread {:?}",
            our_thread, select_id);
-    let (event, flavor) = RECORDED_INDICES.get(& (our_thread, select_id)).
-        expect("Unable to fetch key.");
+
+    let key = (our_thread, select_id);
+    let (event, flavor) = RECORDED_INDICES.get(& key).
+        expect(&format!("Unable to fetch key: {:?}", key));
 
     trace!("Event fetched: {:?}", event);
     (event, *flavor)

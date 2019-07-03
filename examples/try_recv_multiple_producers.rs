@@ -10,7 +10,7 @@ fn main() {
     // Avoid having channel disconnect.
     let _s = s.clone();
 
-    rr_channels::spawn(move || {
+    thread::spawn(move || {
         for _ in 0..20 {
             if let Err(_) = s.send("Thread 1") {
                 return;
@@ -20,7 +20,7 @@ fn main() {
         }
     });
 
-    rr_channels::spawn(move || {
+    thread::spawn(move || {
         for _ in 0..20 {
             if let Err(_) = s2.send("Thread 2") {
                 return;

@@ -1,7 +1,7 @@
 use crate::{Receiver, Sender, RECORD_MODE, RecordReplayMode};
-use crate::det_id::{get_det_id};
-use crate::det_id::get_select_id;
-use crate::det_id::inc_select_id;
+use crate::thread::{get_det_id};
+use crate::thread::get_select_id;
+use crate::thread::inc_select_id;
 use crate::record_replay::{self, get_log_entry, RecordedEvent, SelectEvent, FlavorMarker};
 use crossbeam_channel::SendError;
 use crossbeam_channel::RecvError;
@@ -73,7 +73,7 @@ impl<'a> Select<'a> {
             RecordReplayMode::Record => {
                 let select_index = self.selector.ready();
                 record_replay::log(RecordedEvent::SelectReady{ select_index },
-                                   FlavorMarker::None);
+                                   FlavorMarker::None, "ready");
                 select_index
             }
             RecordReplayMode::Replay => {
@@ -174,7 +174,10 @@ impl<'a> SelectedOperation<'a> {
                         (Err(e), SelectEvent::RecvError {selected_index})
                     }
                 };
-                record_replay::log(RecordedEvent::Select(select_event), r.flavor());
+
+                let type_name = unsafe {std::intrinsics::type_name::<T>()};
+                record_replay::log(RecordedEvent::Select(select_event), r.flavor(),
+                                   type_name);
                 msg
             }
             // We do not use the select API at all on replays. Wait for correct

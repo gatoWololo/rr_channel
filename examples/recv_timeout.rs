@@ -1,21 +1,23 @@
 /// Thread write to the same sender with recv_timeout
 /// Random delays to bring out more nondeterminism.
-use std::{thread, time};
+use std::time;
 use rand::Rng;
 use rr_channels::RecvTimeoutError;
+use std::thread::sleep;
+use rr_channels::thread;
 
 fn main() {
     let (s, r) = rr_channels::unbounded();
     // Avoid having channel disconnect.
     let _s = s.clone();
 
-    rr_channels::spawn(move || {
+    thread::spawn(move || {
         for _ in 0..20 {
             if let Err(_) = s.send("Thread 1") {
                 return;
             }
             let delay = rand::thread_rng().gen_range(0, 40);
-            thread::sleep(time::Duration::from_millis(delay));
+            sleep(time::Duration::from_millis(delay));
         }
     });
 

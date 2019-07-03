@@ -1,19 +1,21 @@
 /// Times out roughly 50/50%
-use std::{thread, time};
+use std::time;
 use rand::Rng;
 use std::time::Duration;
-use rr_channels::{after, unbounded};
+use rr_channels::{after, unbounded, thread};
 use rand::thread_rng;
+use std::thread::sleep;
+
 
 fn main() {
     let (s, r) = unbounded::<i32>();
     // Avoid having channel disconnect.
     let _s = s.clone();
 
-    rr_channels::spawn(move || {
+    thread::spawn(move || {
         // 50/50 chance of sleeping.
         if thread_rng().gen_bool(0.50) {
-            thread::sleep(time::Duration::from_millis(150));
+            sleep(time::Duration::from_millis(150));
         }
         s.send(1);
     });

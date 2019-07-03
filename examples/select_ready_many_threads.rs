@@ -1,3 +1,5 @@
+use rr_channels::thread;
+
 /// Spawn 10 channels.
 /// We spawn 100 threads which share the sencer end of those 10 threads for a total
 /// of 100 senders.
@@ -21,7 +23,7 @@ fn main() {
         for _ in 0..10 {
             // Ten threads have the receiver end of this channel.
             let s2 = shared.clone();
-            rr_channels::spawn(move || {
+            thread::spawn(move || {
                 for j in 0..10 {
                     s2.send(j).unwrap()
                 }

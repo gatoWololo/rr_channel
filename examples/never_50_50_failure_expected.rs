@@ -2,16 +2,17 @@
 /// Modified to 50/50 timeout.
 /// Expected to panic once in a while due to non-determinisim we cannot
 /// handle but catch when replaying.
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use rand::thread_rng;
 use rand::Rng;
+use rr_channels::thread;
+use std::thread::sleep;
 
 fn main(){
     let (s, r) = rr_channels::unbounded();
 
-    rr_channels::spawn(move || {
-        thread::sleep(Duration::from_secs(1));
+    thread::spawn(move || {
+        sleep(Duration::from_secs(1));
         s.send(1).unwrap();
     });
 

@@ -2,7 +2,7 @@ use crossbeam_channel;
 use crate::RecordReplayMode;
 use log::{trace, debug};
 use crossbeam_channel::SendError;
-use crate::det_id::*;
+use crate::thread::*;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use crossbeam_channel::RecvError;
@@ -27,8 +27,10 @@ pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
     let mode = *RECORD_MODE;
     let channel_type = FlavorMarker::Unbounded;
 
+    let type_name = unsafe {std::intrinsics::type_name::<T>()};
+    // println!("Type name: {}", type_name);
     (Sender {sender, mode, channel_type },
-     Receiver{buffer: RefCell::new(HashMap::new()), receiver, mode })
+     Receiver{buffer: RefCell::new(HashMap::new()), receiver, mode, type_name })
 }
 
 
@@ -131,6 +133,7 @@ pub struct Receiver<T>{
     buffer: RefCell<HashMap<DetThreadId, VecDeque<T>>>,
     pub(crate) receiver: Flavor<T>,
     mode: RecordReplayMode,
+    type_name: &'static str
 }
 
 impl<T> Receiver<T> {
@@ -146,7 +149,7 @@ impl<T> Receiver<T> {
                         (Ok(msg), ReceiveEvent::Success { sender_thread })
                     }
                 };
-                record_replay::log(RecordedEvent::Receive(event), self.flavor());
+                record_replay::log(RecordedEvent::Receive(event), self.flavor(), self.type_name);
                 result
             }
 
@@ -231,10 +234,11 @@ impl<T> Receiver<T> {
                         (Ok(msg), TryRecvEvent::Success { sender_thread })
                     }
                 };
-                record_replay::log(RecordedEvent::TryRecv(event), self.flavor());
+                record_replay::log(RecordedEvent::TryRecv(event), self.flavor(), self.type_name);
                 result
             }
             RecordReplayMode::Replay => {
+                let pair = (get_det_id(), get_select_id());
                 let (event, flavor) =
                     record_replay::get_log_entry(get_det_id(), get_select_id());
                 inc_select_id();
@@ -256,7 +260,7 @@ impl<T> Receiver<T> {
                                 artificial one.");
                         return Err(TryRecvError::Disconnected);
                     }
-                    _ => panic!("Unexpected event: {:?} in replay for try_recv()"),
+                    e => panic!("Unexpected event {:?}: {:?} in replay for try_recv()", pair, e),
                 }
             }
             RecordReplayMode::NoRR => {
@@ -281,7 +285,7 @@ impl<T> Receiver<T> {
                         (Ok(msg), RecvTimeoutEvent::Success{ sender_thread })
                     }
                 };
-                record_replay::log(RecordedEvent::RecvTimeout(event), self.flavor());
+                record_replay::log(RecordedEvent::RecvTimeout(event), self.flavor(), self.type_name);
                 result
             }
             RecordReplayMode::Replay => {
@@ -307,7 +311,7 @@ impl<T> Receiver<T> {
                                 artificial one.");
                         return Err(RecvTimeoutError::Disconnected);
                     }
-                    _ => panic!("Unexpected event: {:?} in replay for try_recv()"),
+                    e => panic!("Unexpected event: {:?} in replay for recv_timeout()", e),
                 }
             }
             RecordReplayMode::NoRR => {
@@ -335,7 +339,7 @@ pub fn after(duration: Duration) -> Receiver<Instant> {
 
     Receiver{buffer: RefCell::new(HashMap::new()),
              receiver: Flavor::After(crossbeam_channel::after(duration)),
-             mode }
+             mode, type_name: "after" }
 }
 
 pub fn bounded<T>(cap: usize) -> (Sender<T>, Receiver<T>) {
@@ -348,9 +352,10 @@ pub fn bounded<T>(cap: usize) -> (Sender<T>, Receiver<T>) {
     let receiver = Flavor::Bounded(receiver);
     let mode = *RECORD_MODE;
     let channel_type = FlavorMarker::Bounded;
+    let type_name = unsafe {std::intrinsics::type_name::<T>()};
 
     (Sender {sender, mode, channel_type },
-     Receiver{buffer: RefCell::new(HashMap::new()), receiver, mode })
+     Receiver{buffer: RefCell::new(HashMap::new()), receiver, mode, type_name })
 }
 
 pub fn never<T>() -> Receiver<T> {
@@ -359,8 +364,9 @@ pub fn never<T>() -> Receiver<T> {
     // So we put it here.
     *ENV_LOGGER;
     let mode = *RECORD_MODE;
+    let type_name = unsafe {std::intrinsics::type_name::<T>()};
 
     Receiver{buffer: RefCell::new(HashMap::new()),
              receiver: Flavor::Never(crossbeam_channel::never()),
-             mode }
+             mode, type_name }
 }

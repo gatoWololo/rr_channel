@@ -1,14 +1,16 @@
+use rr_channels::thread;
+
 /// Send messages with the possibility to disconnect.
 fn main() {
     let (s1, r1) = rr_channels::unbounded();
     let (s2, r2) = rr_channels::unbounded();
 
-    rr_channels::spawn(move || {
+    thread::spawn(move || {
         for _ in 0..30 {
             s1.send(1).unwrap()
         }
     });
-    rr_channels::spawn(move || {
+    thread::spawn(move || {
         for _ in 0..30 {
             s2.send(2).unwrap()
         }

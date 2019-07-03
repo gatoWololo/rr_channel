@@ -1,3 +1,4 @@
+use rr_channels::thread;
 
 fn main() {
     let (s1, r1) = rr_channels::unbounded();
@@ -8,12 +9,12 @@ fn main() {
     let s1c = s1.clone();
     let s2c = s2.clone();
 
-    rr_channels::spawn(move || {
+    thread::spawn(move || {
         for _ in 0..30 {
             s1c.send(1).unwrap()
         }
     });
-    rr_channels::spawn(move || {
+    thread::spawn(move || {
         for _ in 0..30 {
             s2c.send(2).unwrap()
         }

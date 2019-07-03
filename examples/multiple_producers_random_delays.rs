@@ -11,7 +11,7 @@ fn main() {
     let _s = s.clone();
 
     let s1 = s.clone();
-    rr_channels::spawn(move || {
+    thread::spawn(move || {
         for _ in 0..20 {
             if let Err(_) = s1.send("Thread 1") {
                 return;
@@ -22,7 +22,7 @@ fn main() {
     });
 
     let s2 = s.clone();
-    rr_channels::spawn(move || {
+    thread::spawn(move || {
         for _ in 0..20 {
             if let Err(_) = s2.send("Thread 2") {
                 return;

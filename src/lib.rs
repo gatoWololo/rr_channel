@@ -1,4 +1,5 @@
 #![feature(bind_by_move_pattern_guards)]
+#![feature(core_intrinsics)]
 
 use lazy_static::lazy_static;
 use env_logger;
@@ -7,13 +8,15 @@ use log::{trace, debug};
 mod channels;
 mod select;
 mod crossbeam_select;
-mod det_id;
+pub mod thread;
 mod record_replay;
 
+// Rexports.
+pub use thread::{current, yield_now, sleep, panicking, park, park_timeout};
 pub use record_replay::{LogEntry, WRITE_LOG_FILE, RECORDED_INDICES};
 pub use channels::{unbounded, bounded, Sender, Receiver, after, never};
-pub use det_id::{DetIdSpawner, DetThreadId, get_det_id, get_select_id,
-                 inc_select_id, spawn};
+pub use thread::{DetIdSpawner, DetThreadId, get_det_id, get_select_id,
+                 inc_select_id};
 pub use select::{Select, SelectedOperation};
 pub use crossbeam_channel::RecvTimeoutError;
 pub use crossbeam_channel::TryRecvError;
@@ -34,10 +37,10 @@ lazy_static! {
     pub static ref ENV_LOGGER: () = {
         // env_logger::init();
         // Init logger with no timestamp data or module name.
-        env_logger::Builder::from_default_env().
-            default_format_timestamp(false).
-            default_format_module_path(false).
-            init();
+        // env_logger::Builder::from_default_env().
+        //     default_format_timestamp(false).
+        //     default_format_module_path(false).
+        //     init();
     };
     /// Record type. Initialized from environment variable RR_CHANNEL.
     pub static ref RECORD_MODE: RecordReplayMode = {
