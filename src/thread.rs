@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use log::trace;
+use log::{trace, info, error};
 use std::thread;
 use std::thread::JoinHandle;
 pub use std::thread::{current, yield_now, sleep, panicking, park, park_timeout};
@@ -40,16 +40,14 @@ where
     let new_id = DET_ID_SPAWNER.with(|spawner| {
         spawner.borrow_mut().new_child_det_id()
     });
-    trace!("Assigned determinsitic id {:?} for new thread.", new_id);
-
     let new_spawner = DetIdSpawner::from(new_id.clone());
+    trace!("spawn: Assigned determinsitic id {:?} for new thread.", new_id);
 
     thread::spawn(|| {
         // Initialize TLS for this thread.
         DET_ID.with(|id| {
             *id.borrow_mut() = new_id;
         });
-
         DET_ID_SPAWNER.with(|spawner| {
             *spawner.borrow_mut() = new_spawner;
         });
@@ -80,7 +78,7 @@ impl DetIdSpawner {
 }
 
 impl From<DetThreadId> for DetIdSpawner {
-    fn from(thread_id :DetThreadId) -> DetIdSpawner {
+    fn from(thread_id: DetThreadId) -> DetIdSpawner {
         DetIdSpawner { child_index: 0, thread_id }
     }
 }
@@ -171,9 +169,9 @@ impl Builder {
         let new_id = DET_ID_SPAWNER.with(|spawner| {
             spawner.borrow_mut().new_child_det_id()
         });
-        trace!("Assigned determinsitic id {:?} for new thread.", new_id);
 
         let new_spawner = DetIdSpawner::from(new_id.clone());
+        trace!("Builder: Assigned determinsitic id {:?} for new thread.", new_id);
 
         self.builder.spawn(|| {
             // Initialize TLS for this thread.
@@ -189,11 +187,4 @@ impl Builder {
             f()
         })
     }
-
-
-    //     pub unsafe fn spawn_unchecked<'a, F, T>(self, f: F) -> Result<JoinHandle<T>> where
-    //     F: FnOnce() -> T,
-    //     F: Send + 'a,
-    //     T: Send + 'a, {
-    // }
 }

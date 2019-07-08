@@ -1,6 +1,6 @@
 use crossbeam_channel;
 use crate::RecordReplayMode;
-use log::{trace, debug};
+use log::{trace, debug, warn};
 use crossbeam_channel::SendError;
 use crate::thread::*;
 use std::collections::HashMap;
@@ -46,31 +46,48 @@ pub struct Sender<T>{
 /// this is to avoid the constraint that T must be Clone.
 impl<T> Clone for Sender<T> {
     fn clone(&self) -> Self {
-        // We are not sure how to do MPSC bounded channels as our current buffering
-        // approach break the semantics of bounded channels: i.e. for a full channel,
-        // the sender should block. Instead we just support single consumer channel.
+        // We do not support MPSC for bounded channels as the blocking semantics are
+        // more complicated to implement.
         if self.channel_type == FlavorMarker::Bounded {
-            panic!("MPSC for bounded channels not supported!");
+            warn!("MPSC for bounded channels not supported. Blocking semantics \
+                   of bounded channels will not be preseved!");
         }
         Sender { sender: self.sender.clone(), mode: self.mode.clone(),
-                 channel_type: FlavorMarker::Unbounded }
+                 channel_type: self.channel_type }
     }
 }
 
 
 impl<T> Sender<T> {
     /// Send our det thread id along with the actual message for both
-    /// record and replay. On NoRR send None.
+    /// record and replay.
     pub fn send(&self, msg: T) -> Result<(), SendError<T>> {
         // We send the det_id even when running in RecordReplayMode::NoRR,
         // but that's okay. It makes logic a little simpler.
         let det_id = get_det_id();
-        trace!("Sending our id via channel: {:?}", det_id);
+        trace!("send() with det_id {:?}", det_id);
 
         // crossbeam::send() returns Result<(), SendError<(DetThreadId, T)>>,
         // we want to make this opaque to the user. Just return the T on error.
         self.sender.send((det_id, msg)).
             map_err(|e| SendError(e.into_inner().1))
+    }
+}
+
+use std::fmt::Debug;
+trait PrintData<T> {
+    fn get_debug(&self, data: T) -> String;
+}
+
+impl<T> PrintData<T> for Sender<T> {
+    default fn get_debug(&self, data: T) -> String {
+        "No Debug Data".to_string()
+    }
+}
+
+impl<T: Debug> PrintData<T> for Sender<T> {
+    fn get_debug(&self, data: T) -> String {
+        format!("{:?}", data)
     }
 }
 
@@ -154,8 +171,11 @@ impl<T> Receiver<T> {
             }
 
             RecordReplayMode::Replay => {
+                let det_id = get_det_id();
+                let select_id = get_select_id();
+                trace!("{:?}: Replaying Receiver::recv() event.", (&det_id, &select_id));
                 let (event, flavor) =
-                    record_replay::get_log_entry(get_det_id(), get_select_id());
+                    record_replay::get_log_entry(det_id, select_id);
                 inc_select_id();
 
                 if flavor != self.flavor() {
@@ -178,7 +198,11 @@ impl<T> Receiver<T> {
                 }
             }
             RecordReplayMode::NoRR => {
-                unimplemented!()
+                match self.receiver.recv() {
+                    // Err(e) on the RHS is not the same type as Err(e) LHS.
+                    Err(e) => Err(e),
+                    Ok((_, msg)) => Ok(msg),
+                }
             }
         }
     }
@@ -234,7 +258,7 @@ impl<T> Receiver<T> {
                         (Ok(msg), TryRecvEvent::Success { sender_thread })
                     }
                 };
-                record_replay::log(RecordedEvent::TryRecv(event), self.flavor(), self.type_name);
+                // record_replay::log(RecordedEvent::TryRecv(event), self.flavor(), self.type_name);
                 result
             }
             RecordReplayMode::Replay => {
@@ -264,7 +288,10 @@ impl<T> Receiver<T> {
                 }
             }
             RecordReplayMode::NoRR => {
-                unimplemented!()
+                match self.receiver.try_recv() {
+                    Err(e) => Err(e),
+                    Ok((_, msg)) => Ok(msg),
+                }
             }
         }
     }
@@ -285,7 +312,7 @@ impl<T> Receiver<T> {
                         (Ok(msg), RecvTimeoutEvent::Success{ sender_thread })
                     }
                 };
-                record_replay::log(RecordedEvent::RecvTimeout(event), self.flavor(), self.type_name);
+                // record_replay::log(RecordedEvent::RecvTimeout(event), self.flavor(), self.type_name);
                 result
             }
             RecordReplayMode::Replay => {
@@ -315,7 +342,11 @@ impl<T> Receiver<T> {
                 }
             }
             RecordReplayMode::NoRR => {
-                unimplemented!()
+                match self.receiver.recv_timeout(timeout) {
+                    Err(e) => Err(e),
+                    Ok((_, msg)) => Ok(msg)
+                }
+
             }
         }
     }

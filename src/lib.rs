@@ -1,9 +1,10 @@
 #![feature(bind_by_move_pattern_guards)]
 #![feature(core_intrinsics)]
+#![feature(specialization)]
 
 use lazy_static::lazy_static;
 use env_logger;
-use log::{trace, debug};
+use log::{trace, debug, warn};
 
 mod channels;
 mod select;
@@ -37,28 +38,36 @@ lazy_static! {
     pub static ref ENV_LOGGER: () = {
         // env_logger::init();
         // Init logger with no timestamp data or module name.
-        // env_logger::Builder::from_default_env().
-        //     default_format_timestamp(false).
-        //     default_format_module_path(false).
-        //     init();
+        env_logger::Builder::from_default_env().
+            default_format_timestamp(false).
+            default_format_module_path(false).
+            init();
     };
     /// Record type. Initialized from environment variable RR_CHANNEL.
     pub static ref RECORD_MODE: RecordReplayMode = {
         trace!("Initializing RECORD_MODE lazy static.");
         use std::env::var;
         use std::env::VarError;
-        match var(ENV_VAR_NAME) {
+        let mode = match var(ENV_VAR_NAME) {
             Ok(value) => {
                 match value.as_str() {
                     "record" => RecordReplayMode::Record,
                     "replay" => RecordReplayMode::Replay,
-                    "none"   => RecordReplayMode::NoRR,
-                    e        => panic!("Unkown record and replay mode: {}", e),
+                    "noRR"   => RecordReplayMode::NoRR,
+                    e        => {
+                        warn!("Unkown record and replay mode: {}. Assuming noRR.", e);
+                        RecordReplayMode::NoRR
+                }
                 }
             }
             Err(VarError::NotPresent) => RecordReplayMode::NoRR,
-            Err(e @ VarError::NotUnicode(_)) =>
-                panic!("RR_CHANNEL value is not valid unicode: {}", e),
-        }
+            Err(e @ VarError::NotUnicode(_)) => {
+                warn!("RR_CHANNEL value is not valid unicode: {}, assuming noRR.", e);
+                RecordReplayMode::NoRR
+            }
+        };
+
+        trace!("Mode {:?} selected.", mode);
+        mode
     };
 }

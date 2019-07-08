@@ -5,7 +5,7 @@ use crate::thread::inc_select_id;
 use crate::record_replay::{self, get_log_entry, RecordedEvent, SelectEvent, FlavorMarker};
 use crossbeam_channel::SendError;
 use crossbeam_channel::RecvError;
-use log::{debug, trace};
+use log::{debug, trace, warn};
 use crate::channels::Flavor;
 
 
@@ -63,7 +63,7 @@ impl<'a> Select<'a> {
                 }
             }
             RecordReplayMode::NoRR => {
-                SelectedOperation::Record(self.selector.select())
+                SelectedOperation::NoRR(self.selector.select())
             }
         }
     }
@@ -89,7 +89,7 @@ impl<'a> Select<'a> {
                 }
             }
             RecordReplayMode::NoRR => {
-                unimplemented!()
+                self.selector.ready()
             }
         }
     }
@@ -98,7 +98,7 @@ impl<'a> Select<'a> {
 pub enum SelectedOperation<'a> {
     Replay(&'a SelectEvent, FlavorMarker),
     Record(crossbeam_channel::SelectedOperation<'a>),
-    // TODO add variant for "no record"!!!
+    NoRR(crossbeam_channel::SelectedOperation<'a>),
 }
 
 /// A selected operation that needs to be completed.
@@ -121,7 +121,8 @@ impl<'a> SelectedOperation<'a> {
             SelectedOperation::Replay(SelectEvent::RecvError{ selected_index, .. }, _) => {
                 *selected_index
             }
-            SelectedOperation::Record(selected) =>{
+            SelectedOperation::Record(selected) |
+            SelectedOperation::NoRR(selected) =>{
                 selected.index()
             }
         }
@@ -150,6 +151,7 @@ impl<'a> SelectedOperation<'a> {
     /// Panics if an incorrect [`Receiver`] reference is passed.
     pub fn recv<T>(self, r: &Receiver<T>) -> Result<T, RecvError> {
         let selected_index = self.index();
+
         match self {
             // Record value we get from direct use of Select API recv().
             SelectedOperation::Record(selected) => {
@@ -159,7 +161,7 @@ impl<'a> SelectedOperation<'a> {
                     Flavor::After(receiver) =>
                         selected.recv(receiver).map(|msg| (get_det_id(), msg)),
                     Flavor::Bounded(receiver) |
-                    Flavor::Unbounded(receiver) => selected.recv(receiver),
+                    Flavor::Unbounded(receiver) |
                     Flavor::Never(receiver) => selected.recv(receiver),
 
                 };
@@ -194,6 +196,21 @@ impl<'a> SelectedOperation<'a> {
                     panic!("Expected {:?}, saw {:?}", flavor, r.flavor());
                 }
                 Err(RecvError)
+            }
+            SelectedOperation::NoRR(selected) => {
+                // Our channel flavors return slightly different values...
+                // consolidate that here.
+                match &r.receiver {
+                    Flavor::After(receiver) => selected.recv(receiver),
+                    Flavor::Bounded(receiver) |
+                    Flavor::Unbounded(receiver) |
+                    Flavor::Never(receiver) =>
+                        match selected.recv(receiver) {
+                            Ok((_, msg)) => Ok(msg),
+                            // Err(e) on the RHS is not the same type as Err(e) LHS.
+                            Err(e) => Err(e),
+                        }
+                }
             }
         }
     }

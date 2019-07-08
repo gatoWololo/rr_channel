@@ -89,8 +89,8 @@ pub struct LogEntry {
     pub select_id: u32,
     pub event: RecordedEvent,
     pub channel: FlavorMarker,
-    pub real_thread_id: String,
-    pub pid: u32,
+    // pub real_thread_id: String,
+    // pub pid: u32,
     pub type_name: String
 }
 
@@ -170,7 +170,9 @@ pub fn log(event: RecordedEvent, channel: FlavorMarker, type_name: &str) {
     let select_id = get_select_id();
     let tid = format!("{:?}", ::std::thread::current().id());
     let pid = std::process::id();
-    let entry: LogEntry = LogEntry { current_thread, select_id, event, channel, real_thread_id: tid, pid, type_name: type_name.to_owned() };
+    let entry: LogEntry = LogEntry { current_thread, select_id, event, channel,
+                                     // real_thread_id: tid, pid,
+                                     type_name: type_name.to_owned() };
     let serialized = serde_json::to_string(&entry).unwrap();
 
     WRITE_LOG_FILE.
@@ -185,7 +187,7 @@ pub fn log(event: RecordedEvent, channel: FlavorMarker, type_name: &str) {
 
 pub fn get_log_entry<'a>(our_thread: DetThreadId, select_id: u32)
                      -> (&'a RecordedEvent, FlavorMarker) {
-    trace!("Replaying for our_thread: {:?}, sender_thread {:?}",
+    trace!("Replaying for our_thread: {:?}, select_id {:?}",
            our_thread, select_id);
 
     let key = (our_thread, select_id);
