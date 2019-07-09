@@ -155,7 +155,7 @@ lazy_static! {
 
         }
 
-        trace!("{:?}", recorded_indices);
+        // trace!("{:?}", recorded_indices);
         recorded_indices
     };
 }
@@ -181,19 +181,15 @@ pub fn log(event: RecordedEvent, channel: FlavorMarker, type_name: &str) {
         write_fmt(format_args!("{}\n", serialized)).
         expect("Unable to write to log file.");
 
-    debug!("Logged entry: {:?}", entry);
+    debug!("{:?} Logged entry: {:?}", entry, (get_det_id(), select_id));
     inc_select_id();
 }
 
 pub fn get_log_entry<'a>(our_thread: DetThreadId, select_id: u32)
-                     -> (&'a RecordedEvent, FlavorMarker) {
-    trace!("Replaying for our_thread: {:?}, select_id {:?}",
-           our_thread, select_id);
-
+                     -> Option<&'a (RecordedEvent, FlavorMarker)> {
     let key = (our_thread, select_id);
-    let (event, flavor) = RECORDED_INDICES.get(& key).
-        expect(&format!("Unable to fetch key: {:?}", key));
+    let log_entry = RECORDED_INDICES.get(& key);
 
-    trace!("Event fetched: {:?}", event);
-    (event, *flavor)
+    trace!("Event fetched: {:?} for keys: {:?}", log_entry, key);
+    log_entry
 }

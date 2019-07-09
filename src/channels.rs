@@ -65,7 +65,7 @@ impl<T> Sender<T> {
         // We send the det_id even when running in RecordReplayMode::NoRR,
         // but that's okay. It makes logic a little simpler.
         let det_id = get_det_id();
-        trace!("{:?} Sender::send()", det_id);
+        trace!("Sender::send()");
 
         // crossbeam::send() returns Result<(), SendError<(DetThreadId, T)>>,
         // we want to make this opaque to the user. Just return the T on error.
@@ -154,7 +154,7 @@ pub struct Receiver<T>{
 
 impl<T> Receiver<T> {
     pub fn recv(&self) -> Result<T, RecvError> {
-        trace!("{:?} Receiver::recv(), channel:", (get_det_id(), get_select_id()));
+        trace!("Receiver::recv(), channel:");
         match self.mode {
             RecordReplayMode::Record => {
                 let (result, event) = match self.receiver.recv() {
@@ -173,12 +173,13 @@ impl<T> Receiver<T> {
             RecordReplayMode::Replay => {
                 let det_id = get_det_id();
                 let select_id = get_select_id();
-                trace!("{:?}: Replaying Receiver::recv() event.", (&det_id, &select_id));
+                trace!("Replaying Receiver::recv() event.");
                 let (event, flavor) =
-                    record_replay::get_log_entry(det_id, select_id);
+                    record_replay::get_log_entry(det_id, select_id).
+                    expect("No such key in map.");
                 inc_select_id();
 
-                if flavor != self.flavor() {
+                if *flavor != self.flavor() {
                     panic!("Expected {:?}, saw {:?}", flavor, self.flavor());
                 }
 
@@ -188,7 +189,7 @@ impl<T> Receiver<T> {
                         Ok(self.replay_recv(&sender_thread))
                     }
                     RecordedEvent::Receive(ReceiveEvent::RecvError) => {
-                        if flavor != self.flavor() {
+                        if *flavor != self.flavor() {
                             panic!("Expected {:?}, saw {:?}", flavor, self.flavor());
                         }
                         trace!("Saw RecvError on record, creating artificial one.");
@@ -244,7 +245,7 @@ impl<T> Receiver<T> {
     }
 
     pub fn try_recv(&self) -> Result<T, TryRecvError> {
-        trace!("{:?} Receiver::try_recv()", get_det_id());
+        trace!("Receiver::try_recv()");
         match self.mode {
             // Call crossbeam_channel::try_recv() directly and record results.
             RecordReplayMode::Record => {
@@ -265,10 +266,11 @@ impl<T> Receiver<T> {
             RecordReplayMode::Replay => {
                 let pair = (get_det_id(), get_select_id());
                 let (event, flavor) =
-                    record_replay::get_log_entry(get_det_id(), get_select_id());
+                    record_replay::get_log_entry(get_det_id(), get_select_id()).
+                    expect("No such key in log");
                 inc_select_id();
 
-                if flavor != self.flavor() {
+                if *flavor != self.flavor() {
                     panic!("Expected {:?}, saw {:?}", flavor, self.flavor());
                 }
 
@@ -298,7 +300,7 @@ impl<T> Receiver<T> {
     }
 
     pub fn recv_timeout(&self, timeout: Duration) -> Result<T, RecvTimeoutError> {
-        trace!("{:?} Receiver::recv_timeout()", get_det_id());
+        trace!("Receiver::recv_timeout()");
         match self.mode {
             // Call crossbeam_channel method and record results.
             RecordReplayMode::Record => {
@@ -319,10 +321,11 @@ impl<T> Receiver<T> {
             }
             RecordReplayMode::Replay => {
                 let (event, flavor) =
-                    record_replay::get_log_entry(get_det_id(), get_select_id());
+                    record_replay::get_log_entry(get_det_id(), get_select_id()).
+                    expect("No such key in map.");
                 inc_select_id();
 
-                if flavor != self.flavor() {
+                if *flavor != self.flavor() {
                     panic!("Expected {:?}, saw {:?}", flavor, self.flavor());
                 }
 

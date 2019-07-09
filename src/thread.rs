@@ -42,7 +42,7 @@ where
         spawner.borrow_mut().new_child_det_id()
     });
     let new_spawner = DetIdSpawner::from(new_id.clone());
-    trace!("spawn: Assigned determinsitic id {:?} for new thread.", new_id);
+    trace!("thread::spawn() Assigned determinsitic id {:?} for new thread.", new_id);
 
     thread::spawn(|| {
         // Initialize TLS for this thread.
@@ -84,9 +84,16 @@ impl From<DetThreadId> for DetIdSpawner {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Hash)]
+#[derive(Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
 pub struct DetThreadId {
     thread_id: Vec<u32>,
+}
+
+use std::fmt::Debug;
+impl Debug for DetThreadId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        write!(f, "ThreadId{:?}", self.thread_id)
+    }
 }
 
 impl DetThreadId {

@@ -5,7 +5,7 @@ use crate::thread::inc_select_id;
 use crate::record_replay::{self, get_log_entry, RecordedEvent, SelectEvent, FlavorMarker};
 use crossbeam_channel::SendError;
 use crossbeam_channel::RecvError;
-use log::{debug, trace, warn};
+use log::{debug, trace, warn, info};
 use crate::channels::Flavor;
 
 
@@ -25,14 +25,14 @@ impl<'a> Select<'a> {
     /// Adds a send operation.
     /// Returns the index of the added operation.
     pub fn send<T>(&mut self, s: &'a Sender<T>) -> usize {
-        trace!("{:?} Select::send()", get_det_id());
+        trace!("Select::send()");
         self.selector.send(& s.sender)
     }
 
     /// Adds a receive operation.
     /// Returns the index of the added operation.
     pub fn recv<T>(&mut self, r: &'a Receiver<T>) -> usize {
-        trace!("{:?} Select::recv()", get_det_id());
+        trace!("Select::recv()");
         // We don't really need this on replay... Just returning a fake "dummy index"
         // would be enough. It still must be the "correct" index otherwise the select!
         // macro will pick the wrong match arm when picking index.
@@ -44,7 +44,7 @@ impl<'a> Select<'a> {
     }
 
     pub fn select(&mut self) -> SelectedOperation<'a> {
-        trace!("{:?} Select::select()", get_det_id());
+        trace!("Select::select()");
         match self.mode {
             RecordReplayMode::Record => {
                 // We don't know the thread_id of sender until the select is complete
@@ -55,14 +55,27 @@ impl<'a> Select<'a> {
             RecordReplayMode::Replay => {
                 // Query our log to see what index was selected!() during the replay phase.
                 // Flavor type not check on Select::select() but on Select::recv()
-                let (event, flavor) = get_log_entry(get_det_id(), get_select_id());
-                inc_select_id();
+                match get_log_entry(get_det_id(), get_select_id()) {
+                    Some((event, flavor)) => {
+                        inc_select_id();
 
-                match event {
-                    RecordedEvent::Select(select_entry) => {
-                        SelectedOperation::Replay(select_entry, flavor)
+                        match event {
+                            RecordedEvent::Select(select_entry) => {
+                                SelectedOperation::Replay(select_entry, *flavor)
+                            }
+                            e => panic!("Unexpected event entry from replay select: {:?}", e),
+                        }
                     }
-                    e => panic!("Unexpected event entry from replay select: {:?}", e),
+                    None => {
+                        info!("No entry in log. Assuming this thread blocked on this \
+                               select forever.");
+                        // No entry in log. This means that this event waiting forever
+                        // on select... Do the same here.
+                        loop {
+                            std::thread::park();
+                            info!("Spurious wakeup, going back to sleep.");
+                        }
+                    }
                 }
             }
             RecordReplayMode::NoRR => {
@@ -72,6 +85,8 @@ impl<'a> Select<'a> {
     }
 
     pub fn ready(&mut self) -> usize {
+        trace!("Select::ready()");
+
         match self.mode {
             RecordReplayMode::Record => {
                 let select_index = self.selector.ready();
@@ -81,7 +96,8 @@ impl<'a> Select<'a> {
             }
             RecordReplayMode::Replay => {
                 // No channel flavor.
-                let (event, _) = get_log_entry(get_det_id(), get_select_id());
+                let (event, _) = get_log_entry(get_det_id(), get_select_id()).
+                    expect("No such key in map.");
                 inc_select_id();
 
                 match event {
@@ -153,7 +169,7 @@ impl<'a> SelectedOperation<'a> {
     ///
     /// Panics if an incorrect [`Receiver`] reference is passed.
     pub fn recv<T>(self, r: &Receiver<T>) -> Result<T, RecvError> {
-        trace!("{:?} SelectedOperation::recv()", get_det_id());
+        trace!("SelectedOperation::recv()");
         let selected_index = self.index();
 
         match self {

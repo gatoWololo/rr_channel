@@ -5,6 +5,7 @@
 use lazy_static::lazy_static;
 use env_logger;
 use log::{trace, debug, warn};
+use std::io::Write;
 
 mod channels;
 mod select;
@@ -41,6 +42,8 @@ lazy_static! {
         env_logger::Builder::from_default_env().
             default_format_timestamp(false).
             default_format_module_path(false).
+            format(|buf, record| writeln!(buf, "({:?}, {:?}) {}", get_det_id(),
+                                          get_select_id(), record.args())).
             init();
     };
     /// Record type. Initialized from environment variable RR_CHANNEL.
