@@ -25,12 +25,14 @@ impl<'a> Select<'a> {
     /// Adds a send operation.
     /// Returns the index of the added operation.
     pub fn send<T>(&mut self, s: &'a Sender<T>) -> usize {
+        trace!("{:?} Select::send()", get_det_id());
         self.selector.send(& s.sender)
     }
 
     /// Adds a receive operation.
     /// Returns the index of the added operation.
     pub fn recv<T>(&mut self, r: &'a Receiver<T>) -> usize {
+        trace!("{:?} Select::recv()", get_det_id());
         // We don't really need this on replay... Just returning a fake "dummy index"
         // would be enough. It still must be the "correct" index otherwise the select!
         // macro will pick the wrong match arm when picking index.
@@ -42,6 +44,7 @@ impl<'a> Select<'a> {
     }
 
     pub fn select(&mut self) -> SelectedOperation<'a> {
+        trace!("{:?} Select::select()", get_det_id());
         match self.mode {
             RecordReplayMode::Record => {
                 // We don't know the thread_id of sender until the select is complete
@@ -150,6 +153,7 @@ impl<'a> SelectedOperation<'a> {
     ///
     /// Panics if an incorrect [`Receiver`] reference is passed.
     pub fn recv<T>(self, r: &Receiver<T>) -> Result<T, RecvError> {
+        trace!("{:?} SelectedOperation::recv()", get_det_id());
         let selected_index = self.index();
 
         match self {

@@ -1,8 +1,11 @@
 /// Two threads write to the same sender.
 /// Channel two is never used.
 /// Random delays to bring out more nondeterminism.
-use std::{thread, time};
+use std::time;
+use rr_channels::thread;
 use rand::Rng;
+
+// UGH Add check for threads spawned not through our API!!!!!
 
 fn main() {
     let (s, r) = rr_channels::unbounded();

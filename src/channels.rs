@@ -65,7 +65,7 @@ impl<T> Sender<T> {
         // We send the det_id even when running in RecordReplayMode::NoRR,
         // but that's okay. It makes logic a little simpler.
         let det_id = get_det_id();
-        trace!("send() with det_id {:?}", det_id);
+        trace!("{:?} Sender::send()", det_id);
 
         // crossbeam::send() returns Result<(), SendError<(DetThreadId, T)>>,
         // we want to make this opaque to the user. Just return the T on error.
@@ -135,10 +135,9 @@ impl<T> Flavor<T> {
                         e => e.map(|_| unreachable!()),
                     }
                 }
-                Flavor::Bounded(receiver) => receiver.recv_timeout(duration),
-                Flavor::Never(receiver) => receiver.recv_timeout(duration),
+                Flavor::Bounded(receiver) |
+                Flavor::Never(receiver)   |
                 Flavor::Unbounded(receiver) => receiver.recv_timeout(duration),
-
             }
         }
 }
@@ -155,6 +154,7 @@ pub struct Receiver<T>{
 
 impl<T> Receiver<T> {
     pub fn recv(&self) -> Result<T, RecvError> {
+        trace!("{:?} Receiver::recv(), channel:", (get_det_id(), get_select_id()));
         match self.mode {
             RecordReplayMode::Record => {
                 let (result, event) = match self.receiver.recv() {
@@ -244,6 +244,7 @@ impl<T> Receiver<T> {
     }
 
     pub fn try_recv(&self) -> Result<T, TryRecvError> {
+        trace!("{:?} Receiver::try_recv()", get_det_id());
         match self.mode {
             // Call crossbeam_channel::try_recv() directly and record results.
             RecordReplayMode::Record => {
@@ -258,7 +259,7 @@ impl<T> Receiver<T> {
                         (Ok(msg), TryRecvEvent::Success { sender_thread })
                     }
                 };
-                // record_replay::log(RecordedEvent::TryRecv(event), self.flavor(), self.type_name);
+                record_replay::log(RecordedEvent::TryRecv(event), self.flavor(), self.type_name);
                 result
             }
             RecordReplayMode::Replay => {
@@ -297,6 +298,7 @@ impl<T> Receiver<T> {
     }
 
     pub fn recv_timeout(&self, timeout: Duration) -> Result<T, RecvTimeoutError> {
+        trace!("{:?} Receiver::recv_timeout()", get_det_id());
         match self.mode {
             // Call crossbeam_channel method and record results.
             RecordReplayMode::Record => {
@@ -312,7 +314,7 @@ impl<T> Receiver<T> {
                         (Ok(msg), RecvTimeoutEvent::Success{ sender_thread })
                     }
                 };
-                // record_replay::log(RecordedEvent::RecvTimeout(event), self.flavor(), self.type_name);
+                record_replay::log(RecordedEvent::RecvTimeout(event), self.flavor(), self.type_name);
                 result
             }
             RecordReplayMode::Replay => {
