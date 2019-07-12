@@ -7,14 +7,14 @@ use lazy_static::lazy_static;
 use log::{debug, trace, warn};
 use std::io::Write;
 
-mod channels;
+mod channel;
 mod crossbeam_select;
 mod record_replay;
 mod select;
 pub mod thread;
 
 // Rexports.
-pub use channels::{after, bounded, never, unbounded, Receiver, Sender};
+pub use channel::{after, bounded, never, unbounded, Receiver, Sender};
 pub use crossbeam_channel::RecvError;
 pub use crossbeam_channel::RecvTimeoutError;
 pub use crossbeam_channel::TryRecvError;

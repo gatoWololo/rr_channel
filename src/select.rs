@@ -1,4 +1,4 @@
-use crate::channels::Flavor;
+use crate::channel::Flavor;
 use crate::log_trace;
 use crate::record_replay::{self, get_log_entry, FlavorMarker, RecordedEvent, SelectEvent};
 use crate::thread::get_det_id;
