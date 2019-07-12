@@ -1,8 +1,8 @@
+use rand::Rng;
+use rr_channels::TryRecvError;
 /// Multiple threads write to the same sender with try_recv()
 /// Random delays to bring out more nondeterminism.
 use std::{thread, time};
-use rand::Rng;
-use rr_channels::TryRecvError;
 
 fn main() {
     let (s, r) = rr_channels::unbounded();

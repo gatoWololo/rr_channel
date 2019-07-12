@@ -30,7 +30,9 @@ fn main() {
                     recv(r1) -> y => println!("receiver 1: {:?}", y),
                 }
             }
-        }).join().expect("Couldn't wait on inner thread.");
+        })
+        .join()
+        .expect("Couldn't wait on inner thread.");
     });
 
     h0.join().expect("Couldn't wait on thread 0");

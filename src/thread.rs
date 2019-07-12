@@ -1,15 +1,19 @@
+use log::{error, info, trace};
 use std::cell::RefCell;
-use log::{trace, info, error};
 use std::thread;
 use std::thread::JoinHandle;
-pub use std::thread::{current, yield_now, sleep, panicking, park, park_timeout};
+pub use std::thread::{current, panicking, park, park_timeout, sleep, yield_now};
 // use backtrace::Backtrace;
-use std::sync::atomic::{AtomicU32, Ordering};
 use crate::log_trace;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 pub fn get_det_id() -> DetThreadId {
-    DET_ID.with(|di| di.borrow().as_ref().
-                expect("thread_id not initialized").clone())
+    DET_ID.with(|di| {
+        di.borrow()
+            .as_ref()
+            .expect("thread_id not initialized")
+            .clone()
+    })
 }
 
 // pub fn get_det_id() -> DetThreadId {
@@ -25,9 +29,7 @@ pub fn get_det_id() -> DetThreadId {
 // }
 
 pub fn get_det_id_clone() -> Option<DetThreadId> {
-    DET_ID.with(|di| {
-        di.borrow().clone()
-    })
+    DET_ID.with(|di| di.borrow().clone())
 }
 
 pub fn get_select_id() -> u32 {
@@ -42,10 +44,7 @@ pub fn inc_select_id() {
 }
 
 pub fn get_and_inc_channel_id() -> u32 {
-    CHANNEL_ID.with(|ci|{
-        ci.fetch_add(1, Ordering::SeqCst)
-    })
-
+    CHANNEL_ID.with(|ci| ci.fetch_add(1, Ordering::SeqCst))
 }
 
 thread_local! {
@@ -68,11 +67,12 @@ where
     F: Send + 'static,
     T: Send + 'static,
 {
-    let new_id = DET_ID_SPAWNER.with(|spawner| {
-        spawner.borrow_mut().new_child_det_id()
-    });
+    let new_id = DET_ID_SPAWNER.with(|spawner| spawner.borrow_mut().new_child_det_id());
     let new_spawner = DetIdSpawner::from(new_id.clone());
-    log_trace(&format!("thread::spawn() Assigned determinsitic id {:?} for new thread.", new_id));
+    log_trace(&format!(
+        "thread::spawn() Assigned determinsitic id {:?} for new thread.",
+        new_id
+    ));
 
     thread::spawn(|| {
         // Initialize TLS for this thread.
@@ -88,7 +88,7 @@ where
     })
 }
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 pub struct DetIdSpawner {
     pub child_index: u32,
@@ -97,7 +97,10 @@ pub struct DetIdSpawner {
 
 impl DetIdSpawner {
     pub fn starting() -> DetIdSpawner {
-        DetIdSpawner { child_index: 0, thread_id: DetThreadId{ thread_id: vec![] } }
+        DetIdSpawner {
+            child_index: 0,
+            thread_id: DetThreadId { thread_id: vec![] },
+        }
     }
 
     pub fn new_child_det_id(&mut self) -> DetThreadId {
@@ -110,7 +113,10 @@ impl DetIdSpawner {
 
 impl From<DetThreadId> for DetIdSpawner {
     fn from(thread_id: DetThreadId) -> DetIdSpawner {
-        DetIdSpawner { child_index: 0, thread_id }
+        DetIdSpawner {
+            child_index: 0,
+            thread_id,
+        }
     }
 }
 
@@ -132,7 +138,7 @@ impl DetThreadId {
         // assigned a DetThreadId through the thread/Builder spawn wrappers.
         // This allows to to tell if a thread was spawned through other means
         // (not our API wrapper).
-        if(Some("main") == thread::current().name()) {
+        if (Some("main") == thread::current().name()) {
             Some(DetThreadId { thread_id: vec![] })
         } else {
             None
@@ -145,41 +151,49 @@ impl DetThreadId {
 }
 
 impl From<&[u32]> for DetThreadId {
-    fn from(thread_id :&[u32]) -> DetThreadId {
-        DetThreadId { thread_id: Vec::from(thread_id) }
+    fn from(thread_id: &[u32]) -> DetThreadId {
+        DetThreadId {
+            thread_id: Vec::from(thread_id),
+        }
     }
 }
 
 pub struct Builder {
-    builder: std::thread::Builder
+    builder: std::thread::Builder,
 }
 
 impl Builder {
     pub fn new() -> Builder {
-        Builder { builder: std::thread::Builder::new() }
+        Builder {
+            builder: std::thread::Builder::new(),
+        }
     }
-
 
     pub fn name(self, name: String) -> Builder {
-        Builder { builder: self.builder.name(name) }
+        Builder {
+            builder: self.builder.name(name),
+        }
     }
-
 
     pub fn stack_size(self, size: usize) -> Builder {
-        Builder { builder: self.builder.stack_size(size) }
+        Builder {
+            builder: self.builder.stack_size(size),
+        }
     }
 
-
-    pub fn spawn<F, T>(self, f: F) -> std::io::Result<JoinHandle<T>> where
+    pub fn spawn<F, T>(self, f: F) -> std::io::Result<JoinHandle<T>>
+    where
         F: FnOnce() -> T,
         F: Send + 'static,
-        T: Send + 'static, {
-        let new_id = DET_ID_SPAWNER.with(|spawner| {
-            spawner.borrow_mut().new_child_det_id()
-        });
+        T: Send + 'static,
+    {
+        let new_id = DET_ID_SPAWNER.with(|spawner| spawner.borrow_mut().new_child_det_id());
 
         let new_spawner = DetIdSpawner::from(new_id.clone());
-        log_trace(&format!("Builder: Assigned determinsitic id {:?} for new thread.", new_id));
+        log_trace(&format!(
+            "Builder: Assigned determinsitic id {:?} for new thread.",
+            new_id
+        ));
 
         self.builder.spawn(|| {
             // Initialize TLS for this thread.
@@ -201,7 +215,7 @@ mod tests {
     #[test]
     /// TODO Add random delays to increase amount of nondeterminism.
     fn determinitic_ids() {
-        use super::{spawn, get_det_id, DetThreadId};
+        use super::{get_det_id, spawn, DetThreadId};
         use std::thread::JoinHandle;
 
         let mut v1: Vec<JoinHandle<_>> = vec![];
@@ -213,7 +227,7 @@ mod tests {
 
                 let mut v2 = vec![];
                 for j in 0..4 {
-                    let h2 = spawn(move ||{
+                    let h2 = spawn(move || {
                         let a = [i, j];
                         assert_eq!(DetThreadId::from(&a[..]), get_det_id());
                     });

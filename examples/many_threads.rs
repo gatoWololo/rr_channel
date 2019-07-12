@@ -1,6 +1,5 @@
 use rr_channels::thread;
 
-
 /// Spawn 10 channels.
 /// We spawn 100 threads which share the sencer end of those 10 threads for a total
 /// of 100 senders.

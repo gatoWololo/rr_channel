@@ -1,7 +1,6 @@
-/// Stolen from crossbeam_channel::after example!
-
-use std::time::Duration;
 use rr_channels::{after, unbounded};
+/// Stolen from crossbeam_channel::after example!
+use std::time::Duration;
 
 fn main() {
     let (s, r) = unbounded::<i32>();

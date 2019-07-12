@@ -1,5 +1,5 @@
-use rr_channels::thread;
 use rr_channels;
+use rr_channels::thread;
 use std::time::Duration;
 
 fn main() {

@@ -1,11 +1,10 @@
+use rand::thread_rng;
+use rand::Rng;
+use rr_channels::{after, thread, unbounded};
+use std::thread::sleep;
 /// Times out roughly 50/50%
 use std::time;
-use rand::Rng;
 use std::time::Duration;
-use rr_channels::{after, unbounded, thread};
-use rand::thread_rng;
-use std::thread::sleep;
-
 
 fn main() {
     let (s, r) = unbounded::<i32>();

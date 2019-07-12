@@ -1,9 +1,9 @@
+use rand::Rng;
+use rr_channels::thread;
 /// Two threads write to the same sender.
 /// Channel two is never used.
 /// Random delays to bring out more nondeterminism.
 use std::time;
-use rr_channels::thread;
-use rand::Rng;
 
 // UGH Add check for threads spawned not through our API!!!!!
 

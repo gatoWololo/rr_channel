@@ -1,6 +1,5 @@
 use rr_channels::thread;
 
-
 /// Two threads write to the same sender.
 /// Channel two is never used.
 fn main() {

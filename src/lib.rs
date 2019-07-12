@@ -2,27 +2,28 @@
 #![feature(core_intrinsics)]
 #![feature(specialization)]
 
-use lazy_static::lazy_static;
 use env_logger;
-use log::{trace, debug, warn};
+use lazy_static::lazy_static;
+use log::{debug, trace, warn};
 use std::io::Write;
 
 mod channels;
-mod select;
 mod crossbeam_select;
-pub mod thread;
 mod record_replay;
+mod select;
+pub mod thread;
 
 // Rexports.
-pub use thread::{current, yield_now, sleep, panicking, park, park_timeout};
-pub use record_replay::{LogEntry, WRITE_LOG_FILE, RECORDED_INDICES};
-pub use channels::{unbounded, bounded, Sender, Receiver, after, never};
-pub use thread::{DetIdSpawner, DetThreadId, get_det_id, get_det_id_clone, get_select_id,
-                 inc_select_id};
-pub use select::{Select, SelectedOperation};
+pub use channels::{after, bounded, never, unbounded, Receiver, Sender};
+pub use crossbeam_channel::RecvError;
 pub use crossbeam_channel::RecvTimeoutError;
 pub use crossbeam_channel::TryRecvError;
-pub use crossbeam_channel::RecvError;
+pub use record_replay::{LogEntry, RECORDED_INDICES, WRITE_LOG_FILE};
+pub use select::{Select, SelectedOperation};
+pub use thread::{current, panicking, park, park_timeout, sleep, yield_now};
+pub use thread::{
+    get_det_id, get_det_id_clone, get_select_id, inc_select_id, DetIdSpawner, DetThreadId,
+};
 
 /// A singleton instance exists globally for the current mode via lazy_static global variable.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

@@ -1,20 +1,20 @@
+use crate::DetThreadId;
+use crate::RecordReplayMode;
+use crate::RECORD_MODE;
 use lazy_static::lazy_static;
 use log::trace;
-use crate::RecordReplayMode;
-use std::sync::Mutex;
-use crate::DetThreadId;
-use std::fs::File;
-use crate::RECORD_MODE;
 use std::fs::remove_file;
+use std::fs::File;
+use std::sync::Mutex;
 
-use std::collections::HashMap;
-use std::io::BufRead;
-use log::debug;
+use crate::log_trace;
 use crate::thread::get_det_id;
 use crate::thread::get_select_id;
 use crate::thread::inc_select_id;
-use serde::{Serialize, Deserialize};
-use crate::log_trace;
+use log::debug;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::io::BufRead;
 
 // TODO use environment variables to generalize this.
 const LOG_FILE_NAME: &str = "/home/gatowololo/det_file.txt";
@@ -27,14 +27,14 @@ pub enum SelectEvent {
         /// As the index only tells us the correct receiver end, but not who the sender was.
         sender_thread: DetThreadId,
         /// Index of selected channel for select!()
-        selected_index: usize
+        selected_index: usize,
     },
     RecvError {
         /// Index of selected channel for select!(). We still need this even onf RecvError
         /// as user might call .index() method on SelectedOperation and we need to be able
         /// to return the real index.
-        selected_index: usize
-    }
+        selected_index: usize,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -56,7 +56,7 @@ pub enum TryRecvEvent {
         sender_thread: DetThreadId,
     },
     Disconnected,
-    Empty
+    Empty,
 }
 
 /// Record representing results of calling Receiver::recv_timeout()
@@ -68,7 +68,7 @@ pub enum RecvTimeoutEvent {
         sender_thread: DetThreadId,
     },
     Disconnected,
-    Timedout
+    Timedout,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Copy, Clone)]
@@ -92,20 +92,16 @@ pub struct LogEntry {
     pub channel: FlavorMarker,
     // pub real_thread_id: String,
     // pub pid: u32,
-    pub type_name: String
+    pub type_name: String,
 }
-
-
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum RecordedEvent {
-    SelectReady {
-        select_index: usize,
-    },
+    SelectReady { select_index: usize },
     Select(SelectEvent),
     Receive(ReceiveEvent),
     TryRecv(TryRecvEvent),
-    RecvTimeout(RecvTimeoutEvent)
+    RecvTimeout(RecvTimeoutEvent),
 }
 
 lazy_static! {
@@ -172,26 +168,36 @@ pub fn log(event: RecordedEvent, channel: FlavorMarker, type_name: &str) {
     let select_id = get_select_id();
     let tid = format!("{:?}", ::std::thread::current().id());
     let pid = std::process::id();
-    let entry: LogEntry = LogEntry { current_thread, select_id, event, channel,
-                                     // real_thread_id: tid, pid,
-                                     type_name: type_name.to_owned() };
+    let entry: LogEntry = LogEntry {
+        current_thread,
+        select_id,
+        event,
+        channel,
+        // real_thread_id: tid, pid,
+        type_name: type_name.to_owned(),
+    };
     let serialized = serde_json::to_string(&entry).unwrap();
 
-    WRITE_LOG_FILE.
-        lock().
-        unwrap().
-        write_fmt(format_args!("{}\n", serialized)).
-        expect("Unable to write to log file.");
+    WRITE_LOG_FILE
+        .lock()
+        .unwrap()
+        .write_fmt(format_args!("{}\n", serialized))
+        .expect("Unable to write to log file.");
 
     debug!("{:?} Logged entry: {:?}", entry, (get_det_id(), select_id));
     inc_select_id();
 }
 
-pub fn get_log_entry<'a>(our_thread: DetThreadId, select_id: u32)
-                     -> Option<&'a (RecordedEvent, FlavorMarker)> {
+pub fn get_log_entry<'a>(
+    our_thread: DetThreadId,
+    select_id: u32,
+) -> Option<&'a (RecordedEvent, FlavorMarker)> {
     let key = (our_thread, select_id);
-    let log_entry = RECORDED_INDICES.get(& key);
+    let log_entry = RECORDED_INDICES.get(&key);
 
-    log_trace(&format!("Event fetched: {:?} for keys: {:?}", log_entry, key));
+    log_trace(&format!(
+        "Event fetched: {:?} for keys: {:?}",
+        log_entry, key
+    ));
     log_entry
 }
