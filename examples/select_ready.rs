@@ -1,9 +1,9 @@
-use rr_channels::thread;
+use rr_channel::thread;
 
 /// Test select::ready() function directly.
 fn main() {
-    let (s1, r1) = rr_channels::unbounded();
-    let (s2, r2) = rr_channels::unbounded();
+    let (s1, r1) = rr_channel::unbounded();
+    let (s2, r2) = rr_channel::unbounded();
 
     // Keep copies around to avoid disconnecting channel.
     // Else we end up getting spurious RecvError from channel.
@@ -21,7 +21,7 @@ fn main() {
         }
     });
 
-    let mut select = rr_channels::Select::new();
+    let mut select = rr_channel::Select::new();
     select.recv(&r1);
     select.recv(&r2);
     for _ in 0..60 {

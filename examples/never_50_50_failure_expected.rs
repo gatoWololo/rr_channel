@@ -1,6 +1,6 @@
 use rand::thread_rng;
 use rand::Rng;
-use rr_channels::thread;
+use rr_channel::thread;
 use std::thread::sleep;
 /// Stolen from crossbeam_channel::never example.
 /// Modified to 50/50 timeout.
@@ -9,7 +9,7 @@ use std::thread::sleep;
 use std::time::Duration;
 
 fn main() {
-    let (s, r) = rr_channels::unbounded();
+    let (s, r) = rr_channel::unbounded();
 
     thread::spawn(move || {
         sleep(Duration::from_secs(1));
@@ -25,10 +25,10 @@ fn main() {
 
     // Create a channel that times out after the specified duration.
     let timeout = duration
-        .map(|d| rr_channels::after(d))
-        .unwrap_or(rr_channels::never());
+        .map(|d| rr_channel::after(d))
+        .unwrap_or(rr_channel::never());
 
-    rr_channels::select! {
+    rr_channel::select! {
         recv(r) -> msg => println!("Message: {:?}", msg),
         recv(timeout) -> _ => println!("timed out"),
     }

@@ -1,9 +1,9 @@
-use rr_channels::thread;
+use rr_channel::thread;
 
 /// Two threads write to the same sender.
 /// Channel two is never used.
 fn main() {
-    let (s, r) = rr_channels::unbounded();
+    let (s, r) = rr_channel::unbounded();
     // Avoid having channel disconnect.
     let _s = s.clone();
 

@@ -157,7 +157,7 @@ lazy_static! {
     };
 }
 
-/// Unwrap rr_channels return value from calling .recv() and log results. Should only
+/// Unwrap rr_channel return value from calling .recv() and log results. Should only
 /// be called in Record Mode.
 pub fn log(event: RecordedEvent, channel: FlavorMarker, type_name: &str) {
     log_trace("record_replay::log()");

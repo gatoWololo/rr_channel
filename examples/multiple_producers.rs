@@ -1,10 +1,10 @@
-use rr_channels::thread;
+use rr_channel::thread;
 
 /// Two threads write to the same sender.
 /// Channel two is never used.
 fn main() {
-    let (s, r) = rr_channels::unbounded();
-    let (_s2, r2) = rr_channels::unbounded::<i32>();
+    let (s, r) = rr_channel::unbounded();
+    let (_s2, r2) = rr_channel::unbounded::<i32>();
     // Avoid having channel disconnect.
     let _s = s.clone();
 
@@ -27,7 +27,7 @@ fn main() {
     });
 
     for _ in 0..40 {
-        rr_channels::select! {
+        rr_channel::select! {
             recv(r) -> x => println!("Got value: {:?}", x),
             recv(r2) -> x => println!("Got value: {:?}", x),
         }

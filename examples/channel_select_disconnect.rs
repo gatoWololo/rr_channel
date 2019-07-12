@@ -1,9 +1,9 @@
-use rr_channels::thread;
+use rr_channel::thread;
 
 /// Send messages with the possibility to disconnect.
 fn main() {
-    let (s1, r1) = rr_channels::unbounded();
-    let (s2, r2) = rr_channels::unbounded();
+    let (s1, r1) = rr_channel::unbounded();
+    let (s2, r2) = rr_channel::unbounded();
 
     thread::spawn(move || {
         for _ in 0..30 {
@@ -17,7 +17,7 @@ fn main() {
     });
 
     for _ in 0..60 {
-        rr_channels::select! {
+        rr_channel::select! {
             recv(r1) -> x => println!("receiver 1: {:?}", x),
             recv(r2) -> y => println!("receiver 2: {:?}", y),
         }

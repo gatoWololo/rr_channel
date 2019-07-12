@@ -1,6 +1,6 @@
 use rand::thread_rng;
 use rand::Rng;
-use rr_channels::{after, thread, unbounded};
+use rr_channel::{after, thread, unbounded};
 use std::thread::sleep;
 /// Times out roughly 50/50%
 use std::time;
@@ -20,7 +20,7 @@ fn main() {
     });
 
     let timeout = Duration::from_millis(50);
-    rr_channels::select! {
+    rr_channel::select! {
         recv(r) -> msg => println!("received {:?}", msg),
         recv(after(timeout)) -> _ => println!("timed out"),
     }

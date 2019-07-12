@@ -1,13 +1,13 @@
 use rand::Rng;
-use rr_channels::thread;
-use rr_channels::RecvTimeoutError;
+use rr_channel::thread;
+use rr_channel::RecvTimeoutError;
 use std::thread::sleep;
 /// Thread write to the same sender with recv_timeout
 /// Random delays to bring out more nondeterminism.
 use std::time;
 
 fn main() {
-    let (s, r) = rr_channels::unbounded();
+    let (s, r) = rr_channel::unbounded();
     // Avoid having channel disconnect.
     let _s = s.clone();
 
