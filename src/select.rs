@@ -7,7 +7,7 @@ use crossbeam_channel::SendError;
 use crossbeam_channel::RecvError;
 use log::{debug, trace, warn, info};
 use crate::channels::Flavor;
-
+use crate::log_trace;
 
 /// Wrapper type around crossbeam's Select.
 pub struct Select<'a> {
@@ -25,14 +25,14 @@ impl<'a> Select<'a> {
     /// Adds a send operation.
     /// Returns the index of the added operation.
     pub fn send<T>(&mut self, s: &'a Sender<T>) -> usize {
-        trace!("Select::send()");
+        log_trace("Select::send()");
         self.selector.send(& s.sender)
     }
 
     /// Adds a receive operation.
     /// Returns the index of the added operation.
     pub fn recv<T>(&mut self, r: &'a Receiver<T>) -> usize {
-        trace!("Select::recv()");
+        log_trace("Select::recv()");
         // We don't really need this on replay... Just returning a fake "dummy index"
         // would be enough. It still must be the "correct" index otherwise the select!
         // macro will pick the wrong match arm when picking index.
@@ -44,7 +44,7 @@ impl<'a> Select<'a> {
     }
 
     pub fn select(&mut self) -> SelectedOperation<'a> {
-        trace!("Select::select()");
+        log_trace("Select::select()");
         match self.mode {
             RecordReplayMode::Record => {
                 // We don't know the thread_id of sender until the select is complete
@@ -63,7 +63,10 @@ impl<'a> Select<'a> {
                             RecordedEvent::Select(select_entry) => {
                                 SelectedOperation::Replay(select_entry, *flavor)
                             }
-                            e => panic!("Unexpected event entry from replay select: {:?}", e),
+                            e => {
+                                log_trace(&format!("Unexpected RecordedEvent at Select::select(): {:?}", e));
+                                panic!("Unexpected RecordedEvent at Select::select(): {:?}", e);
+                            }
                         }
                     }
                     None => {
@@ -85,7 +88,7 @@ impl<'a> Select<'a> {
     }
 
     pub fn ready(&mut self) -> usize {
-        trace!("Select::ready()");
+        log_trace("Select::ready()");
 
         match self.mode {
             RecordReplayMode::Record => {
@@ -169,7 +172,7 @@ impl<'a> SelectedOperation<'a> {
     ///
     /// Panics if an incorrect [`Receiver`] reference is passed.
     pub fn recv<T>(self, r: &Receiver<T>) -> Result<T, RecvError> {
-        trace!("SelectedOperation::recv()");
+        log_trace(&format!("SelectedOperation<{:?}>::recv()", r.id));
         let selected_index = self.index();
 
         match self {

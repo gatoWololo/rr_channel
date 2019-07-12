@@ -14,6 +14,7 @@ use crate::thread::get_det_id;
 use crate::thread::get_select_id;
 use crate::thread::inc_select_id;
 use serde::{Serialize, Deserialize};
+use crate::log_trace;
 
 // TODO use environment variables to generalize this.
 const LOG_FILE_NAME: &str = "/home/gatowololo/det_file.txt";
@@ -110,7 +111,7 @@ pub enum RecordedEvent {
 lazy_static! {
     /// Global log file which all threads write to.
     pub static ref WRITE_LOG_FILE: Mutex<File> = {
-        trace!("Initializing WRITE_LOG_FILE lazy static.");
+        log_trace("Initializing WRITE_LOG_FILE lazy static.");
 
         match *RECORD_MODE {
             RecordReplayMode::Record => {
@@ -129,7 +130,7 @@ lazy_static! {
     /// Global map holding all indexes from the record phase.
     /// Lazily initialized on replay mode.
     pub static ref RECORDED_INDICES: HashMap<(DetThreadId, u32), (RecordedEvent, FlavorMarker)> = {
-        trace!("Initializing RECORDED_INDICES lazy static.");
+        log_trace("Initializing RECORDED_INDICES lazy static.");
         use std::io::BufReader;
 
         let mut recorded_indices = HashMap::new();
@@ -155,7 +156,7 @@ lazy_static! {
 
         }
 
-        // trace!("{:?}", recorded_indices);
+        // log_trace("{:?}", recorded_indices);
         recorded_indices
     };
 }
@@ -163,9 +164,10 @@ lazy_static! {
 /// Unwrap rr_channels return value from calling .recv() and log results. Should only
 /// be called in Record Mode.
 pub fn log(event: RecordedEvent, channel: FlavorMarker, type_name: &str) {
+    log_trace("record_replay::log()");
     use std::io::Write;
 
-    // Write our (DET_ID, SELECT_ID) -> index to our log file
+    // Write our (DET_ID, EVENT_ID) -> index to our log file
     let current_thread = get_det_id();
     let select_id = get_select_id();
     let tid = format!("{:?}", ::std::thread::current().id());
@@ -190,6 +192,6 @@ pub fn get_log_entry<'a>(our_thread: DetThreadId, select_id: u32)
     let key = (our_thread, select_id);
     let log_entry = RECORDED_INDICES.get(& key);
 
-    trace!("Event fetched: {:?} for keys: {:?}", log_entry, key);
+    log_trace(&format!("Event fetched: {:?} for keys: {:?}", log_entry, key));
     log_entry
 }

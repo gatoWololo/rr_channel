@@ -17,7 +17,7 @@ mod record_replay;
 pub use thread::{current, yield_now, sleep, panicking, park, park_timeout};
 pub use record_replay::{LogEntry, WRITE_LOG_FILE, RECORDED_INDICES};
 pub use channels::{unbounded, bounded, Sender, Receiver, after, never};
-pub use thread::{DetIdSpawner, DetThreadId, get_det_id, get_select_id,
+pub use thread::{DetIdSpawner, DetThreadId, get_det_id, get_det_id_clone, get_select_id,
                  inc_select_id};
 pub use select::{Select, SelectedOperation};
 pub use crossbeam_channel::RecvTimeoutError;
@@ -39,16 +39,17 @@ lazy_static! {
     pub static ref ENV_LOGGER: () = {
         // env_logger::init();
         // Init logger with no timestamp data or module name.
-        env_logger::Builder::from_default_env().
-            default_format_timestamp(false).
-            default_format_module_path(false).
-            format(|buf, record| writeln!(buf, "({:?}, {:?}) {}", get_det_id(),
-                                          get_select_id(), record.args())).
-            init();
+        // env_logger::Builder::from_default_env().
+        //     default_format_timestamp(false).
+        //     default_format_module_path(false).
+        //     format(|buf, record| writeln!(buf, "({:?}, {:?}) {}",
+        //                                   get_det_id_clone(),
+        //                                   get_select_id(), record.args())).
+        //     init();
     };
     /// Record type. Initialized from environment variable RR_CHANNEL.
     pub static ref RECORD_MODE: RecordReplayMode = {
-        trace!("Initializing RECORD_MODE lazy static.");
+        log_trace("Initializing RECORD_MODE lazy static.");
         use std::env::var;
         use std::env::VarError;
         let mode = match var(ENV_VAR_NAME) {
@@ -70,7 +71,11 @@ lazy_static! {
             }
         };
 
-        trace!("Mode {:?} selected.", mode);
+        log_trace(&format!("Mode {:?} selected.", mode));
         mode
     };
+}
+
+fn log_trace(msg: &str) {
+    trace!("({:?}, {:?}) {}", get_det_id_clone(), get_select_id(), msg);
 }

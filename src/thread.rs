@@ -3,30 +3,60 @@ use log::{trace, info, error};
 use std::thread;
 use std::thread::JoinHandle;
 pub use std::thread::{current, yield_now, sleep, panicking, park, park_timeout};
+// use backtrace::Backtrace;
+use std::sync::atomic::{AtomicU32, Ordering};
+use crate::log_trace;
 
 pub fn get_det_id() -> DetThreadId {
     DET_ID.with(|di| di.borrow().as_ref().
                 expect("thread_id not initialized").clone())
 }
 
+// pub fn get_det_id() -> DetThreadId {
+//     DET_ID.with(|di| {
+//         match di.borrow().as_ref() {
+//             None => {
+//                 log_trace("OMAR HERE");
+//                 panic!(format!("{:?}", Backtrace::new()));
+//             }
+//             Some(di) => di.clone(),
+//         }
+//     })
+// }
+
+pub fn get_det_id_clone() -> Option<DetThreadId> {
+    DET_ID.with(|di| {
+        di.borrow().clone()
+    })
+}
+
 pub fn get_select_id() -> u32 {
-    SELECT_ID.with(|id| *id.borrow())
+    EVENT_ID.with(|id| *id.borrow())
 }
 
 /// TODO I want to express that this is mutable somehow.
 pub fn inc_select_id() {
-    SELECT_ID.with(|id| {
+    EVENT_ID.with(|id| {
         *id.borrow_mut() += 1;
     });
 }
 
+pub fn get_and_inc_channel_id() -> u32 {
+    CHANNEL_ID.with(|ci|{
+        ci.fetch_add(1, Ordering::SeqCst)
+    })
+
+}
+
 thread_local! {
     /// TODO this id is probably redundant.
-    static SELECT_ID: RefCell<u32> = RefCell::new(0);
+    static EVENT_ID: RefCell<u32> = RefCell::new(0);
 
     static DET_ID_SPAWNER: RefCell<DetIdSpawner> = RefCell::new(DetIdSpawner::starting());
     /// Unique threadID assigned at thread spawn to to each thread.
     static DET_ID: RefCell<Option<DetThreadId>> = RefCell::new(DetThreadId::new());
+    ///
+    static CHANNEL_ID: AtomicU32 = AtomicU32::new(0);
 }
 
 /// Wrapper around thread::spawn. We will need this later to assign a
@@ -42,7 +72,7 @@ where
         spawner.borrow_mut().new_child_det_id()
     });
     let new_spawner = DetIdSpawner::from(new_id.clone());
-    trace!("thread::spawn() Assigned determinsitic id {:?} for new thread.", new_id);
+    log_trace(&format!("thread::spawn() Assigned determinsitic id {:?} for new thread.", new_id));
 
     thread::spawn(|| {
         // Initialize TLS for this thread.
@@ -53,7 +83,7 @@ where
             *spawner.borrow_mut() = new_spawner;
         });
 
-        // SELECT_ID is fine starting at 0.
+        // EVENT_ID is fine starting at 0.
         f()
     })
 }
@@ -149,7 +179,7 @@ impl Builder {
         });
 
         let new_spawner = DetIdSpawner::from(new_id.clone());
-        trace!("Builder: Assigned determinsitic id {:?} for new thread.", new_id);
+        log_trace(&format!("Builder: Assigned determinsitic id {:?} for new thread.", new_id));
 
         self.builder.spawn(|| {
             // Initialize TLS for this thread.
@@ -161,7 +191,7 @@ impl Builder {
                 *spawner.borrow_mut() = new_spawner;
             });
 
-            // SELECT_ID is fine starting at 0.
+            // EVENT_ID is fine starting at 0.
             f()
         })
     }
@@ -180,14 +210,12 @@ mod tests {
             let h1 = spawn(move || {
                 let a = [i];
                 assert_eq!(DetThreadId::from(&a[..]), get_det_id());
-                // println!("({}): {:?}", i, get_det_id());
 
                 let mut v2 = vec![];
                 for j in 0..4 {
                     let h2 = spawn(move ||{
                         let a = [i, j];
                         assert_eq!(DetThreadId::from(&a[..]), get_det_id());
-                        // println!("({}, {}): Det Thread Id: {:?}", i, j, get_det_id());
                     });
                     v2.push(h2);
                 }
