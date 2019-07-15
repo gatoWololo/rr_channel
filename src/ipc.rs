@@ -7,7 +7,7 @@ use std::collections::hash_map::HashMap;
 use crate::thread::DetThreadId;
 use std::collections::VecDeque;
 use crate::RecordReplayMode;
-use crate::record_replay::{self, RecordedEvent, RecordReplay, IpcDummyError};
+use crate::record_replay::{self, Recorded, RecordReplay, IpcDummyError};
 use crate::record_replay::RecordMetadata;
 
 #[derive(Debug)]
@@ -23,20 +23,20 @@ where
 impl<T> RecordReplay<T, Error> for IpcReceiver<T>
     where T: for<'de> Deserialize<'de> + Serialize {
     fn to_recorded_event(&self, event: Result<(DetThreadId, T), Error>) ->
-        (Result<T, Error>, RecordedEvent) {
+        (Result<T, Error>, Recorded) {
             match event {
                 Ok((sender_thread, msg)) =>
-                    (Ok(msg), RecordedEvent::IpcRecvSucc { sender_thread }),
+                    (Ok(msg), Recorded::IpcRecvSucc { sender_thread }),
                 Err(e) =>
-                    (Err(e), RecordedEvent::IpcRecvErr(IpcDummyError)),
+                    (Err(e), Recorded::IpcRecvErr(IpcDummyError)),
             }
         }
 
-    fn expected_recorded_events(&self, event: RecordedEvent) -> Result<T, Error> {
+    fn expected_recorded_events(&self, event: Recorded) -> Result<T, Error> {
         match event {
-            RecordedEvent::IpcRecvSucc {sender_thread} =>
+            Recorded::IpcRecvSucc {sender_thread} =>
                 Ok(self.replay_recv(&sender_thread)),
-            RecordedEvent::IpcRecvErr(e) =>
+            Recorded::IpcRecvErr(e) =>
                 Err(Box::new(ErrorKind::Custom("TODO".to_string()))),
             _ => panic!("Unexpected event: {:?} in replay for recv()",)
         }

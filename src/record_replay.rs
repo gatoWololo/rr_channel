@@ -54,7 +54,7 @@ pub struct LogEntry {
     /// Unique per-thread identifier given to every select dynamic instance.
     /// (current_thread, select_id) form a unique key per entry in our map and log.
     pub select_id: u32,
-    pub event: RecordedEvent,
+    pub event: Recorded,
     pub channel: FlavorMarker,
     // pub real_thread_id: String,
     // pub pid: u32,
@@ -83,7 +83,7 @@ pub struct RecvErrorDef {}
 pub struct IpcDummyError;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub enum RecordedEvent {
+pub enum Recorded {
     SelectReady { select_index: usize },
     Select(SelectEvent),
 
@@ -125,7 +125,7 @@ lazy_static! {
 
     /// Global map holding all indexes from the record phase.
     /// Lazily initialized on replay mode.
-    pub static ref RECORDED_INDICES: HashMap<(DetThreadId, u32), (RecordedEvent, FlavorMarker)> = {
+    pub static ref RECORDED_INDICES: HashMap<(DetThreadId, u32), (Recorded, FlavorMarker)> = {
         log_trace("Initializing RECORDED_INDICES lazy static.");
         use std::io::BufReader;
 
@@ -159,7 +159,7 @@ lazy_static! {
 
 /// Unwrap rr_channel return value from calling .recv() and log results. Should only
 /// be called in Record Mode.
-pub fn log(event: RecordedEvent, channel: FlavorMarker, type_name: &str) {
+pub fn log(event: Recorded, channel: FlavorMarker, type_name: &str) {
     log_trace("record_replay::log()");
     use std::io::Write;
 
@@ -191,7 +191,7 @@ pub fn log(event: RecordedEvent, channel: FlavorMarker, type_name: &str) {
 pub fn get_log_entry<'a>(
     our_thread: DetThreadId,
     select_id: u32,
-) -> Option<&'a (RecordedEvent, FlavorMarker)> {
+) -> Option<&'a (Recorded, FlavorMarker)> {
     let key = (our_thread, select_id);
     let log_entry = RECORDED_INDICES.get(&key);
 
@@ -250,9 +250,9 @@ pub trait RecordReplay<T, E: Error> {
     }
 
     fn to_recorded_event(&self, event: Result<(DetThreadId, T), E>) ->
-        (Result<T, E>, RecordedEvent);
+        (Result<T, E>, Recorded);
 
-    fn expected_recorded_events(&self, event: RecordedEvent) -> Result<T, E>;
+    fn expected_recorded_events(&self, event: Recorded) -> Result<T, E>;
 
     fn replay_recv(&self, sender: &DetThreadId) -> T;
 }

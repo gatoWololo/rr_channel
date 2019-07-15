@@ -1,6 +1,6 @@
 use crate::log_trace;
 use crate::record_replay::{
-    self, FlavorMarker, RecordedEvent,
+    self, FlavorMarker, Recorded,
 };
 use crate::thread::get_and_inc_channel_id;
 use crate::thread::*;
@@ -139,8 +139,6 @@ macro_rules! generate_channel_method {
     }
 }
 
-
-
 impl<T> Flavor<T> {
     generate_channel_method!(recv, RecvError);
     generate_channel_method!(try_recv, TryRecvError);
@@ -175,20 +173,20 @@ macro_rules! impl_RecordReplay {
     ($err_type:ty, $succ: ident, $err:ident) => {
         impl<T> RecordReplay<T, $err_type> for Receiver<T> {
             fn to_recorded_event(&self, event: Result<(DetThreadId, T), $err_type>) ->
-                (Result<T, $err_type>, RecordedEvent) {
+                (Result<T, $err_type>, Recorded) {
                     match event {
                         Ok((sender_thread, msg)) =>
-                            (Ok(msg), RecordedEvent::$succ { sender_thread }),
+                            (Ok(msg), Recorded::$succ { sender_thread }),
                         Err(e) =>
-                            (Err(e), RecordedEvent::$err(e)),
+                            (Err(e), Recorded::$err(e)),
                     }
                 }
 
-            fn expected_recorded_events(&self, event: RecordedEvent) -> Result<T, $err_type> {
+            fn expected_recorded_events(&self, event: Recorded) -> Result<T, $err_type> {
                 match event {
-                    RecordedEvent::$succ {sender_thread} =>
+                    Recorded::$succ {sender_thread} =>
                         Ok(self.replay_recv(&sender_thread)),
-                    RecordedEvent::$err(e) => Err(e),
+                    Recorded::$err(e) => Err(e),
                     _ => panic!("Unexpected event: {:?} in replay for recv()",)
                 }
 
@@ -339,7 +337,7 @@ pub fn never<T>() -> Receiver<T> {
     }
 }
 
-pub(crate) fn get_log_event() -> (RecordedEvent, FlavorMarker) {
+pub(crate) fn get_log_event() -> (Recorded, FlavorMarker) {
     let det_id = get_det_id();
     let select_id = get_select_id();
 

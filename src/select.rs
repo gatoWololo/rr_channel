@@ -1,6 +1,6 @@
 use crate::channel::Flavor;
 use crate::log_trace;
-use crate::record_replay::{self, get_log_entry, FlavorMarker, RecordedEvent, SelectEvent};
+use crate::record_replay::{self, get_log_entry, FlavorMarker, Recorded, SelectEvent};
 use crate::thread::get_det_id;
 use crate::thread::get_select_id;
 use crate::thread::inc_select_id;
@@ -63,15 +63,15 @@ impl<'a> Select<'a> {
                         inc_select_id();
 
                         match event {
-                            RecordedEvent::Select(select_entry) => {
+                            Recorded::Select(select_entry) => {
                                 SelectedOperation::Replay(select_entry, *flavor)
                             },
                             e => {
                                 log_trace(&format!(
-                                    "Unexpected RecordedEvent at Select::select(): {:?}",
+                                    "Unexpected Recorded at Select::select(): {:?}",
                                     e
                                 ));
-                                panic!("Unexpected RecordedEvent at Select::select(): {:?}", e);
+                                panic!("Unexpected Recorded at Select::select(): {:?}", e);
                             },
                         }
                     },
@@ -100,7 +100,7 @@ impl<'a> Select<'a> {
             RecordReplayMode::Record => {
                 let select_index = self.selector.ready();
                 record_replay::log(
-                    RecordedEvent::SelectReady { select_index },
+                    Recorded::SelectReady { select_index },
                     FlavorMarker::None,
                     "ready",
                 );
@@ -113,8 +113,8 @@ impl<'a> Select<'a> {
                 inc_select_id();
 
                 match event {
-                    RecordedEvent::SelectReady { select_index } => *select_index,
-                    e => panic!("Unexpected event RecordedEvent from ready(): {:?}", e),
+                    Recorded::SelectReady { select_index } => *select_index,
+                    e => panic!("Unexpected event Recorded from ready(): {:?}", e),
                 }
             },
             RecordReplayMode::NoRR => self.selector.ready(),
@@ -207,7 +207,7 @@ impl<'a> SelectedOperation<'a> {
                 };
 
                 let type_name = unsafe { std::intrinsics::type_name::<T>() };
-                record_replay::log(RecordedEvent::Select(select_event),
+                record_replay::log(Recorded::Select(select_event),
                                    r.flavor(),
                                    type_name);
                 msg
