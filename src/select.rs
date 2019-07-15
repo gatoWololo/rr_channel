@@ -54,7 +54,7 @@ impl<'a> Select<'a> {
                 // when user call recv() on SelectedOperation. So do nothing here.
                 // Index will be recorded there.
                 SelectedOperation::Record(self.selector.select())
-            },
+            }
             RecordReplayMode::Replay => {
                 // Query our log to see what index was selected!() during the replay phase.
                 // Flavor type not check on Select::select() but on Select::recv()
@@ -65,16 +65,16 @@ impl<'a> Select<'a> {
                         match event {
                             Recorded::Select(select_entry) => {
                                 SelectedOperation::Replay(select_entry, *flavor)
-                            },
+                            }
                             e => {
                                 log_trace(&format!(
                                     "Unexpected Recorded at Select::select(): {:?}",
                                     e
                                 ));
                                 panic!("Unexpected Recorded at Select::select(): {:?}", e);
-                            },
+                            }
                         }
-                    },
+                    }
                     None => {
                         info!(
                             "No entry in log. Assuming this thread blocked on this \
@@ -86,9 +86,9 @@ impl<'a> Select<'a> {
                             std::thread::park();
                             info!("Spurious wakeup, going back to sleep.");
                         }
-                    },
+                    }
                 }
-            },
+            }
             RecordReplayMode::NoRR => SelectedOperation::NoRR(self.selector.select()),
         }
     }
@@ -105,7 +105,7 @@ impl<'a> Select<'a> {
                     "ready",
                 );
                 select_index
-            },
+            }
             RecordReplayMode::Replay => {
                 // No channel flavor.
                 let (event, _) =
@@ -116,7 +116,7 @@ impl<'a> Select<'a> {
                     Recorded::SelectReady { select_index } => *select_index,
                     e => panic!("Unexpected event Recorded from ready(): {:?}", e),
                 }
-            },
+            }
             RecordReplayMode::NoRR => self.selector.ready(),
         }
     }
@@ -144,13 +144,13 @@ impl<'a> SelectedOperation<'a> {
     /// We don't log calls to this method as they will always be determinstic.
     pub fn index(&self) -> usize {
         match self {
-            SelectedOperation::Replay(SelectEvent::Success { selected_index, .. }, _) |
-            SelectedOperation::Replay(SelectEvent::RecvError { selected_index, .. }, _) => {
+            SelectedOperation::Replay(SelectEvent::Success { selected_index, .. }, _)
+            | SelectedOperation::Replay(SelectEvent::RecvError { selected_index, .. }, _) => {
                 *selected_index
-            },
+            }
             SelectedOperation::Record(selected) | SelectedOperation::NoRR(selected) => {
                 selected.index()
-            },
+            }
         }
     }
 
@@ -187,10 +187,10 @@ impl<'a> SelectedOperation<'a> {
                 let msg = match &r.receiver {
                     Flavor::After(receiver) => {
                         selected.recv(receiver).map(|msg| (get_det_id(), msg))
-                    },
-                    Flavor::Bounded(receiver) |
-                    Flavor::Unbounded(receiver) |
-                    Flavor::Never(receiver) => selected.recv(receiver),
+                    }
+                    Flavor::Bounded(receiver)
+                    | Flavor::Unbounded(receiver)
+                    | Flavor::Never(receiver) => selected.recv(receiver),
                 };
 
                 let (msg, select_event) = match msg {
@@ -207,11 +207,9 @@ impl<'a> SelectedOperation<'a> {
                 };
 
                 let type_name = unsafe { std::intrinsics::type_name::<T>() };
-                record_replay::log(Recorded::Select(select_event),
-                                   r.flavor(),
-                                   type_name);
+                record_replay::log(Recorded::Select(select_event), r.flavor(), type_name);
                 msg
-            },
+            }
             // We do not use the select API at all on replays. Wait for correct
             // message to come by receving on channel directly.
             // replay_recv takes care of proper buffering.
@@ -220,23 +218,23 @@ impl<'a> SelectedOperation<'a> {
                     panic!("Expected {:?}, saw {:?}", flavor, r.flavor());
                 }
                 Ok(r.replay_recv(sender_thread))
-            },
+            }
             SelectedOperation::Replay(SelectEvent::RecvError { .. }, flavor) => {
                 if flavor != r.flavor() {
                     panic!("Expected {:?}, saw {:?}", flavor, r.flavor());
                 }
                 Err(RecvError)
-            },
+            }
             SelectedOperation::NoRR(selected) => {
                 // Our channel flavors return slightly different values...
                 // consolidate that here.
                 match &r.receiver {
                     Flavor::After(receiver) => selected.recv(receiver),
-                    Flavor::Bounded(receiver) |
-                    Flavor::Unbounded(receiver) |
-                    Flavor::Never(receiver) => selected.recv(receiver).map(|v| v.1),
+                    Flavor::Bounded(receiver)
+                    | Flavor::Unbounded(receiver)
+                    | Flavor::Never(receiver) => selected.recv(receiver).map(|v| v.1),
                 }
-            },
+            }
         }
     }
 }

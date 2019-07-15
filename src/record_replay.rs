@@ -10,11 +10,11 @@ use crate::log_trace;
 use crate::thread::get_det_id;
 use crate::thread::get_select_id;
 use crate::thread::inc_select_id;
+use crossbeam_channel::{RecvError, RecvTimeoutError, TryRecvError};
 use log::debug;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::BufRead;
-use crossbeam_channel::{RecvTimeoutError, TryRecvError, RecvError};
 
 // TODO use environment variables to generalize this.
 const LOG_FILE_NAME: &str = "/home/gatowololo/det_file.txt";
@@ -85,22 +85,32 @@ pub struct IpcDummyError;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum Recorded {
-    SelectReady { select_index: usize },
+    SelectReady {
+        select_index: usize,
+    },
     Select(SelectEvent),
 
-    RecvSucc{sender_thread: DetThreadId},
+    RecvSucc {
+        sender_thread: DetThreadId,
+    },
     #[serde(with = "RecvErrorDef")]
     RecvErr(RecvError),
 
-    TryRecvSucc{sender_thread: DetThreadId},
+    TryRecvSucc {
+        sender_thread: DetThreadId,
+    },
     #[serde(with = "TryRecvErrorDef")]
     TryRecvErr(TryRecvError),
 
-    RecvTimeoutSucc{sender_thread: DetThreadId},
+    RecvTimeoutSucc {
+        sender_thread: DetThreadId,
+    },
     #[serde(with = "RecvTimeoutErrorDef")]
     RecvTimeoutErr(RecvTimeoutError),
 
-    IpcRecvSucc{sender_thread: DetThreadId},
+    IpcRecvSucc {
+        sender_thread: DetThreadId,
+    },
     // #[serde(with = "ErrorKindDef")]
     IpcRecvErr(IpcDummyError),
 }
@@ -219,15 +229,16 @@ pub struct RecordMetadata {
     pub(crate) id: (DetThreadId, u32),
 }
 
-use std::error::Error;
-use crate::record_replay;
 use crate::channel::get_log_event;
+use crate::record_replay;
+use std::error::Error;
 
 pub trait RecordReplay<T, E: Error> {
-    fn record_replay(&self,
-                     metadata: &RecordMetadata,
-                     func: impl FnOnce() -> Result<(DetThreadId, T), E>)
-                     -> Result<T, E> {
+    fn record_replay(
+        &self,
+        metadata: &RecordMetadata,
+        func: impl FnOnce() -> Result<(DetThreadId, T), E>,
+    ) -> Result<T, E> {
         log_trace(&format!("Receiver<{:?}>::TODO()", metadata.id));
 
         match metadata.mode {
@@ -244,27 +255,25 @@ pub trait RecordReplay<T, E: Error> {
 
                 self.expected_recorded_events(event)
             }
-            RecordReplayMode::NoRR => {
-                func().map(|v| v.1)
-            }
+            RecordReplayMode::NoRR => func().map(|v| v.1),
         }
     }
 
-    fn to_recorded_event(&self, event: Result<(DetThreadId, T), E>) ->
-        (Result<T, E>, Recorded);
+    fn to_recorded_event(&self, event: Result<(DetThreadId, T), E>) -> (Result<T, E>, Recorded);
 
     fn expected_recorded_events(&self, event: Recorded) -> Result<T, E>;
 
     fn replay_recv(&self, sender: &DetThreadId) -> T;
 }
 
-use std::collections::VecDeque;
 use std::cell::RefMut;
+use std::collections::VecDeque;
 
-pub fn replay_recv<T, E: Error>(sender: &DetThreadId,
-                      mut buffer: RefMut<HashMap<DetThreadId, VecDeque<T>>>,
-                      recv: impl Fn() -> Result<(DetThreadId, T), E>)
-                      -> T {
+pub fn replay_recv<T, E: Error>(
+    sender: &DetThreadId,
+    mut buffer: RefMut<HashMap<DetThreadId, VecDeque<T>>>,
+    recv: impl Fn() -> Result<(DetThreadId, T), E>,
+) -> T {
     // Check our buffer to see if this value is already here.
     if let Some(entries) = buffer.get_mut(sender) {
         if let Some(entry) = entries.pop_front() {
@@ -289,12 +298,11 @@ pub fn replay_recv<T, E: Error>(sender: &DetThreadId,
                     let queue = buffer.entry(det_id).or_insert(VecDeque::new());
                     queue.push_back(msg);
                 }
-            },
+            }
             Err(e) => {
                 debug!("Saw Err({:?})", e);
                 // Got a disconnected message. Ignore.
-            },
+            }
         }
     }
 }
-

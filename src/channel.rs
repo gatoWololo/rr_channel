@@ -1,7 +1,5 @@
 use crate::log_trace;
-use crate::record_replay::{
-    self, FlavorMarker, Recorded,
-};
+use crate::record_replay::{self, FlavorMarker, Recorded};
 use crate::thread::get_and_inc_channel_id;
 use crate::thread::*;
 use crate::RecordReplayMode;
@@ -14,9 +12,9 @@ use crossbeam_channel::{RecvTimeoutError, TryRecvError};
 use log::{debug, trace, warn};
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::error::Error;
 use std::time::Duration;
 use std::time::Instant;
-use std::error::Error;
 
 use std::cell::RefCell;
 
@@ -37,7 +35,7 @@ pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
             channel_type,
             id: id.clone(),
         },
-        Receiver::new(receiver, id)
+        Receiver::new(receiver, id),
     )
 }
 
@@ -143,21 +141,18 @@ impl<T> Flavor<T> {
     generate_channel_method!(recv, RecvError);
     generate_channel_method!(try_recv, TryRecvError);
 
-    pub fn recv_timeout(&self, duration: Duration) ->
-        Result<(DetThreadId, T), RecvTimeoutError> {
-            log_trace("Flavor::recv_timeout");
-            match self {
-                Flavor::After(receiver) => match receiver.recv_timeout(duration) {
-                    Ok(msg) => Ok((get_det_id(), msg)),
-                    e => e.map(|_| unreachable!()),
-                },
-                Flavor::Bounded(receiver) |
-                Flavor::Never(receiver) |
-                Flavor::Unbounded(receiver) => {
-                    receiver.recv_timeout(duration)
-                },
+    pub fn recv_timeout(&self, duration: Duration) -> Result<(DetThreadId, T), RecvTimeoutError> {
+        log_trace("Flavor::recv_timeout");
+        match self {
+            Flavor::After(receiver) => match receiver.recv_timeout(duration) {
+                Ok(msg) => Ok((get_det_id(), msg)),
+                e => e.map(|_| unreachable!()),
+            },
+            Flavor::Bounded(receiver) | Flavor::Never(receiver) | Flavor::Unbounded(receiver) => {
+                receiver.recv_timeout(duration)
             }
         }
+    }
 }
 
 pub struct Receiver<T> {
@@ -172,32 +167,31 @@ pub struct Receiver<T> {
 macro_rules! impl_RecordReplay {
     ($err_type:ty, $succ: ident, $err:ident) => {
         impl<T> RecordReplay<T, $err_type> for Receiver<T> {
-            fn to_recorded_event(&self, event: Result<(DetThreadId, T), $err_type>) ->
-                (Result<T, $err_type>, Recorded) {
-                    match event {
-                        Ok((sender_thread, msg)) =>
-                            (Ok(msg), Recorded::$succ { sender_thread }),
-                        Err(e) =>
-                            (Err(e), Recorded::$err(e)),
-                    }
+            fn to_recorded_event(
+                &self,
+                event: Result<(DetThreadId, T), $err_type>,
+            ) -> (Result<T, $err_type>, Recorded) {
+                match event {
+                    Ok((sender_thread, msg)) => (Ok(msg), Recorded::$succ { sender_thread }),
+                    Err(e) => (Err(e), Recorded::$err(e)),
                 }
+            }
 
             fn expected_recorded_events(&self, event: Recorded) -> Result<T, $err_type> {
                 match event {
-                    Recorded::$succ {sender_thread} =>
-                        Ok(self.replay_recv(&sender_thread)),
+                    Recorded::$succ { sender_thread } => Ok(self.replay_recv(&sender_thread)),
                     Recorded::$err(e) => Err(e),
-                    _ => panic!("Unexpected event: {:?} in replay for recv()",)
+                    _ => panic!("Unexpected event: {:?} in replay for recv()",),
                 }
-
             }
 
             fn replay_recv(&self, sender: &DetThreadId) -> T {
-                record_replay::replay_recv(&sender, self.buffer.borrow_mut(),
-                || self.receiver.recv())
+                record_replay::replay_recv(&sender, self.buffer.borrow_mut(), || {
+                    self.receiver.recv()
+                })
             }
         }
-    }
+    };
 }
 
 use crate::record_replay::RecordMetadata;
@@ -217,8 +211,8 @@ impl<T> Receiver<T> {
                 type_name: unsafe { std::intrinsics::type_name::<T>() },
                 flavor,
                 mode: *RECORD_MODE,
-                id: (get_det_id(), get_and_inc_channel_id())
-            }
+                id: (get_det_id(), get_and_inc_channel_id()),
+            },
         }
     }
 
@@ -270,11 +264,11 @@ impl<T> Receiver<T> {
                         let queue = borrow.entry(det_id).or_insert(VecDeque::new());
                         queue.push_back(msg);
                     }
-                },
+                }
                 Err(e) => {
                     debug!("Saw Err({:?})", e);
                     // Got a disconnected message. Ignore.
-                },
+                }
             }
         }
     }
@@ -295,8 +289,10 @@ pub fn after(duration: Duration) -> Receiver<Instant> {
     // So we put it here.
     *ENV_LOGGER;
 
-    Receiver::new(Flavor::After(crossbeam_channel::after(duration)),
-                  (get_det_id(), get_and_inc_channel_id()))
+    Receiver::new(
+        Flavor::After(crossbeam_channel::after(duration)),
+        (get_det_id(), get_and_inc_channel_id()),
+    )
 }
 
 pub fn bounded<T>(cap: usize) -> (Sender<T>, Receiver<T>) {
@@ -318,7 +314,7 @@ pub fn bounded<T>(cap: usize) -> (Sender<T>, Receiver<T>) {
             channel_type,
             id: id.clone(),
         },
-        Receiver::new(receiver, id)
+        Receiver::new(receiver, id),
     )
 }
 
@@ -332,8 +328,8 @@ pub fn never<T>() -> Receiver<T> {
             type_name: unsafe { std::intrinsics::type_name::<T>() },
             flavor: FlavorMarker::Never,
             mode: *RECORD_MODE,
-            id: (get_det_id(), get_and_inc_channel_id())
-        }
+            id: (get_det_id(), get_and_inc_channel_id()),
+        },
     }
 }
 
@@ -342,9 +338,8 @@ pub(crate) fn get_log_event() -> (Recorded, FlavorMarker) {
     let select_id = get_select_id();
 
     let (event, flavor) =
-        record_replay::get_log_entry(det_id, select_id).
-        expect("No such key in map.");
+        record_replay::get_log_entry(det_id, select_id).expect("No such key in map.");
     inc_select_id();
 
-    (event.clone(), *flavor)}
-
+    (event.clone(), *flavor)
+}

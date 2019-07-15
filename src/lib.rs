@@ -8,9 +8,9 @@ use log::{debug, trace, warn};
 
 mod channel;
 mod crossbeam_select;
+pub mod ipc;
 mod record_replay;
 mod select;
-pub mod ipc;
 pub mod thread;
 
 // Rexports.
@@ -18,13 +18,13 @@ pub use channel::{after, bounded, never, unbounded, Receiver, Sender};
 pub use crossbeam_channel::RecvError;
 pub use crossbeam_channel::RecvTimeoutError;
 pub use crossbeam_channel::TryRecvError;
+pub use ipc::channel;
 pub use record_replay::{LogEntry, RECORDED_INDICES, WRITE_LOG_FILE};
 pub use select::{Select, SelectedOperation};
 pub use thread::{current, panicking, park, park_timeout, sleep, yield_now};
 pub use thread::{
     get_det_id, get_det_id_clone, get_select_id, inc_select_id, DetIdSpawner, DetThreadId,
 };
-pub use ipc::{channel};
 
 /// A singleton instance exists globally for the current mode via lazy_static global variable.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -81,4 +81,3 @@ lazy_static! {
 fn log_trace(msg: &str) {
     trace!("({:?}, {:?}) {}", get_det_id_clone(), get_select_id(), msg);
 }
-
