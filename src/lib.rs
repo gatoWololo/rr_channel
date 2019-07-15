@@ -5,12 +5,12 @@
 use env_logger;
 use lazy_static::lazy_static;
 use log::{debug, trace, warn};
-use std::io::Write;
 
 mod channel;
 mod crossbeam_select;
 mod record_replay;
 mod select;
+mod ipc;
 pub mod thread;
 
 // Rexports.
@@ -80,3 +80,4 @@ lazy_static! {
 fn log_trace(msg: &str) {
     trace!("({:?}, {:?}) {}", get_det_id_clone(), get_select_id(), msg);
 }
+

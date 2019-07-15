@@ -138,7 +138,7 @@ impl DetThreadId {
         // assigned a DetThreadId through the thread/Builder spawn wrappers.
         // This allows to to tell if a thread was spawned through other means
         // (not our API wrapper).
-        if (Some("main") == thread::current().name()) {
+        if Some("main") == thread::current().name() {
             Some(DetThreadId { thread_id: vec![] })
         } else {
             None

@@ -2,7 +2,6 @@ use crate::DetThreadId;
 use crate::RecordReplayMode;
 use crate::RECORD_MODE;
 use lazy_static::lazy_static;
-use log::trace;
 use std::fs::remove_file;
 use std::fs::File;
 use std::sync::Mutex;
@@ -15,6 +14,7 @@ use log::debug;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::BufRead;
+use crossbeam_channel::{RecvTimeoutError, TryRecvError, RecvError};
 
 // TODO use environment variables to generalize this.
 const LOG_FILE_NAME: &str = "/home/gatowololo/det_file.txt";
@@ -35,40 +35,6 @@ pub enum SelectEvent {
         /// to return the real index.
         selected_index: usize,
     },
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub enum ReceiveEvent {
-    Success {
-        /// For multiple producer channels we need to diffentiate who the sender was.
-        /// As the index only tells us the correct receiver end, but not who the sender was.
-        sender_thread: DetThreadId,
-    },
-    RecvError,
-}
-
-/// Record representing results of calling Receiver::try_recv()
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub enum TryRecvEvent {
-    Success {
-        /// For multiple producer channels we need to diffentiate who the sender was.
-        /// As the index only tells us the correct receiver end, but not who the sender was.
-        sender_thread: DetThreadId,
-    },
-    Disconnected,
-    Empty,
-}
-
-/// Record representing results of calling Receiver::recv_timeout()
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub enum RecvTimeoutEvent {
-    Success {
-        /// For multiple producer channels we need to diffentiate who the sender was.
-        /// As the index only tells us the correct receiver end, but not who the sender was.
-        sender_thread: DetThreadId,
-    },
-    Disconnected,
-    Timedout,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Copy, Clone)]
@@ -95,13 +61,47 @@ pub struct LogEntry {
     pub type_name: String,
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "RecvTimeoutError")]
+pub enum RecvTimeoutErrorDef {
+    Timeout,
+    Disconnected,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "TryRecvError")]
+pub enum TryRecvErrorDef {
+    Empty,
+    Disconnected,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "RecvError")]
+pub struct RecvErrorDef {}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct IpcDummyError;
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum RecordedEvent {
     SelectReady { select_index: usize },
     Select(SelectEvent),
-    Receive(ReceiveEvent),
-    TryRecv(TryRecvEvent),
-    RecvTimeout(RecvTimeoutEvent),
+
+    RecvSucc{sender_thread: DetThreadId},
+    #[serde(with = "RecvErrorDef")]
+    RecvErr(RecvError),
+
+    TryRecvSucc{sender_thread: DetThreadId},
+    #[serde(with = "TryRecvErrorDef")]
+    TryRecvErr(TryRecvError),
+
+    RecvTimeoutSucc{sender_thread: DetThreadId},
+    #[serde(with = "RecvTimeoutErrorDef")]
+    RecvTimeoutErr(RecvTimeoutError),
+
+    IpcRecvSucc{sender_thread: DetThreadId},
+    // #[serde(with = "ErrorKindDef")]
+    IpcRecvErr(IpcDummyError),
 }
 
 lazy_static! {
@@ -201,3 +201,99 @@ pub fn get_log_entry<'a>(
     ));
     log_entry
 }
+
+#[derive(Debug)]
+pub struct RecordMetadata {
+    /// Unique identifier assigned to every channel. Deterministic and unique
+    /// even with racing thread creation. DetThreadId refers to the original
+    /// creator of this thread.
+    /// The partner Receiver and Sender shares the same id.
+    pub(crate) type_name: &'static str,
+    pub(crate) flavor: FlavorMarker,
+    pub(crate) mode: RecordReplayMode,
+    /// Unique identifier assigned to every channel. Deterministic and unique
+    /// even with racing thread creation. DetThreadId refers to the original
+    /// creator of this thread.
+    /// The partner Receiver and Sender shares the same id.
+    pub(crate) id: (DetThreadId, u32),
+}
+
+use std::error::Error;
+use crate::record_replay;
+use crate::channel::get_log_event;
+
+pub trait RecordReplay<T, E: Error> {
+    fn record_replay(&self,
+                     metadata: &RecordMetadata,
+                     func: impl FnOnce() -> Result<(DetThreadId, T), E>)
+                     -> Result<T, E> {
+        log_trace(&format!("Receiver<{:?}>::TODO()", metadata.id));
+
+        match metadata.mode {
+            RecordReplayMode::Record => {
+                let (result, event) = self.to_recorded_event(func());
+                record_replay::log(event, metadata.flavor, metadata.type_name);
+                result
+            }
+            RecordReplayMode::Replay => {
+                let (event, flavor) = get_log_event();
+                if flavor != metadata.flavor {
+                    panic!("Expected {:?}, saw {:?}", flavor, metadata.flavor);
+                }
+
+                self.expected_recorded_events(event)
+            }
+            RecordReplayMode::NoRR => {
+                func().map(|v| v.1)
+            }
+        }
+    }
+
+    fn to_recorded_event(&self, event: Result<(DetThreadId, T), E>) ->
+        (Result<T, E>, RecordedEvent);
+
+    fn expected_recorded_events(&self, event: RecordedEvent) -> Result<T, E>;
+
+    fn replay_recv(&self, sender: &DetThreadId) -> T;
+}
+
+use std::collections::VecDeque;
+use std::cell::RefMut;
+
+pub fn replay_recv<T, E: Error>(sender: &DetThreadId,
+                      mut buffer: RefMut<HashMap<DetThreadId, VecDeque<T>>>,
+                      recv: impl Fn() -> Result<(DetThreadId, T), E>)
+                      -> T {
+    // Check our buffer to see if this value is already here.
+    if let Some(entries) = buffer.get_mut(sender) {
+        if let Some(entry) = entries.pop_front() {
+            debug!("Recv message found in buffer.");
+            return entry;
+        }
+    }
+
+    // Loop until we get the message we're waiting for. All "wrong" messages are
+    // buffered into self.buffer.
+    loop {
+        match recv() {
+            Ok((det_id, msg)) => {
+                // We found the message from the expected thread!
+                if det_id == *sender {
+                    debug!("Recv message found through recv()");
+                    return msg;
+                }
+                // We got a message from the wrong thread.
+                else {
+                    debug!("Wrong value found. Queing value for thread: {:?}", det_id);
+                    let queue = buffer.entry(det_id).or_insert(VecDeque::new());
+                    queue.push_back(msg);
+                }
+            },
+            Err(e) => {
+                debug!("Saw Err({:?})", e);
+                // Got a disconnected message. Ignore.
+            },
+        }
+    }
+}
+

@@ -176,7 +176,7 @@ impl<'a> SelectedOperation<'a> {
     ///
     /// Panics if an incorrect [`Receiver`] reference is passed.
     pub fn recv<T>(self, r: &Receiver<T>) -> Result<T, RecvError> {
-        log_trace(&format!("SelectedOperation<{:?}>::recv()", r.id));
+        log_trace(&format!("SelectedOperation<{:?}>::recv()", r.metadata().id));
         let selected_index = self.index();
 
         match self {
@@ -207,7 +207,9 @@ impl<'a> SelectedOperation<'a> {
                 };
 
                 let type_name = unsafe { std::intrinsics::type_name::<T>() };
-                record_replay::log(RecordedEvent::Select(select_event), r.flavor(), type_name);
+                record_replay::log(RecordedEvent::Select(select_event),
+                                   r.flavor(),
+                                   type_name);
                 msg
             },
             // We do not use the select API at all on replays. Wait for correct
@@ -232,11 +234,7 @@ impl<'a> SelectedOperation<'a> {
                     Flavor::After(receiver) => selected.recv(receiver),
                     Flavor::Bounded(receiver) |
                     Flavor::Unbounded(receiver) |
-                    Flavor::Never(receiver) => match selected.recv(receiver) {
-                        Ok((_, msg)) => Ok(msg),
-                        // Err(e) on the RHS is not the same type as Err(e) LHS.
-                        Err(e) => Err(e),
-                    },
+                    Flavor::Never(receiver) => selected.recv(receiver).map(|v| v.1),
                 }
             },
         }
