@@ -346,5 +346,5 @@ pub(crate) fn get_log_event() -> (Recorded, FlavorMarker) {
         expect("No such key in map.");
     inc_select_id();
 
-    (event.clone(), *flavor)
-}
+    (event.clone(), *flavor)}
+

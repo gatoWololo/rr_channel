@@ -10,7 +10,7 @@ mod channel;
 mod crossbeam_select;
 mod record_replay;
 mod select;
-mod ipc;
+pub mod ipc;
 pub mod thread;
 
 // Rexports.
@@ -24,6 +24,7 @@ pub use thread::{current, panicking, park, park_timeout, sleep, yield_now};
 pub use thread::{
     get_det_id, get_det_id_clone, get_select_id, inc_select_id, DetIdSpawner, DetThreadId,
 };
+pub use ipc::{channel};
 
 /// A singleton instance exists globally for the current mode via lazy_static global variable.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

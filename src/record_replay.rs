@@ -44,6 +44,7 @@ pub enum FlavorMarker {
     Bounded,
     Never,
     None,
+    Ipc,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
