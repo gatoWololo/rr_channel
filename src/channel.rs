@@ -208,7 +208,7 @@ impl<T> Receiver<T> {
             buffer: RefCell::new(HashMap::new()),
             receiver: real_receiver,
             metadata: RecordMetadata {
-                type_name: unsafe { std::intrinsics::type_name::<T>() },
+                type_name: unsafe { std::intrinsics::type_name::<T>().to_string() },
                 flavor,
                 mode: *RECORD_MODE,
                 id: (get_det_id(), get_and_inc_channel_id()),
@@ -325,7 +325,7 @@ pub fn never<T>() -> Receiver<T> {
         buffer: RefCell::new(HashMap::new()),
         receiver: Flavor::Never(crossbeam_channel::never()),
         metadata: RecordMetadata {
-            type_name: unsafe { std::intrinsics::type_name::<T>() },
+            type_name: unsafe { std::intrinsics::type_name::<T>().to_string() },
             flavor: FlavorMarker::Never,
             mode: *RECORD_MODE,
             id: (get_det_id(), get_and_inc_channel_id()),

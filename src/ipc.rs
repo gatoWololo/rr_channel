@@ -9,25 +9,87 @@ use crate::ENV_LOGGER;
 use crate::RECORD_MODE;
 use ipc_channel::ipc::{self};
 use ipc_channel::{Error, ErrorKind};
-use serde::Deserialize;
-use serde::Serialize;
+
+use serde::{Deserialize, Serialize, ser::SerializeStruct};
 use std::cell::RefCell;
 use std::collections::hash_map::HashMap;
 use std::collections::VecDeque;
+use serde::Serializer;
+use serde::de::DeserializeOwned;
 
-#[derive(Debug)]
+pub use ipc_channel::ipc::{
+    IpcSelectionResult, OpaqueIpcMessage, OpaqueIpcReceiver
+};
+#[derive(Debug, Serialize, Deserialize)]
 pub struct IpcReceiver<T>
-where
-    T: for<'de> Deserialize<'de> + Serialize,
 {
-    receiver: ipc::IpcReceiver<(DetThreadId, T)>,
+    pub(crate) receiver: ipc::IpcReceiver<(DetThreadId, T)>,
     buffer: RefCell<HashMap<DetThreadId, VecDeque<T>>>,
     metadata: RecordMetadata,
 }
 
+impl<T> IpcReceiver<T> {
+    pub fn new(
+        receiver: ipc::IpcReceiver<(DetThreadId, T)>,
+        id: (DetThreadId, u32),
+    ) -> IpcReceiver<T> {
+        IpcReceiver {
+            receiver,
+            buffer: RefCell::new(HashMap::new()),
+            metadata: RecordMetadata {
+                type_name: unsafe { std::intrinsics::type_name::<T>().to_string() },
+                flavor: FlavorMarker::Ipc,
+                mode: *RECORD_MODE,
+                id,
+            },
+        }
+    }
+}
+
+impl<T> RecordReplay<T, Error> for IpcReceiver<T>
+     where T: for<'de> Deserialize<'de> + Serialize
+{
+    fn to_recorded_event(
+        &self,
+        event: Result<(DetThreadId, T), Error>,
+    ) -> (Result<T, Error>, Recorded) {
+        match event {
+            Ok((sender_thread, msg)) => (Ok(msg), Recorded::IpcRecvSucc { sender_thread }),
+            Err(e) => (Err(e), Recorded::IpcRecvErr(IpcDummyError)),
+        }
+    }
+
+    fn expected_recorded_events(&self, event: Recorded) -> Result<T, Error> {
+        match event {
+            Recorded::IpcRecvSucc { sender_thread } => Ok(self.replay_recv(&sender_thread)),
+            Recorded::IpcRecvErr(e) => Err(Box::new(ErrorKind::Custom("TODO".to_string()))),
+            _ => panic!("Unexpected event: {:?} in replay for recv()",),
+        }
+    }
+
+    fn replay_recv(&self, sender: &DetThreadId) -> T {
+        record_replay::replay_recv(sender, self.buffer.borrow_mut(), || self.receiver.recv())
+    }
+}
+
+impl<T> IpcReceiver<T>
+    where T: for<'de> Deserialize<'de> + Serialize
+{
+    pub fn recv(&self) -> Result<T, Error> {
+        self.record_replay(&self.metadata, || self.receiver.recv())
+    }
+
+    pub fn try_recv(&self) -> Result<T, Error> {
+        self.record_replay(&self.metadata, || self.receiver.try_recv())
+    }
+
+    pub fn to_opaque(self) -> OpaqueIpcReceiver {
+        unimplemented!()
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct IpcSender<T>
-where
-    T: for<'de> Deserialize<'de> + Serialize,
 {
     sender: ipc::IpcSender<(DetThreadId, T)>,
     /// Unique identifier assigned to every channel. Deterministic and unique
@@ -63,69 +125,6 @@ where
     }
 }
 
-impl<T> IpcReceiver<T>
-where
-    T: for<'de> Deserialize<'de> + Serialize,
-{
-    pub fn new(
-        receiver: ipc::IpcReceiver<(DetThreadId, T)>,
-        id: (DetThreadId, u32),
-    ) -> IpcReceiver<T> {
-        IpcReceiver {
-            receiver,
-            buffer: RefCell::new(HashMap::new()),
-            metadata: RecordMetadata {
-                type_name: unsafe { std::intrinsics::type_name::<T>() },
-                flavor: FlavorMarker::Ipc,
-                mode: *RECORD_MODE,
-                id,
-            },
-        }
-    }
-}
-
-impl<T> RecordReplay<T, Error> for IpcReceiver<T>
-where
-    T: for<'de> Deserialize<'de> + Serialize,
-{
-    fn to_recorded_event(
-        &self,
-        event: Result<(DetThreadId, T), Error>,
-    ) -> (Result<T, Error>, Recorded) {
-        match event {
-            Ok((sender_thread, msg)) => (Ok(msg), Recorded::IpcRecvSucc { sender_thread }),
-            Err(e) => (Err(e), Recorded::IpcRecvErr(IpcDummyError)),
-        }
-    }
-
-    fn expected_recorded_events(&self, event: Recorded) -> Result<T, Error> {
-        match event {
-            Recorded::IpcRecvSucc { sender_thread } => Ok(self.replay_recv(&sender_thread)),
-            Recorded::IpcRecvErr(e) => Err(Box::new(ErrorKind::Custom("TODO".to_string()))),
-            _ => panic!("Unexpected event: {:?} in replay for recv()",),
-        }
-    }
-
-    fn replay_recv(&self, sender: &DetThreadId) -> T {
-        record_replay::replay_recv(sender, self.buffer.borrow_mut(), || self.receiver.recv())
-    }
-}
-
-impl<T> IpcReceiver<T>
-where
-    T: for<'de> Deserialize<'de> + Serialize,
-{
-    pub fn recv(&self) -> Result<T, Error> {
-        self.record_replay(&self.metadata, || self.receiver.recv())
-    }
-
-    pub fn try_recv(&self) -> Result<T, Error> {
-        self.record_replay(&self.metadata, || self.receiver.try_recv())
-    }
-
-    // pub fn to_opaque(self) -> OpaqueIpcReceiver
-}
-
 pub fn channel<T>() -> Result<(IpcSender<T>, IpcReceiver<T>), Error>
 where
     T: for<'de> Deserialize<'de> + Serialize,
@@ -141,4 +140,29 @@ where
         },
         IpcReceiver::new(receiver, id),
     ))
+}
+
+/// OMAR: Wrapper necessary to change use our own IpcReceiver type for add.
+/// TODO Will probably need to determize select operation.
+pub struct IpcReceiverSet {
+    receiver_set: ipc_channel::ipc::IpcReceiverSet,
+}
+
+impl IpcReceiverSet {
+    pub fn new() -> Result<IpcReceiverSet, std::io::Error> {
+        ipc_channel::ipc::IpcReceiverSet::new().map(|r| IpcReceiverSet { receiver_set: r})
+    }
+
+    pub fn add<T>(&mut self, receiver: IpcReceiver<T>) -> Result<u64, std::io::Error>
+    where T: for<'de> Deserialize<'de> + Serialize {
+        self.receiver_set.add(receiver.receiver)
+    }
+
+    pub fn add_opaque(&mut self, receiver: OpaqueIpcReceiver) -> Result<u64, std::io::Error> {
+        self.receiver_set.add_opaque(receiver)
+    }
+
+    pub fn select(&mut self) -> Result<Vec<IpcSelectionResult>,Error> {
+        unimplemented!()
+    }
 }

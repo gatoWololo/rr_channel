@@ -11,6 +11,7 @@ log = "0.4"
 env_logger = "0.6"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-ipc-channel = "0.11"
+ipc-channel = { git = "https://github.com/servo/ipc-channel", rev = "ee3ccbad71be7d99927d391a032fbe7faea76784" }
+# ipc-channel = { path = "../../../ipc-channel" }
 rand = "0.6.5"
 # backtrace = "0.3"

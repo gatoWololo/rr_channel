@@ -5,6 +5,7 @@
 use env_logger;
 use lazy_static::lazy_static;
 use log::{debug, trace, warn};
+use serde::{Deserialize, Serialize};
 
 mod channel;
 mod crossbeam_select;
@@ -12,13 +13,14 @@ pub mod ipc;
 mod record_replay;
 mod select;
 pub mod thread;
+// pub mod router;
 
 // Rexports.
 pub use channel::{after, bounded, never, unbounded, Receiver, Sender};
 pub use crossbeam_channel::RecvError;
 pub use crossbeam_channel::RecvTimeoutError;
 pub use crossbeam_channel::TryRecvError;
-pub use ipc::channel;
+// pub use ipc::channel;
 pub use record_replay::{LogEntry, RECORDED_INDICES, WRITE_LOG_FILE};
 pub use select::{Select, SelectedOperation};
 pub use thread::{current, panicking, park, park_timeout, sleep, yield_now};
@@ -27,7 +29,7 @@ pub use thread::{
 };
 
 /// A singleton instance exists globally for the current mode via lazy_static global variable.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum RecordReplayMode {
     Record,
     Replay,

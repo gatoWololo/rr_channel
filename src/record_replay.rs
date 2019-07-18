@@ -213,13 +213,14 @@ pub fn get_log_entry<'a>(
     log_entry
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct RecordMetadata {
     /// Unique identifier assigned to every channel. Deterministic and unique
     /// even with racing thread creation. DetThreadId refers to the original
     /// creator of this thread.
     /// The partner Receiver and Sender shares the same id.
-    pub(crate) type_name: &'static str,
+    /// Owned for EZ serialize, deserialize.
+    pub(crate) type_name: String,
     pub(crate) flavor: FlavorMarker,
     pub(crate) mode: RecordReplayMode,
     /// Unique identifier assigned to every channel. Deterministic and unique
@@ -244,7 +245,7 @@ pub trait RecordReplay<T, E: Error> {
         match metadata.mode {
             RecordReplayMode::Record => {
                 let (result, event) = self.to_recorded_event(func());
-                record_replay::log(event, metadata.flavor, metadata.type_name);
+                record_replay::log(event, metadata.flavor, &metadata.type_name);
                 result
             }
             RecordReplayMode::Replay => {
