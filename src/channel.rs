@@ -1,5 +1,5 @@
 use crate::log_trace;
-use crate::record_replay::{self, FlavorMarker, Recorded};
+use crate::record_replay::{self, FlavorMarker, Recorded, Blocking};
 use crate::thread::get_and_inc_channel_id;
 use crate::thread::*;
 use crate::RecordReplayMode;
@@ -9,7 +9,7 @@ use crossbeam_channel;
 use crossbeam_channel::RecvError;
 use crossbeam_channel::SendError;
 use crossbeam_channel::{RecvTimeoutError, TryRecvError};
-use log::{debug, trace, warn};
+use log::{debug, trace, warn, info};
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::error::Error;
@@ -17,6 +17,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 use std::cell::RefCell;
+use crate::record_replay::DetChannelId;
 
 pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
     *ENV_LOGGER;
@@ -27,20 +28,26 @@ pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
     let channel_type = FlavorMarker::Unbounded;
 
     let type_name = unsafe { std::intrinsics::type_name::<T>() };
-    let id = (get_det_id(), get_and_inc_channel_id());
+    let id = DetChannelId {
+        det_thread_id: get_det_id(),
+        channel_id: get_and_inc_channel_id(),
+    };
+
+    log_trace(&format!("Unbounded channel created: {:?} {:?}", id, type_name));
     (
         Sender {
             sender,
             mode,
             channel_type,
-            id: id.clone(),
+            channel_id: id.clone(),
+            type_name: type_name.to_string()
         },
         Receiver::new(receiver, id),
     )
 }
 
 pub struct Sender<T> {
-    pub(crate) sender: crossbeam_channel::Sender<(DetThreadId, T)>,
+    pub(crate) sender: crossbeam_channel::Sender<(Option<DetThreadId>, T)>,
     // Unlike Receiver, whose channels may have different types, the Sender always
     // has the same channel type. So we just keep a marker around.
     pub(crate) channel_type: FlavorMarker,
@@ -49,7 +56,8 @@ pub struct Sender<T> {
     /// even with racing thread creation. DetThreadId refers to the original
     /// creator of this thread.
     /// The partner Receiver and Sender shares the same id.
-    pub(crate) id: (DetThreadId, u32),
+    pub(crate) channel_id: DetChannelId,
+    pub(crate) type_name: String,
 }
 
 /// crossbeam_channel::Sender does not derive clone. Instead it implements it,
@@ -68,7 +76,8 @@ impl<T> Clone for Sender<T> {
             sender: self.sender.clone(),
             mode: self.mode.clone(),
             channel_type: self.channel_type,
-            id: self.id.clone(),
+            channel_id: self.channel_id.clone(),
+            type_name: self.type_name.clone()
         }
     }
 }
@@ -77,13 +86,28 @@ impl<T> Sender<T> {
     /// Send our det thread id along with the actual message for both
     /// record and replay.
     pub fn send(&self, msg: T) -> Result<(), SendError<T>> {
-        log_trace(&format!("Sender<{:?}>::send()", self.id));
+        let det_id = get_det_id();
+        log_trace(&format!("Sender<{:?}>::send(({:?}, {:?}))",
+                           self.channel_id, det_id, self.type_name));
         // We send the det_id even when running in RecordReplayMode::NoRR,
         // but that's okay. It makes logic a little simpler.
         // crossbeam::send() returns Result<(), SendError<(DetThreadId, T)>>,
         // we want to make this opaque to the user. Just return the T on error.
         self.sender
-            .send((get_det_id(), msg))
+            .send((det_id, msg))
+            .map_err(|e| SendError(e.into_inner().1))
+    }
+
+    /// Similar to send, but uses the passed `id` instead of calling `get_det_id()`.
+    /// Useful for the IPC router to "route" the original DetThreadId instead of
+    /// the routers.
+    /// WARNING: Missuing this function can result in nondeterministic behavior!
+    pub fn send_with_id(&self, msg: T, id: Option<DetThreadId>)
+                               -> Result<(), SendError<T>> {
+        log_trace(&format!("Sender<{:?}>::send_with_id()", self.channel_id));
+        log_trace(&format!("Forwarding ID: {:?}", id));
+        self.sender
+            .send((id, msg))
             .map_err(|e| SendError(e.into_inner().1))
     }
 }
@@ -110,9 +134,9 @@ impl<T> Sender<T> {
 /// and their API so much.
 pub enum Flavor<T> {
     After(crossbeam_channel::Receiver<T>),
-    Bounded(crossbeam_channel::Receiver<(DetThreadId, T)>),
-    Never(crossbeam_channel::Receiver<(DetThreadId, T)>),
-    Unbounded(crossbeam_channel::Receiver<(DetThreadId, T)>),
+    Bounded(crossbeam_channel::Receiver<(Option<DetThreadId>, T)>),
+    Never(crossbeam_channel::Receiver<(Option<DetThreadId>, T)>),
+    Unbounded(crossbeam_channel::Receiver<(Option<DetThreadId>, T)>),
 }
 
 /// Helper macro to generate methods for Flavor. Calls appropriate channel method.
@@ -120,8 +144,9 @@ pub enum Flavor<T> {
 /// to have the correct type.
 macro_rules! generate_channel_method {
     ($method:ident, $error_type:ty) => {
-        pub fn $method(&self) -> Result<(DetThreadId, T), $error_type> {
-            log_trace(concat!("Flavor::", stringify!($method)));
+        pub fn $method(&self) -> Result<(Option<DetThreadId>, T), $error_type> {
+            // Not really useful.
+            // log_trace(concat!("Flavor::", stringify!($method)));
             match self {
                 Flavor::After(receiver) => {
                     match receiver.$method() {
@@ -141,7 +166,7 @@ impl<T> Flavor<T> {
     generate_channel_method!(recv, RecvError);
     generate_channel_method!(try_recv, TryRecvError);
 
-    pub fn recv_timeout(&self, duration: Duration) -> Result<(DetThreadId, T), RecvTimeoutError> {
+    pub fn recv_timeout(&self, duration: Duration) -> Result<(Option<DetThreadId>, T), RecvTimeoutError> {
         log_trace("Flavor::recv_timeout");
         match self {
             Flavor::After(receiver) => match receiver.recv_timeout(duration) {
@@ -160,8 +185,14 @@ pub struct Receiver<T> {
     /// Crossbeam works with inmutable references, so we wrap in a RefCell
     /// to hide our mutation.
     buffer: RefCell<HashMap<DetThreadId, VecDeque<T>>>,
+    /// Separate buffer to hold entries whose DetThreadId was None.
+    /// TODO this might be nondeterministic if different threads are sending
+    /// these requests.
+    /// Even tracking their TID would be useful to check for multiple producers
+    /// "none" senders.
+    none_buffer: RefCell<VecDeque<T>>,
     pub(crate) receiver: Flavor<T>,
-    metadata: RecordMetadata,
+    pub(crate) metadata: RecordMetadata,
 }
 
 macro_rules! impl_RecordReplay {
@@ -169,7 +200,7 @@ macro_rules! impl_RecordReplay {
         impl<T> RecordReplay<T, $err_type> for Receiver<T> {
             fn to_recorded_event(
                 &self,
-                event: Result<(DetThreadId, T), $err_type>,
+                event: Result<(Option<DetThreadId>, T), $err_type>,
             ) -> (Result<T, $err_type>, Recorded) {
                 match event {
                     Ok((sender_thread, msg)) => (Ok(msg), Recorded::$succ { sender_thread }),
@@ -177,11 +208,22 @@ macro_rules! impl_RecordReplay {
                 }
             }
 
-            fn expected_recorded_events(&self, event: Recorded) -> Result<T, $err_type> {
+            fn expected_recorded_events(&self, event: &Recorded) -> Result<T, $err_type> {
                 match event {
-                    Recorded::$succ { sender_thread } => Ok(self.replay_recv(&sender_thread)),
-                    Recorded::$err(e) => Err(e),
-                    _ => panic!("Unexpected event: {:?} in replay for recv()",),
+                    Recorded::$succ { sender_thread } => {
+                        let sender_thread = sender_thread.clone();
+                        Ok(self.replay_recv(&sender_thread.expect("expected_recorded_events")))
+                    }
+
+                    Recorded::$err(e) => {
+                        log_trace(&format!("Creating error event for: {:?}", Recorded::$err(*e)));
+                        Err(*e)
+                    },
+                    e => {
+                        let error = format!("Unexpected event: {:?} in replay for channel::recv()", e);
+                        log_trace(&error);
+                        panic!(error);
+                    }
                 }
             }
 
@@ -202,16 +244,17 @@ impl_RecordReplay!(TryRecvError, TryRecvSucc, TryRecvErr);
 impl_RecordReplay!(RecvTimeoutError, RecvTimeoutSucc, RecvTimeoutErr);
 
 impl<T> Receiver<T> {
-    pub fn new(real_receiver: Flavor<T>, id: (DetThreadId, u32)) -> Receiver<T> {
+    pub fn new(real_receiver: Flavor<T>, id: DetChannelId) -> Receiver<T> {
         let flavor = Receiver::get_marker(&real_receiver);
         Receiver {
             buffer: RefCell::new(HashMap::new()),
+            none_buffer: RefCell::new(VecDeque::new()),
             receiver: real_receiver,
             metadata: RecordMetadata {
                 type_name: unsafe { std::intrinsics::type_name::<T>().to_string() },
                 flavor,
                 mode: *RECORD_MODE,
-                id: (get_det_id(), get_and_inc_channel_id()),
+                id
             },
         }
     }
@@ -221,15 +264,21 @@ impl<T> Receiver<T> {
     }
 
     pub fn recv(&self) -> Result<T, RecvError> {
-        self.record_replay(self.metadata(), || self.receiver.recv())
+        self.record_replay(self.metadata(), || self.receiver.recv(),
+                           Blocking::CanBlock, "channel::recv()")
     }
 
     pub fn try_recv(&self) -> Result<T, TryRecvError> {
-        self.record_replay(self.metadata(), || self.receiver.try_recv())
+        self.record_replay(self.metadata(), || self.receiver.try_recv(),
+                           Blocking::CannotBlock, "channel::try_recv()")
     }
 
+    // TODO: Hmmm, even though we label this function as CannotBlock.
+    // We might not have an event if the program ended right as we were waiting
+    // for recv_timeout() but before the timeout happended.
     pub fn recv_timeout(&self, timeout: Duration) -> Result<T, RecvTimeoutError> {
-        self.record_replay(self.metadata(), || self.receiver.recv_timeout(timeout))
+        self.record_replay(self.metadata(), || self.receiver.recv_timeout(timeout),
+                           Blocking::CannotBlock, "channel::rect_timeout()")
     }
 
     pub fn metadata(&self) -> &RecordMetadata {
@@ -238,27 +287,34 @@ impl<T> Receiver<T> {
 
     /// TODO: Move borrow_mut() outside the loop.
     pub fn replay_recv(&self, sender: &DetThreadId) -> T {
+        log_trace("replay_recv() ...");
         // Check our buffer to see if this value is already here.
         if let Some(entries) = self.buffer.borrow_mut().get_mut(sender) {
             if let Some(entry) = entries.pop_front() {
-                debug!("Recv message found in buffer.");
+                log_trace("Recv message found in buffer.");
                 return entry;
             }
         }
+
+        // TODO We request a message from a none buffer?
 
         // Loop until we get the message we're waiting for. All "wrong" messages are
         // buffered into self.buffer.
         loop {
             match self.receiver.recv() {
-                Ok((det_id, msg)) => {
+                Ok((None, msg)) => {
+                    log_trace("Saw message where sender was None");
+                    self.none_buffer.borrow_mut().push_back(msg);
+                }
+                Ok((Some(det_id), msg)) => {
                     // We found the message from the expected thread!
                     if det_id == *sender {
-                        debug!("Recv message found through recv()");
+                        log_trace("Recv message found through recv()");
                         return msg;
                     }
                     // We got a message from the wrong thread.
                     else {
-                        debug!("Wrong value found. Queing value for thread: {:?}", det_id);
+                        log_trace(&format!("Wrong value found. Queing value for thread: {:?}", det_id));
                         // ensure we don't drop temporary reference.
                         let mut borrow = self.buffer.borrow_mut();
                         let queue = borrow.entry(det_id).or_insert(VecDeque::new());
@@ -266,7 +322,7 @@ impl<T> Receiver<T> {
                     }
                 }
                 Err(e) => {
-                    debug!("Saw Err({:?})", e);
+                    log_trace(&format!("Saw Err({:?})", e));
                     // Got a disconnected message. Ignore.
                 }
             }
@@ -288,11 +344,12 @@ pub fn after(duration: Duration) -> Receiver<Instant> {
     // Users always have to make channels before using the rest of this code.
     // So we put it here.
     *ENV_LOGGER;
-
-    Receiver::new(
-        Flavor::After(crossbeam_channel::after(duration)),
-        (get_det_id(), get_and_inc_channel_id()),
-    )
+    let id = DetChannelId {
+            det_thread_id: get_det_id(),
+            channel_id: get_and_inc_channel_id()
+    };
+    log_trace(&format!("After channel receiver created: {:?}", id));
+    Receiver::new(Flavor::After(crossbeam_channel::after(duration)), id)
 }
 
 pub fn bounded<T>(cap: usize) -> (Sender<T>, Receiver<T>) {
@@ -306,13 +363,20 @@ pub fn bounded<T>(cap: usize) -> (Sender<T>, Receiver<T>) {
     let mode = *RECORD_MODE;
     let channel_type = FlavorMarker::Bounded;
     let type_name = unsafe { std::intrinsics::type_name::<T>() };
-    let id = (get_det_id(), get_and_inc_channel_id());
+    let id = DetChannelId {
+        det_thread_id: get_det_id(),
+        channel_id: get_and_inc_channel_id(),
+    };
+
+    let type_name = unsafe { std::intrinsics::type_name::<T>() };
+    log_trace(&format!("Bounded channel created: {:?} {:?}", id, type_name));
     (
         Sender {
             sender,
             mode,
             channel_type,
-            id: id.clone(),
+            channel_id: id.clone(),
+            type_name: type_name.to_string()
         },
         Receiver::new(receiver, id),
     )
@@ -320,26 +384,33 @@ pub fn bounded<T>(cap: usize) -> (Sender<T>, Receiver<T>) {
 
 pub fn never<T>() -> Receiver<T> {
     *ENV_LOGGER;
+    let type_name = unsafe { std::intrinsics::type_name::<T>().to_string() };
+    let id = DetChannelId {
+        det_thread_id: get_det_id(),
+        channel_id: get_and_inc_channel_id(),
+    };
 
     Receiver {
         buffer: RefCell::new(HashMap::new()),
         receiver: Flavor::Never(crossbeam_channel::never()),
+        none_buffer: RefCell::new(VecDeque::new()),
         metadata: RecordMetadata {
-            type_name: unsafe { std::intrinsics::type_name::<T>().to_string() },
+            type_name,
             flavor: FlavorMarker::Never,
             mode: *RECORD_MODE,
-            id: (get_det_id(), get_and_inc_channel_id()),
+            id,
         },
     }
 }
 
 pub(crate) fn get_log_event() -> (Recorded, FlavorMarker) {
     let det_id = get_det_id();
-    let select_id = get_select_id();
+    let event_id = get_event_id();
 
     let (event, flavor) =
-        record_replay::get_log_entry(det_id, select_id).expect("No such key in map.");
-    inc_select_id();
+        record_replay::get_log_entry(det_id.expect("get_log_event()"), event_id).
+        expect("get_log_event(): No such key in map.");
+    inc_event_id();
 
     (event.clone(), *flavor)
 }

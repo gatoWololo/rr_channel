@@ -15,3 +15,8 @@ ipc-channel = { git = "https://github.com/servo/ipc-channel", rev = "ee3ccbad71b
 # ipc-channel = { path = "../../../ipc-channel" }
 rand = "0.6.5"
 # backtrace = "0.3"
+
+[dev-dependencies]
+ipc-channel = { git = "https://github.com/servo/ipc-channel", rev = "ee3ccbad71be7d99927d391a032fbe7faea76784" }
+# ipc-channel = { path = "../../../ipc-channel" }
+crossbeam-channel = "0.3"

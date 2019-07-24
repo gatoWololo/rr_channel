@@ -8,10 +8,10 @@ use std::sync::Mutex;
 
 use crate::log_trace;
 use crate::thread::get_det_id;
-use crate::thread::get_select_id;
-use crate::thread::inc_select_id;
+use crate::thread::get_event_id;
+use crate::thread::inc_event_id;
 use crossbeam_channel::{RecvError, RecvTimeoutError, TryRecvError};
-use log::debug;
+use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::BufRead;
@@ -25,7 +25,7 @@ pub enum SelectEvent {
     Success {
         /// For multiple producer channels we need to diffentiate who the sender was.
         /// As the index only tells us the correct receiver end, but not who the sender was.
-        sender_thread: DetThreadId,
+        sender_thread: Option<DetThreadId>,
         /// Index of selected channel for select!()
         selected_index: usize,
     },
@@ -50,11 +50,11 @@ pub enum FlavorMarker {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct LogEntry {
     /// Thread performing the operation's unique ID.
-    /// (current_thread, select_id) form a unique key per entry in our map and log.
-    pub current_thread: DetThreadId,
+    /// (current_thread, event_id) form a unique key per entry in our map and log.
+    pub current_thread: Option<DetThreadId>,
     /// Unique per-thread identifier given to every select dynamic instance.
-    /// (current_thread, select_id) form a unique key per entry in our map and log.
-    pub select_id: u32,
+    /// (current_thread, event_id) form a unique key per entry in our map and log.
+    pub event_id: u32,
     pub event: Recorded,
     pub channel: FlavorMarker,
     // pub real_thread_id: String,
@@ -91,29 +91,39 @@ pub enum Recorded {
     Select(SelectEvent),
 
     RecvSucc {
-        sender_thread: DetThreadId,
+        sender_thread: Option<DetThreadId>,
     },
     #[serde(with = "RecvErrorDef")]
     RecvErr(RecvError),
 
     TryRecvSucc {
-        sender_thread: DetThreadId,
+        sender_thread: Option<DetThreadId>,
     },
     #[serde(with = "TryRecvErrorDef")]
     TryRecvErr(TryRecvError),
 
     RecvTimeoutSucc {
-        sender_thread: DetThreadId,
+        sender_thread: Option<DetThreadId>,
     },
     #[serde(with = "RecvTimeoutErrorDef")]
     RecvTimeoutErr(RecvTimeoutError),
 
     IpcRecvSucc {
-        sender_thread: DetThreadId,
+        sender_thread: Option<DetThreadId>,
     },
     // #[serde(with = "ErrorKindDef")]
     IpcRecvErr(IpcDummyError),
+
+    // IpcRouterSelectSucc {
+    //     select_indices: Vec<u64>,
+    // }
+    // IpcRouterSelectErr,
 }
+
+// pub enum IpcSelectionResult {
+//     MessageReceived(index)
+//         ChannelClosed(index)
+// }
 
 lazy_static! {
     /// Global log file which all threads write to.
@@ -149,14 +159,19 @@ lazy_static! {
             let line = line.expect("Unable to read recorded log file");
             let entry: LogEntry = serde_json::from_str(&line).expect("Malformed log entry.");
 
-            let key = (entry.current_thread.clone(), entry.select_id);
+            if entry.current_thread.is_none() {
+                log_trace(&format!("Skipping None entry in log for entry: {:?}", entry));
+                continue;
+            }
+
+            let key = (entry.current_thread.clone().unwrap(), entry.event_id);
             let value = (entry.event.clone(), entry.channel);
 
             let prev = recorded_indices.insert(key, value);
             if prev.is_some() {
                 panic!("Failed to replay. Adding key-value ({:?}, {:?}) but previous value \
                         {:?} already exited. Hashmap entries should be unique.",
-                       (entry.current_thread, entry.select_id),
+                       (entry.current_thread, entry.event_id),
                        (entry.event, entry.channel),
                        prev);
             }
@@ -176,12 +191,12 @@ pub fn log(event: Recorded, channel: FlavorMarker, type_name: &str) {
 
     // Write our (DET_ID, EVENT_ID) -> index to our log file
     let current_thread = get_det_id();
-    let select_id = get_select_id();
+    let event_id = get_event_id();
     let tid = format!("{:?}", ::std::thread::current().id());
     let pid = std::process::id();
     let entry: LogEntry = LogEntry {
         current_thread,
-        select_id,
+        event_id,
         event,
         channel,
         // real_thread_id: tid, pid,
@@ -195,15 +210,15 @@ pub fn log(event: Recorded, channel: FlavorMarker, type_name: &str) {
         .write_fmt(format_args!("{}\n", serialized))
         .expect("Unable to write to log file.");
 
-    debug!("{:?} Logged entry: {:?}", entry, (get_det_id(), select_id));
-    inc_select_id();
+    log_trace(&format!("{:?} Logged entry: {:?}", entry, (get_det_id(), event_id)));
+    inc_event_id();
 }
 
 pub fn get_log_entry<'a>(
     our_thread: DetThreadId,
-    select_id: u32,
+    event_id: EventId,
 ) -> Option<&'a (Recorded, FlavorMarker)> {
-    let key = (our_thread, select_id);
+    let key = (our_thread, event_id);
     let log_entry = RECORDED_INDICES.get(&key);
 
     log_trace(&format!(
@@ -212,6 +227,13 @@ pub fn get_log_entry<'a>(
     ));
     log_entry
 }
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DetChannelId {
+    pub det_thread_id: Option<DetThreadId>,
+    pub channel_id: u32
+}
+pub type EventId = u32;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RecordMetadata {
@@ -227,20 +249,28 @@ pub struct RecordMetadata {
     /// even with racing thread creation. DetThreadId refers to the original
     /// creator of this thread.
     /// The partner Receiver and Sender shares the same id.
-    pub(crate) id: (DetThreadId, u32),
+    pub(crate) id: DetChannelId,
 }
 
 use crate::channel::get_log_event;
 use crate::record_replay;
 use std::error::Error;
 
+#[derive(Debug, Eq, PartialEq)]
+pub enum Blocking {
+    CannotBlock,
+    CanBlock,
+}
+
 pub trait RecordReplay<T, E: Error> {
     fn record_replay(
         &self,
         metadata: &RecordMetadata,
-        func: impl FnOnce() -> Result<(DetThreadId, T), E>,
+        func: impl FnOnce() -> Result<(Option<DetThreadId>, T), E>,
+        blocking: Blocking,
+        function_name: &str,
     ) -> Result<T, E> {
-        log_trace(&format!("Receiver<{:?}>::TODO()", metadata.id));
+        log_trace(&format!("Receiver<{:?}>::{}", metadata.id, function_name));
 
         match metadata.mode {
             RecordReplayMode::Record => {
@@ -249,20 +279,53 @@ pub trait RecordReplay<T, E: Error> {
                 result
             }
             RecordReplayMode::Replay => {
-                let (event, flavor) = get_log_event();
-                if flavor != metadata.flavor {
-                    panic!("Expected {:?}, saw {:?}", flavor, metadata.flavor);
+                match get_det_id() {
+                    None => {
+                        // TODO Remove redundancy with NoRR, we probably wanna make this a
+                        // top level check, and not record events when det_id is None?
+                        // for now it's useful to verify that there are channels (and what
+                        // _kinds_ of channels) are running with no det_id (probably because
+                        // or running under rayon, but maybe because of a missing wrap around
+                        // std::thread)
+                        warn!("DetThreadId was None. This execution may not be deterministic.");
+                        func().map(|v| v.1)
+                    }
+                    Some(det_id) => {
+                        match get_log_entry(det_id, get_event_id()) {
+                            Some((event, flavor)) => {
+                                inc_event_id();
+                                if *flavor != metadata.flavor {
+                                    panic!("Expected {:?}, saw {:?}", flavor, metadata.flavor);
+                                }
+                                self.expected_recorded_events(event)
+                            }
+                            None => {
+                                if blocking == Blocking::CannotBlock {
+                                    panic!(format!("Missing entry in log. A call to {} should never block!", function_name));
+                                }
+                                inc_event_id();
+                                log_trace("No entry in log. Assuming this thread blocked on this select forever.");
+                                // No entry in log. This means that this event waiting forever
+                                // on this recv call.
+                                loop {
+                                    std::thread::park();
+                                    log_trace("Spurious wakeup, going back to sleep.");
+                                }
+                            }
+                        }
+                    }
                 }
 
-                self.expected_recorded_events(event)
             }
             RecordReplayMode::NoRR => func().map(|v| v.1),
         }
     }
 
-    fn to_recorded_event(&self, event: Result<(DetThreadId, T), E>) -> (Result<T, E>, Recorded);
+    fn to_recorded_event(&self, event: Result<(Option<DetThreadId>, T), E>)
+                         -> (Result<T, E>, Recorded);
 
-    fn expected_recorded_events(&self, event: Recorded) -> Result<T, E>;
+    fn expected_recorded_events(&self, event: &Recorded)
+                                -> Result<T, E>;
 
     fn replay_recv(&self, sender: &DetThreadId) -> T;
 }
@@ -273,12 +336,13 @@ use std::collections::VecDeque;
 pub fn replay_recv<T, E: Error>(
     sender: &DetThreadId,
     mut buffer: RefMut<HashMap<DetThreadId, VecDeque<T>>>,
-    recv: impl Fn() -> Result<(DetThreadId, T), E>,
+    recv: impl Fn() -> Result<(Option<DetThreadId>, T), E>,
 ) -> T {
+    log_trace("replay_recv()");
     // Check our buffer to see if this value is already here.
     if let Some(entries) = buffer.get_mut(sender) {
         if let Some(entry) = entries.pop_front() {
-            debug!("Recv message found in buffer.");
+            log_trace("Recv message found in buffer.");
             return entry;
         }
     }
@@ -287,21 +351,22 @@ pub fn replay_recv<T, E: Error>(
     // buffered into self.buffer.
     loop {
         match recv() {
-            Ok((det_id, msg)) => {
+            Ok((None, msg)) => panic!("replay_recv"),
+            Ok((Some(det_id), msg)) => {
                 // We found the message from the expected thread!
                 if det_id == *sender {
-                    debug!("Recv message found through recv()");
+                    log_trace("Recv message found through recv()");
                     return msg;
                 }
                 // We got a message from the wrong thread.
                 else {
-                    debug!("Wrong value found. Queing value for thread: {:?}", det_id);
+                    log_trace(&format!("Wrong value found. Queing value for thread: {:?}", det_id));
                     let queue = buffer.entry(det_id).or_insert(VecDeque::new());
                     queue.push_back(msg);
                 }
             }
             Err(e) => {
-                debug!("Saw Err({:?})", e);
+                log_trace(&format!("Saw Err({:?})", e));
                 // Got a disconnected message. Ignore.
             }
         }

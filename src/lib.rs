@@ -13,7 +13,7 @@ pub mod ipc;
 mod record_replay;
 mod select;
 pub mod thread;
-// pub mod router;
+pub mod router;
 
 // Rexports.
 pub use channel::{after, bounded, never, unbounded, Receiver, Sender};
@@ -25,7 +25,7 @@ pub use record_replay::{LogEntry, RECORDED_INDICES, WRITE_LOG_FILE};
 pub use select::{Select, SelectedOperation};
 pub use thread::{current, panicking, park, park_timeout, sleep, yield_now};
 pub use thread::{
-    get_det_id, get_det_id_clone, get_select_id, inc_select_id, DetIdSpawner, DetThreadId,
+    get_det_id, get_event_id, inc_event_id, DetIdSpawner, DetThreadId,
 };
 
 /// A singleton instance exists globally for the current mode via lazy_static global variable.
@@ -41,14 +41,14 @@ const ENV_VAR_NAME: &str = "RR_CHANNEL";
 lazy_static! {
     /// Singleton environment logger. Must be initialized somewhere, and only once.
     pub static ref ENV_LOGGER: () = {
-        // env_logger::init();
+        env_logger::init();
         // Init logger with no timestamp data or module name.
         // env_logger::Builder::from_default_env().
         //     default_format_timestamp(false).
         //     default_format_module_path(false).
         //     format(|buf, record| writeln!(buf, "({:?}, {:?}) {}",
         //                                   get_det_id_clone(),
-        //                                   get_select_id(), record.args())).
+        //                                   get_event_id(), record.args())).
         //     init();
     };
     /// Record type. Initialized from environment variable RR_CHANNEL.
@@ -81,5 +81,7 @@ lazy_static! {
 }
 
 fn log_trace(msg: &str) {
-    trace!("({:?}, {:?}) {}", get_det_id_clone(), get_select_id(), msg);
+    let thread = std::thread::current();
+    trace!("name: {:?} | ({:?}, {:?}) | {}", thread.name(),
+           get_det_id(), get_event_id(), msg);
 }

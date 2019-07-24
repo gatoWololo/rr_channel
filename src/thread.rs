@@ -6,15 +6,20 @@ pub use std::thread::{current, panicking, park, park_timeout, sleep, yield_now};
 // use backtrace::Backtrace;
 use crate::log_trace;
 use std::sync::atomic::{AtomicU32, Ordering};
+use crate::record_replay::EventId;
 
-pub fn get_det_id() -> DetThreadId {
+pub fn get_det_id() -> Option<DetThreadId> {
     DET_ID.with(|di| {
-        di.borrow()
-            .as_ref()
-            .expect("thread_id not initialized")
-            .clone()
+        di.borrow().clone()
     })
 }
+
+pub fn set_det_id(new_id: DetThreadId) {
+    DET_ID.with(|id| {
+        *id.borrow_mut() = Some(new_id);
+    });
+}
+
 
 // pub fn get_det_id() -> DetThreadId {
 //     DET_ID.with(|di| {
@@ -28,16 +33,13 @@ pub fn get_det_id() -> DetThreadId {
 //     })
 // }
 
-pub fn get_det_id_clone() -> Option<DetThreadId> {
-    DET_ID.with(|di| di.borrow().clone())
-}
 
-pub fn get_select_id() -> u32 {
+pub fn get_event_id() -> EventId {
     EVENT_ID.with(|id| *id.borrow())
 }
 
 /// TODO I want to express that this is mutable somehow.
-pub fn inc_select_id() {
+pub fn inc_event_id() {
     EVENT_ID.with(|id| {
         *id.borrow_mut() += 1;
     });
@@ -48,13 +50,13 @@ pub fn get_and_inc_channel_id() -> u32 {
 }
 
 thread_local! {
-    /// TODO this id is probably redundant.
+    /// Unique ID to keep track of events. Not strictly necessary but extremely
+    /// helpful for debugging and sanity.
     static EVENT_ID: RefCell<u32> = RefCell::new(0);
 
     static DET_ID_SPAWNER: RefCell<DetIdSpawner> = RefCell::new(DetIdSpawner::starting());
     /// Unique threadID assigned at thread spawn to to each thread.
-    static DET_ID: RefCell<Option<DetThreadId>> = RefCell::new(DetThreadId::new());
-    ///
+    pub static DET_ID: RefCell<Option<DetThreadId>> = RefCell::new(DetThreadId::new());
     static CHANNEL_ID: AtomicU32 = AtomicU32::new(0);
 }
 
