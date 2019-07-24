@@ -73,9 +73,18 @@ impl<T> RecordReplay<T, ipc_channel::Error> for IpcReceiver<T>
 
     fn expected_recorded_events(&self, event: &Recorded) -> Result<T, ipc_channel::Error> {
         match event {
-            Recorded::IpcRecvSucc { sender_thread } => Ok(self.replay_recv(sender_thread)),
-            Recorded::IpcRecvErr(e) => Err(
-                Box::new(ipc_channel::ErrorKind::Custom("ErrorKing::Custom TODO".to_string()))),
+            Recorded::IpcRecvSucc { sender_thread } => {
+                let retval = self.replay_recv(sender_thread);
+                // Here is where we explictly increment our event_id!
+                inc_event_id();
+                Ok(retval)
+            }
+            Recorded::IpcRecvErr(e) => {
+                let err = "ErrorKing::Custom TODO".to_string();
+                // Here is where we explictly increment our event_id!
+                inc_event_id();
+                Err(Box::new(ipc_channel::ErrorKind::Custom(err)))
+            }
             e => {
                 let error = format!("Unexpected event: {:?} in replay for ipc_channel", e);
                 log_trace(&error);

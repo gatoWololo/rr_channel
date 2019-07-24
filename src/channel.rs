@@ -87,7 +87,12 @@ impl<T> Sender<T> {
     /// Send our det thread id along with the actual message for both
     /// record and replay.
     pub fn send(&self, msg: T) -> Result<(), SendError<T>> {
+        // Warning: This value can change dynamically since we sometimes temporarily
+        // set this value to arbitrary DetThreadIds to handle routing.
+        // See `router::RouterProxy::add_route` for details. So do not cache
+        // this value!
         let det_id = get_det_id();
+
         log_trace(&format!("Sender<{:?}>::send(({:?}, {:?}))",
                            self.channel_id, det_id, self.type_name));
         // Include send events as increasing the event id for more granular
@@ -217,11 +222,16 @@ macro_rules! impl_RecordReplay {
                 match event {
                     Recorded::$succ { sender_thread } => {
                         let sender_thread = sender_thread.clone();
-                        Ok(self.replay_recv(&sender_thread))
+                        let retval = self.replay_recv(&sender_thread);
+                        // Here is where we explictly increment our event_id!
+                        inc_event_id();
+                        Ok(retval)
                     }
 
                     Recorded::$err(e) => {
                         log_trace(&format!("Creating error event for: {:?}", Recorded::$err(*e)));
+                        // Here is where we explictly increment our event_id!
+                        inc_event_id();
                         Err(*e)
                     },
                     e => {
@@ -376,16 +386,4 @@ pub fn never<T>() -> Receiver<T> {
             id,
         },
     }
-}
-
-pub(crate) fn get_log_event() -> (Recorded, FlavorMarker) {
-    let det_id = get_det_id();
-    let event_id = get_event_id();
-
-    let (event, flavor) =
-        record_replay::get_log_entry(det_id.expect("get_log_event()"), event_id).
-        expect("get_log_event(): No such key in map.");
-    inc_event_id();
-
-    (event.clone(), *flavor)
 }

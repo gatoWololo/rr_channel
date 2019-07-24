@@ -27,6 +27,7 @@ pub use thread::{current, panicking, park, park_timeout, sleep, yield_now};
 pub use thread::{
     get_det_id, get_event_id, inc_event_id, DetIdSpawner, DetThreadId,
 };
+use thread::in_forwarding;
 
 use crate::record_replay::DetChannelId;
 
@@ -84,12 +85,25 @@ lazy_static! {
 
 fn log_trace(msg: &str) {
     let thread = std::thread::current();
-    trace!("name: {:?} | ({:?}, {:?}) | {}", thread.name(),
-           get_det_id(), get_event_id(), msg);
+    if in_forwarding() {
+        let event_name = "ROUTER";
+        trace!("thread: {:?} | event# {:?} | {}", thread.name(), event_name, msg);
+    } else {
+        let event_name = (get_det_id(), get_event_id());
+        trace!("thread: {:?} | event# {:?} | {}", thread.name(), event_name, msg);
+    }
+
 }
 
 fn log_trace_with(msg: &str, id: &DetChannelId) {
     let thread = std::thread::current();
-    trace!("| name: {:?} | id: ({:?}, {:?}) | msg: {} | chan: {:?}", thread.name(),
-           get_det_id(), get_event_id(), msg, id);
+    if in_forwarding() {
+        let event_name = "ROUTER";
+        trace!("thread: {:?} | event# {:?} | {} | chan: {:?}",
+               thread.name(), event_name, msg, id);
+    } else {
+        let event_name = (get_det_id(), get_event_id());
+        trace!("thread: {:?} | event# {:?} | {} | chan: {:?}",
+               thread.name(), event_name, msg, id);
+    }
 }

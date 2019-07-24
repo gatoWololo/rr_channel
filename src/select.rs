@@ -62,8 +62,6 @@ impl<'a> Select<'a> {
                 // Flavor type not check on Select::select() but on Select::recv()
                 match get_log_entry(det_id, get_event_id()) {
                     Some((event, flavor)) => {
-                        inc_event_id();
-
                         match event {
                             Recorded::Select(select_entry) => {
                                 SelectedOperation::Replay(select_entry, *flavor)
@@ -114,7 +112,6 @@ impl<'a> Select<'a> {
                 let (event, _) = get_log_entry(det_id, get_event_id()).
                     expect("No such key in map.");
                 inc_event_id();
-
                 match event {
                     Recorded::SelectReady { select_index } => *select_index,
                     e => panic!("Unexpected event Recorded from ready(): {:?}", e),
@@ -223,13 +220,16 @@ impl<'a> SelectedOperation<'a> {
                     panic!("Expected {:?}, saw {:?}", flavor, r.flavor());
                 }
                 log_trace("Calling replay_recv()");
-                Ok(r.replay_recv(sender_thread))
+                let retval = r.replay_recv(sender_thread);
+                inc_event_id();
+                Ok(retval)
             }
             SelectedOperation::Replay(SelectEvent::RecvError { .. }, flavor) => {
                 log_trace("SelectedOperation::Replay(SelectEvent::RecvError");
                 if flavor != r.flavor() {
                     panic!("Expected {:?}, saw {:?}", flavor, r.flavor());
                 }
+                inc_event_id();
                 Err(RecvError)
             }
             SelectedOperation::NoRR(selected) => {

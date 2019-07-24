@@ -253,7 +253,6 @@ pub struct RecordMetadata {
     pub(crate) id: DetChannelId,
 }
 
-use crate::channel::get_log_event;
 use crate::record_replay;
 use std::error::Error;
 
@@ -289,22 +288,25 @@ pub trait RecordReplay<T, E: Error> {
                         // or running under rayon, but maybe because of a missing wrap around
                         // std::thread)
                         warn!("DetThreadId was None. This execution may not be deterministic.");
+                        // Most call to inc_event_id happen in replay_recv(). Manually
+                        // increase here!
+                        inc_event_id();
                         func().map(|v| v.1)
                     }
                     Some(det_id) => {
                         match get_log_entry(det_id, get_event_id()) {
                             Some((event, flavor)) => {
-                                inc_event_id();
                                 if *flavor != metadata.flavor {
                                     panic!("Expected {:?}, saw {:?}", flavor, metadata.flavor);
                                 }
                                 self.expected_recorded_events(event)
                             }
                             None => {
+                                // No need to inc_event_id here... This thread will hang
+                                // forever.
                                 if blocking == Blocking::CannotBlock {
                                     panic!(format!("Missing entry in log. A call to {} should never block!", function_name));
                                 }
-                                inc_event_id();
                                 log_trace("No entry in log. Assuming this thread blocked on this select forever.");
                                 // No entry in log. This means that this event waiting forever
                                 // on this recv call.

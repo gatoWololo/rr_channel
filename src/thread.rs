@@ -42,6 +42,7 @@ pub fn get_event_id() -> EventId {
 pub fn inc_event_id() {
     EVENT_ID.with(|id| {
         *id.borrow_mut() += 1;
+        log_trace(&format!("Incremented TLS event_id: {:?}", *id.borrow()));
     });
 }
 
@@ -58,6 +59,27 @@ thread_local! {
     /// Unique threadID assigned at thread spawn to to each thread.
     pub static DET_ID: RefCell<Option<DetThreadId>> = RefCell::new(DetThreadId::new());
     static CHANNEL_ID: AtomicU32 = AtomicU32::new(0);
+    /// Hack to know when we're in the router. Forwading the DetThreadId to to the callback
+    /// by temporarily setting DET_ID to a different value.
+    static FORWADING_ID: RefCell<bool> = RefCell::new(false);
+}
+
+pub fn start_forwading_id(forwarding_id: Option<DetThreadId>) {
+    FORWADING_ID.with(|fi| {
+        *fi.borrow_mut() = true;
+    });
+    set_det_id(forwarding_id);
+}
+
+pub fn in_forwarding() -> bool {
+    FORWADING_ID.with(|fi| *fi.borrow())
+}
+
+pub fn stop_forwarding_id(original_id: Option<DetThreadId>) {
+    FORWADING_ID.with(|fi| {
+        *fi.borrow_mut() = false;
+    });
+    set_det_id(original_id);
 }
 
 /// Wrapper around thread::spawn. We will need this later to assign a
