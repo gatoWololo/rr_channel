@@ -7,6 +7,7 @@ use std::fs::File;
 use std::sync::Mutex;
 
 use crate::log_trace;
+use crate::log_trace_with;
 use crate::thread::get_det_id;
 use crate::thread::get_event_id;
 use crate::thread::inc_event_id;
@@ -327,23 +328,37 @@ pub trait RecordReplay<T, E: Error> {
     fn expected_recorded_events(&self, event: &Recorded)
                                 -> Result<T, E>;
 
-    fn replay_recv(&self, sender: &DetThreadId) -> T;
+    fn replay_recv(&self, sender: &Option<DetThreadId>) -> T;
 }
 
 use std::cell::RefMut;
 use std::collections::VecDeque;
 
 pub fn replay_recv<T, E: Error>(
-    sender: &DetThreadId,
-    mut buffer: RefMut<HashMap<DetThreadId, VecDeque<T>>>,
+    expected_sender: &Option<DetThreadId>,
     recv: impl Fn() -> Result<(Option<DetThreadId>, T), E>,
+    // TODO: Change from mut to &mut
+    buffer: &mut RefMut<HashMap<DetThreadId, VecDeque<T>>>,
+    none_buffer: &mut RefMut<VecDeque<T>>,
+    id: &DetChannelId,
 ) -> T {
-    log_trace("replay_recv()");
-    // Check our buffer to see if this value is already here.
-    if let Some(entries) = buffer.get_mut(sender) {
-        if let Some(entry) = entries.pop_front() {
-            log_trace("Recv message found in buffer.");
-            return entry;
+    log_trace_with(&format!("replay_recv(expected_sender: {:?}) ...", expected_sender), id);
+
+    match expected_sender {
+        None => {
+            if let Some(entry) = none_buffer.pop_front() {
+                log_trace_with("replay_recv(): Recv message found in none buffer.", id);
+                return entry;
+            }
+        }
+        Some(expected_sender) => {
+            // Check our buffer to see if this value is already here.
+            if let Some(entries) = buffer.get_mut(expected_sender) {
+                if let Some(entry) = entries.pop_front() {
+                    log_trace_with("replay_recv(): Recv message found in buffer.", id);
+                    return entry;
+                }
+            }
         }
     }
 
@@ -351,19 +366,30 @@ pub fn replay_recv<T, E: Error>(
     // buffered into self.buffer.
     loop {
         match recv() {
-            Ok((None, msg)) => panic!("replay_recv"),
-            Ok((Some(det_id), msg)) => {
-                // We found the message from the expected thread!
-                if det_id == *sender {
-                    log_trace("Recv message found through recv()");
-                    return msg;
+            // Value matches return it!
+            Ok((msg_sender, msg)) if msg_sender == *expected_sender => {
+                log_trace("Recv message found through recv()");
+                return msg;
+            }
+            // Value did no match. Buffer it. Handles both `none_buffer` and
+            // regular `buffer` case.
+            Ok((msg_sender, msg)) => {
+                let wrong_val = &format!("Wrong value found. Queing it for: {:?}",
+                                         msg_sender);
+                log_trace_with(wrong_val, id);
+
+                match msg_sender {
+                    None => {
+                        none_buffer.push_back(msg);
+                    }
+                    Some(msg_sender) => {
+                        // ensure we don't drop temporary reference.
+                        buffer.entry(msg_sender).
+                            or_insert(VecDeque::new()).
+                            push_back(msg);
+                    }
                 }
-                // We got a message from the wrong thread.
-                else {
-                    log_trace(&format!("Wrong value found. Queing value for thread: {:?}", det_id));
-                    let queue = buffer.entry(det_id).or_insert(VecDeque::new());
-                    queue.push_back(msg);
-                }
+
             }
             Err(e) => {
                 log_trace(&format!("Saw Err({:?})", e));

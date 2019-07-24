@@ -65,9 +65,9 @@ impl RouterProxy {
                     // Big Hack: Temporarily set TLS DetThreadId so original sender's
                     // DetThreadId is properly forwarded to receiver.
                     let original_id = get_det_id().expect("Router threadId not set?");
-                    set_det_id(forward_id.expect("Forward Id was None..."));
+                    set_det_id(forward_id);
                     callback(Ok(msg));
-                    set_det_id(original_id);
+                    set_det_id(Some(original_id));
                 }
                 Err(e) => {
                     callback(Err(e));

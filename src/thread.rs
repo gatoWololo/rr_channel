@@ -14,9 +14,9 @@ pub fn get_det_id() -> Option<DetThreadId> {
     })
 }
 
-pub fn set_det_id(new_id: DetThreadId) {
+pub fn set_det_id(new_id: Option<DetThreadId>) {
     DET_ID.with(|id| {
-        *id.borrow_mut() = Some(new_id);
+        *id.borrow_mut() = new_id;
     });
 }
 

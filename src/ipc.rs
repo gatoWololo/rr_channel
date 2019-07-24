@@ -9,7 +9,7 @@ use crate::ENV_LOGGER;
 use crate::RECORD_MODE;
 use ipc_channel::ipc::{self};
 // use ipc_channel::{Error, ErrorKind};
-
+use crate::thread::inc_event_id;
 use serde::{Deserialize, Serialize, ser::SerializeStruct};
 use std::cell::RefCell;
 use std::collections::hash_map::HashMap;
@@ -35,6 +35,7 @@ pub struct IpcReceiver<T>
 {
     pub(crate) receiver: ipc::IpcReceiver<(Option<DetThreadId>, T)>,
     buffer: RefCell<HashMap<DetThreadId, VecDeque<T>>>,
+    none_buffer: RefCell<VecDeque<T>>,
     pub(crate) metadata: RecordMetadata,
 }
 
@@ -46,6 +47,7 @@ impl<T> IpcReceiver<T> {
         IpcReceiver {
             receiver,
             buffer: RefCell::new(HashMap::new()),
+            none_buffer: RefCell::new(VecDeque::new()),
             metadata: RecordMetadata {
                 type_name: unsafe { std::intrinsics::type_name::<T>().to_string() },
                 flavor: FlavorMarker::Ipc,
@@ -71,12 +73,7 @@ impl<T> RecordReplay<T, ipc_channel::Error> for IpcReceiver<T>
 
     fn expected_recorded_events(&self, event: &Recorded) -> Result<T, ipc_channel::Error> {
         match event {
-            Recorded::IpcRecvSucc { sender_thread } => {
-                match sender_thread {
-                    None => panic!(format!("Sender thread is none for record: {:?}", event)),
-                    Some(sender_thread) => Ok(self.replay_recv(&sender_thread)),
-                }
-            }
+            Recorded::IpcRecvSucc { sender_thread } => Ok(self.replay_recv(sender_thread)),
             Recorded::IpcRecvErr(e) => Err(
                 Box::new(ipc_channel::ErrorKind::Custom("ErrorKing::Custom TODO".to_string()))),
             e => {
@@ -87,8 +84,14 @@ impl<T> RecordReplay<T, ipc_channel::Error> for IpcReceiver<T>
         }
     }
 
-    fn replay_recv(&self, sender: &DetThreadId) -> T {
-        record_replay::replay_recv(sender, self.buffer.borrow_mut(), || self.receiver.recv())
+    fn replay_recv(&self, sender: &Option<DetThreadId>) -> T {
+        record_replay::replay_recv(
+            sender,
+            || self.receiver.recv(),
+            &mut self.buffer.borrow_mut(),
+            &mut self.none_buffer.borrow_mut(),
+            &self.metadata.id,
+        )
     }
 }
 
@@ -136,6 +139,10 @@ impl<T> IpcSender<T> where T: Serialize,
     /// record and replay.
     pub fn send(&self, data: T) -> Result<(), ipc_channel::Error> {
         log_trace(&format!("Sender<{:?}>::send()", self.id));
+        // Include send events as increasing the event id for more granular
+        // logical times.
+        inc_event_id();
+
         // We send the det_id even when running in RecordReplayMode::NoRR,
         // but that's okay. It makes logic a little simpler.
         self.sender.send((get_det_id(), data))

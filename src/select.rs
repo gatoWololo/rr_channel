@@ -219,16 +219,11 @@ impl<'a> SelectedOperation<'a> {
             // replay_recv takes care of proper buffering.
             SelectedOperation::Replay(SelectEvent::Success { sender_thread, .. }, flavor) => {
                 log_trace("SelectedOperation::Replay(SelectEvent::Success");
-                match sender_thread {
-                    Some(sender_thread) => {
-                        if flavor != r.flavor() {
-                            panic!("Expected {:?}, saw {:?}", flavor, r.flavor());
-                        }
-                        log_trace("Calling replay_recv()");
-                        Ok(r.replay_recv(sender_thread))
-                    }
-                    None => panic!("SelectedOperation::Replay: sender thread is None"),
+                if flavor != r.flavor() {
+                    panic!("Expected {:?}, saw {:?}", flavor, r.flavor());
                 }
+                log_trace("Calling replay_recv()");
+                Ok(r.replay_recv(sender_thread))
             }
             SelectedOperation::Replay(SelectEvent::RecvError { .. }, flavor) => {
                 log_trace("SelectedOperation::Replay(SelectEvent::RecvError");

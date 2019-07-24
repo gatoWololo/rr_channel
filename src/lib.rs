@@ -28,6 +28,8 @@ pub use thread::{
     get_det_id, get_event_id, inc_event_id, DetIdSpawner, DetThreadId,
 };
 
+use crate::record_replay::DetChannelId;
+
 /// A singleton instance exists globally for the current mode via lazy_static global variable.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum RecordReplayMode {
@@ -84,4 +86,10 @@ fn log_trace(msg: &str) {
     let thread = std::thread::current();
     trace!("name: {:?} | ({:?}, {:?}) | {}", thread.name(),
            get_det_id(), get_event_id(), msg);
+}
+
+fn log_trace_with(msg: &str, id: &DetChannelId) {
+    let thread = std::thread::current();
+    trace!("| name: {:?} | id: ({:?}, {:?}) | msg: {} | chan: {:?}", thread.name(),
+           get_det_id(), get_event_id(), msg, id);
 }

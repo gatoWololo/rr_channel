@@ -2,6 +2,7 @@ use crate::log_trace;
 use crate::record_replay::{self, FlavorMarker, Recorded, Blocking};
 use crate::thread::get_and_inc_channel_id;
 use crate::thread::*;
+use crate::log_trace_with;
 use crate::RecordReplayMode;
 use crate::ENV_LOGGER;
 use crate::RECORD_MODE;
@@ -89,6 +90,9 @@ impl<T> Sender<T> {
         let det_id = get_det_id();
         log_trace(&format!("Sender<{:?}>::send(({:?}, {:?}))",
                            self.channel_id, det_id, self.type_name));
+        // Include send events as increasing the event id for more granular
+        // logical times.
+        inc_event_id();
         // We send the det_id even when running in RecordReplayMode::NoRR,
         // but that's okay. It makes logic a little simpler.
         // crossbeam::send() returns Result<(), SendError<(DetThreadId, T)>>,
@@ -167,7 +171,8 @@ impl<T> Flavor<T> {
     generate_channel_method!(try_recv, TryRecvError);
 
     pub fn recv_timeout(&self, duration: Duration) -> Result<(Option<DetThreadId>, T), RecvTimeoutError> {
-        log_trace("Flavor::recv_timeout");
+        // Not really useful.
+        // log_trace("Flavor::recv_timeout");
         match self {
             Flavor::After(receiver) => match receiver.recv_timeout(duration) {
                 Ok(msg) => Ok((get_det_id(), msg)),
@@ -212,7 +217,7 @@ macro_rules! impl_RecordReplay {
                 match event {
                     Recorded::$succ { sender_thread } => {
                         let sender_thread = sender_thread.clone();
-                        Ok(self.replay_recv(&sender_thread.expect("expected_recorded_events")))
+                        Ok(self.replay_recv(&sender_thread))
                     }
 
                     Recorded::$err(e) => {
@@ -227,10 +232,13 @@ macro_rules! impl_RecordReplay {
                 }
             }
 
-            fn replay_recv(&self, sender: &DetThreadId) -> T {
-                record_replay::replay_recv(&sender, self.buffer.borrow_mut(), || {
-                    self.receiver.recv()
-                })
+            fn replay_recv(&self, sender: &Option<DetThreadId>) -> T {
+                record_replay::replay_recv(&sender,
+                                           || self.receiver.recv(),
+                                           &mut self.buffer.borrow_mut(),
+                                           &mut self.none_buffer.borrow_mut(),
+                                           &self.metadata.id,
+                )
             }
         }
     };
@@ -285,48 +293,15 @@ impl<T> Receiver<T> {
         &self.metadata
     }
 
-    /// TODO: Move borrow_mut() outside the loop.
-    pub fn replay_recv(&self, sender: &DetThreadId) -> T {
-        log_trace("replay_recv() ...");
-        // Check our buffer to see if this value is already here.
-        if let Some(entries) = self.buffer.borrow_mut().get_mut(sender) {
-            if let Some(entry) = entries.pop_front() {
-                log_trace("Recv message found in buffer.");
-                return entry;
-            }
-        }
-
-        // TODO We request a message from a none buffer?
-
-        // Loop until we get the message we're waiting for. All "wrong" messages are
-        // buffered into self.buffer.
-        loop {
-            match self.receiver.recv() {
-                Ok((None, msg)) => {
-                    log_trace("Saw message where sender was None");
-                    self.none_buffer.borrow_mut().push_back(msg);
-                }
-                Ok((Some(det_id), msg)) => {
-                    // We found the message from the expected thread!
-                    if det_id == *sender {
-                        log_trace("Recv message found through recv()");
-                        return msg;
-                    }
-                    // We got a message from the wrong thread.
-                    else {
-                        log_trace(&format!("Wrong value found. Queing value for thread: {:?}", det_id));
-                        // ensure we don't drop temporary reference.
-                        let mut borrow = self.buffer.borrow_mut();
-                        let queue = borrow.entry(det_id).or_insert(VecDeque::new());
-                        queue.push_back(msg);
-                    }
-                }
-                Err(e) => {
-                    log_trace(&format!("Saw Err({:?})", e));
-                    // Got a disconnected message. Ignore.
-                }
-            }
-        }
+    // TODO: Move borrow_mut() outside the loop.
+    pub fn replay_recv(&self, sender: &Option<DetThreadId>) -> T {
+        record_replay::replay_recv(
+            sender,
+            || self.receiver.recv(),
+            &mut self.buffer.borrow_mut(),
+            &mut self.none_buffer.borrow_mut(),
+            &self.metadata.id,
+        )
     }
 
     pub fn get_marker(receiver: &Flavor<T>) -> FlavorMarker {
