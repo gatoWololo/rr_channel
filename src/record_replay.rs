@@ -60,6 +60,7 @@ pub struct LogEntry {
     pub event_id: u32,
     pub event: Recorded,
     pub channel: FlavorMarker,
+    pub chan_id: DetChannelId,
     // pub real_thread_id: String,
     // pub pid: u32,
     pub type_name: String,
@@ -151,7 +152,7 @@ lazy_static! {
 
     /// Global map holding all indexes from the record phase.
     /// Lazily initialized on replay mode.
-    pub static ref RECORDED_INDICES: HashMap<(DetThreadId, u32), (Recorded, FlavorMarker)> = {
+    pub static ref RECORDED_INDICES: HashMap<(DetThreadId, u32), (Recorded, FlavorMarker, DetChannelId)> = {
         log_trace("Initializing RECORDED_INDICES lazy static.");
         use std::io::BufReader;
 
@@ -170,14 +171,14 @@ lazy_static! {
             }
 
             let key = (entry.current_thread.clone().unwrap(), entry.event_id);
-            let value = (entry.event.clone(), entry.channel);
+            let value = (entry.event.clone(), entry.channel, entry.chan_id.clone());
 
             let prev = recorded_indices.insert(key, value);
             if prev.is_some() {
                 panic!("Failed to replay. Adding key-value ({:?}, {:?}) but previous value \
                         {:?} already exited. Hashmap entries should be unique.",
                        (entry.current_thread, entry.event_id),
-                       (entry.event, entry.channel),
+                       (entry.event, entry.channel, entry.chan_id),
                        prev);
             }
 
@@ -188,9 +189,7 @@ lazy_static! {
     };
 }
 
-/// Unwrap rr_channel return value from calling .recv() and log results. Should only
-/// be called in Record Mode.
-pub fn log(event: Recorded, channel: FlavorMarker, type_name: &str) {
+pub fn log(event: Recorded, channel: FlavorMarker, type_name: &str, chan_id: &DetChannelId) {
     log_trace("record_replay::log()");
     use std::io::Write;
 
@@ -199,11 +198,14 @@ pub fn log(event: Recorded, channel: FlavorMarker, type_name: &str) {
     let event_id = get_event_id();
     let tid = format!("{:?}", ::std::thread::current().id());
     let pid = std::process::id();
+    let chan_id = chan_id.clone();
+
     let entry: LogEntry = LogEntry {
         current_thread,
         event_id,
         event,
         channel,
+        chan_id,
         // real_thread_id: tid, pid,
         type_name: type_name.to_owned(),
     };
@@ -222,7 +224,7 @@ pub fn log(event: Recorded, channel: FlavorMarker, type_name: &str) {
 pub fn get_log_entry<'a>(
     our_thread: DetThreadId,
     event_id: EventId,
-) -> Option<&'a (Recorded, FlavorMarker)> {
+) -> Option<&'a (Recorded, FlavorMarker, DetChannelId)> {
     let key = (our_thread, event_id);
     let log_entry = RECORDED_INDICES.get(&key);
 
@@ -279,7 +281,7 @@ pub trait RecordReplay<T, E: Error> {
         match metadata.mode {
             RecordReplayMode::Record => {
                 let (result, event) = self.to_recorded_event(func());
-                record_replay::log(event, metadata.flavor, &metadata.type_name);
+                record_replay::log(event, metadata.flavor, &metadata.type_name, &metadata.id);
                 result
             }
             RecordReplayMode::Replay => {
@@ -299,9 +301,13 @@ pub trait RecordReplay<T, E: Error> {
                     }
                     Some(det_id) => {
                         match get_log_entry(det_id, get_event_id()) {
-                            Some((event, flavor)) => {
+                            Some((event, flavor, id)) => {
                                 if *flavor != metadata.flavor {
                                     panic!("Expected {:?}, saw {:?}", flavor, metadata.flavor);
+                                }
+
+                                if *id != metadata.id {
+                                    panic!("Expected {:?}, saw {:?}", id, metadata.id);
                                 }
                                 self.expected_recorded_events(event)
                             }
@@ -429,7 +435,7 @@ pub(crate) trait RecordReplaySend<T, E> {
                 // Note: send() must come before record_replay::log() as it internally
                 // increments event_id.
                 let result = self.send(forwading_id, msg);
-                record_replay::log(event, flavor.clone(), type_name);
+                record_replay::log(event, flavor.clone(), type_name, id);
                 result
             }
             // Ensure event is present and channel ids match.
@@ -438,12 +444,16 @@ pub(crate) trait RecordReplaySend<T, E> {
                     // Nothing for us to check...
                     None => warn!("det_id is None. This execution may be nondeterministic"),
                     Some(det_id) => {
-                        let (recorded, sender_flavor) =
+                        let (recorded, sender_flavor, chan_id) =
                             record_replay::get_log_entry(det_id, get_event_id()).
                             unwrap();
 
                         if sender_flavor != flavor {
                             panic!("Expected {:?}, saw {:?}", flavor, sender_flavor);
+                        }
+
+                        if chan_id != id {
+                            panic!("Expected {:?}, saw {:?}", chan_id, id);
                         }
 
                         self.check_log_entry(recorded.clone());

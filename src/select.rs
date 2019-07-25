@@ -8,6 +8,7 @@ use crate::{Receiver, RecordReplayMode, Sender, RECORD_MODE};
 use crossbeam_channel::RecvError;
 use crossbeam_channel::SendError;
 use log::{debug, info, trace, warn};
+use crate::record_replay::DetChannelId;
 
 /// Wrapper type around crossbeam's Select.
 pub struct Select<'a> {
@@ -61,10 +62,11 @@ impl<'a> Select<'a> {
                 // Query our log to see what index was selected!() during the replay phase.
                 // Flavor type not check on Select::select() but on Select::recv()
                 match get_log_entry(det_id, get_event_id()) {
-                    Some((event, flavor)) => {
+                    Some((event, flavor, chan_id)) => {
                         match event {
                             Recorded::Select(select_entry) => {
-                                SelectedOperation::Replay(select_entry, *flavor)
+                                SelectedOperation::Replay(select_entry,
+                                                          *flavor, chan_id.clone())
                             }
                             e => {
                                 log_trace(&format!(
@@ -103,13 +105,15 @@ impl<'a> Select<'a> {
                     Recorded::SelectReady { select_index },
                     FlavorMarker::None,
                     "ready",
+                    // Ehh, we fake it here. We never check this value anyways.
+                    &DetChannelId { det_thread_id: None, channel_id: 0 }
                 );
                 select_index
             }
             RecordReplayMode::Replay => {
                 let det_id = get_det_id().expect("ready(): get_det_id called outside thread");
                 // No channel flavor.
-                let (event, _) = get_log_entry(det_id, get_event_id()).
+                let (event, _, _) = get_log_entry(det_id, get_event_id()).
                     expect("No such key in map.");
                 inc_event_id();
                 match event {
@@ -123,7 +127,7 @@ impl<'a> Select<'a> {
 }
 
 pub enum SelectedOperation<'a> {
-    Replay(&'a SelectEvent, FlavorMarker),
+    Replay(&'a SelectEvent, FlavorMarker, DetChannelId),
     Record(crossbeam_channel::SelectedOperation<'a>),
     NoRR(crossbeam_channel::SelectedOperation<'a>),
 }
@@ -144,10 +148,12 @@ impl<'a> SelectedOperation<'a> {
     /// We don't log calls to this method as they will always be determinstic.
     pub fn index(&self) -> usize {
         match self {
-            SelectedOperation::Replay(SelectEvent::Success { selected_index, .. }, _)
-            | SelectedOperation::Replay(SelectEvent::RecvError { selected_index, .. }, _) => {
-                *selected_index
-            }
+            SelectedOperation::Replay(
+                SelectEvent::Success { selected_index, .. }, _, _)
+                | SelectedOperation::Replay(
+                    SelectEvent::RecvError { selected_index, .. }, _, _) => {
+                    *selected_index
+                }
             SelectedOperation::Record(selected) | SelectedOperation::NoRR(selected) => {
                 selected.index()
             }
@@ -208,26 +214,35 @@ impl<'a> SelectedOperation<'a> {
                 };
 
                 let type_name = unsafe { std::intrinsics::type_name::<T>() };
-                record_replay::log(Recorded::Select(select_event), r.flavor(), type_name);
+                record_replay::log(Recorded::Select(select_event), r.flavor(), type_name,
+                                   &r.metadata.id);
                 msg
             }
             // We do not use the select API at all on replays. Wait for correct
             // message to come by receving on channel directly.
             // replay_recv takes care of proper buffering.
-            SelectedOperation::Replay(SelectEvent::Success { sender_thread, .. }, flavor) => {
+            SelectedOperation::Replay(
+                SelectEvent::Success { sender_thread, .. }, flavor, ref chan_id) => {
                 log_trace("SelectedOperation::Replay(SelectEvent::Success");
                 if flavor != r.flavor() {
                     panic!("Expected {:?}, saw {:?}", flavor, r.flavor());
+                }
+                if chan_id != &r.metadata.id {
+                    panic!("Expected {:?}, saw {:?}", chan_id, r.metadata.id);
                 }
                 log_trace("Calling replay_recv()");
                 let retval = r.replay_recv(sender_thread);
                 inc_event_id();
                 Ok(retval)
             }
-            SelectedOperation::Replay(SelectEvent::RecvError { .. }, flavor) => {
+            SelectedOperation::Replay(
+                SelectEvent::RecvError { .. }, flavor, chan_id) => {
                 log_trace("SelectedOperation::Replay(SelectEvent::RecvError");
                 if flavor != r.flavor() {
                     panic!("Expected {:?}, saw {:?}", flavor, r.flavor());
+                }
+                if chan_id != r.metadata.id {
+                    panic!("Expected {:?}, saw {:?}", chan_id, r.metadata.id);
                 }
                 inc_event_id();
                 Err(RecvError)
