@@ -16,6 +16,7 @@ use std::collections::VecDeque;
 use std::error::Error;
 use std::time::Duration;
 use std::time::Instant;
+use crate::record_replay::RecordReplaySend;
 
 use std::cell::RefCell;
 use crate::record_replay::DetChannelId;
@@ -83,60 +84,42 @@ impl<T> Clone for Sender<T> {
     }
 }
 
+impl<T> RecordReplaySend<T, SendError<T>> for Sender<T> {
+    fn check_log_entry(&self, entry: Recorded) {
+        match entry {
+            Recorded::Sender(chan_id) => {
+                if chan_id != self.channel_id {
+                    panic!("Expected {:?}, saw {:?}", chan_id, self.channel_id)
+                }
+            }
+            _ => panic!("Expected Recorded::Sender. Saw: {:?}", entry),
+        }
+    }
+
+    fn send(&self, thread_id: Option<DetThreadId>, msg: T) -> Result<(), SendError<T>> {
+        self.sender.send((thread_id, msg)).
+            map_err(|e| SendError(e.into_inner().1))
+    }
+
+    fn to_recorded_event(&self, id: DetChannelId) -> Recorded {
+        Recorded::Sender(id)
+    }
+}
+
 impl<T> Sender<T> {
     /// Send our det thread id along with the actual message for both
     /// record and replay.
     pub fn send(&self, msg: T) -> Result<(), SendError<T>> {
-        // Warning: This value can change dynamically since we sometimes temporarily
-        // set this value to arbitrary DetThreadIds to handle routing.
-        // See `router::RouterProxy::add_route` for details. So do not cache
-        // this value!
-        let det_id = get_det_id();
-
-        log_trace(&format!("Sender<{:?}>::send(({:?}, {:?}))",
-                           self.channel_id, det_id, self.type_name));
-        // Include send events as increasing the event id for more granular
-        // logical times.
-        inc_event_id();
-        // We send the det_id even when running in RecordReplayMode::NoRR,
-        // but that's okay. It makes logic a little simpler.
-        // crossbeam::send() returns Result<(), SendError<(DetThreadId, T)>>,
-        // we want to make this opaque to the user. Just return the T on error.
-        self.sender
-            .send((det_id, msg))
-            .map_err(|e| SendError(e.into_inner().1))
-    }
-
-    /// Similar to send, but uses the passed `id` instead of calling `get_det_id()`.
-    /// Useful for the IPC router to "route" the original DetThreadId instead of
-    /// the routers.
-    /// WARNING: Missuing this function can result in nondeterministic behavior!
-    pub fn send_with_id(&self, msg: T, id: Option<DetThreadId>)
-                               -> Result<(), SendError<T>> {
-        log_trace(&format!("Sender<{:?}>::send_with_id()", self.channel_id));
-        log_trace(&format!("Forwarding ID: {:?}", id));
-        self.sender
-            .send((id, msg))
-            .map_err(|e| SendError(e.into_inner().1))
+        self.record_replay_send(
+            msg,
+            &self.mode,
+            &self.channel_id,
+            &self.type_name,
+            &self.channel_type,
+            "CrossbeamSender",
+        )
     }
 }
-
-// use std::fmt::Debug;
-// trait PrintData<T> {
-//     fn get_debug(&self, data: T) -> String;
-// }
-
-// impl<T> PrintData<T> for Sender<T> {
-//     default fn get_debug(&self, data: T) -> String {
-//         "No Debug Data".to_string()
-//     }
-// }
-
-// impl<T: Debug> PrintData<T> for Sender<T> {
-//     fn get_debug(&self, data: T) -> String {
-//         format!("{:?}", data)
-//     }
-// }
 
 /// Holds different channels types which may have slightly different types.
 /// This is just the complexity cost of piggybacking off crossbeam_channels
@@ -241,15 +224,6 @@ macro_rules! impl_RecordReplay {
                     }
                 }
             }
-
-            fn replay_recv(&self, sender: &Option<DetThreadId>) -> T {
-                record_replay::replay_recv(&sender,
-                                           || self.receiver.recv(),
-                                           &mut self.buffer.borrow_mut(),
-                                           &mut self.none_buffer.borrow_mut(),
-                                           &self.metadata.id,
-                )
-            }
         }
     };
 }
@@ -277,6 +251,15 @@ impl<T> Receiver<T> {
         }
     }
 
+    pub(crate) fn replay_recv(&self, sender: &Option<DetThreadId>) -> T {
+        record_replay::replay_recv(&sender,
+                                   || self.receiver.recv(),
+                                   &mut self.buffer.borrow_mut(),
+                                   &mut self.none_buffer.borrow_mut(),
+                                   &self.metadata.id,
+        )
+    }
+
     pub fn flavor(&self) -> FlavorMarker {
         self.metadata.flavor
     }
@@ -301,17 +284,6 @@ impl<T> Receiver<T> {
 
     pub fn metadata(&self) -> &RecordMetadata {
         &self.metadata
-    }
-
-    // TODO: Move borrow_mut() outside the loop.
-    pub fn replay_recv(&self, sender: &Option<DetThreadId>) -> T {
-        record_replay::replay_recv(
-            sender,
-            || self.receiver.recv(),
-            &mut self.buffer.borrow_mut(),
-            &mut self.none_buffer.borrow_mut(),
-            &self.metadata.id,
-        )
     }
 
     pub fn get_marker(receiver: &Flavor<T>) -> FlavorMarker {

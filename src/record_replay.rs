@@ -11,11 +11,13 @@ use crate::log_trace_with;
 use crate::thread::get_det_id;
 use crate::thread::get_event_id;
 use crate::thread::inc_event_id;
+use crate::thread::in_forwarding;
 use crossbeam_channel::{RecvError, RecvTimeoutError, TryRecvError};
 use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::BufRead;
+use crate::thread::get_temp_det_id;
 
 // TODO use environment variables to generalize this.
 const LOG_FILE_NAME: &str = "/home/gatowololo/det_file.txt";
@@ -115,6 +117,8 @@ pub enum Recorded {
     // #[serde(with = "ErrorKindDef")]
     IpcRecvErr(IpcDummyError),
 
+    Sender(DetChannelId),
+    IpcSender(DetChannelId),
     // IpcRouterSelectSucc {
     //     select_indices: Vec<u64>,
     // }
@@ -229,14 +233,14 @@ pub fn get_log_entry<'a>(
     log_entry
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub struct DetChannelId {
     pub det_thread_id: Option<DetThreadId>,
     pub channel_id: u32
 }
 pub type EventId = u32;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct RecordMetadata {
     /// Unique identifier assigned to every channel. Deterministic and unique
     /// even with racing thread creation. DetThreadId refers to the original
@@ -329,8 +333,6 @@ pub trait RecordReplay<T, E: Error> {
 
     fn expected_recorded_events(&self, event: &Recorded)
                                 -> Result<T, E>;
-
-    fn replay_recv(&self, sender: &Option<DetThreadId>) -> T;
 }
 
 use std::cell::RefMut;
@@ -400,3 +402,68 @@ pub fn replay_recv<T, E: Error>(
         }
     }
 }
+
+pub(crate) trait RecordReplaySend<T, E> {
+    fn record_replay_send(
+        &self,
+        msg: T,
+        mode: &RecordReplayMode,
+        id: &DetChannelId,
+        type_name: &str,
+        flavor: &FlavorMarker,
+        sender_name: &str,
+    ) -> Result<(), E> {
+        // Because of the router, we want to "forwad" the original sender's DetThreadId
+        // sometimes. However, for the record log, we still want to use the original
+        // thread's DetThreadId. Otherwise we will have "repeated" entries in the log
+        // which look like they're coming from the same thread.
+        let forwading_id = if in_forwarding() { get_temp_det_id() } else { get_det_id() };
+
+        log_trace(&format!("{}<{:?}>::send(({:?}, {:?}))",
+                           sender_name, id, forwading_id, type_name));
+
+        match mode {
+            // Record event.
+            RecordReplayMode::Record => {
+                let event = self.to_recorded_event(id.clone());
+                // Note: send() must come before record_replay::log() as it internally
+                // increments event_id.
+                let result = self.send(forwading_id, msg);
+                record_replay::log(event, flavor.clone(), type_name);
+                result
+            }
+            // Ensure event is present and channel ids match.
+            RecordReplayMode::Replay => {
+                match get_det_id() {
+                    // Nothing for us to check...
+                    None => warn!("det_id is None. This execution may be nondeterministic"),
+                    Some(det_id) => {
+                        let (recorded, sender_flavor) =
+                            record_replay::get_log_entry(det_id, get_event_id()).
+                            unwrap();
+
+                        if sender_flavor != flavor {
+                            panic!("Expected {:?}, saw {:?}", flavor, sender_flavor);
+                        }
+
+                        self.check_log_entry(recorded.clone());
+                    }
+                }
+                let result = self.send(forwading_id, msg);
+                inc_event_id();
+                result
+            }
+            RecordReplayMode::NoRR => {
+                // TODO. Should this use the forwading id as well?
+                self.send(get_det_id(), msg)
+            }
+        }
+    }
+
+    fn check_log_entry(&self, entry: Recorded);
+
+    fn send(&self, thread_id: Option<DetThreadId>, msg: T) -> Result<(), E>;
+
+    fn to_recorded_event(&self, id: DetChannelId) -> Recorded;
+}
+

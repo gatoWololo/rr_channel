@@ -87,7 +87,8 @@ fn log_trace(msg: &str) {
     let thread = std::thread::current();
     if in_forwarding() {
         let event_name = "ROUTER";
-        trace!("thread: {:?} | event# {:?} | {}", thread.name(), event_name, msg);
+        trace!("thread: {:?} | event# {:?} {} | {}",
+               thread.name(), event_name, get_event_id(), msg);
     } else {
         let event_name = (get_det_id(), get_event_id());
         trace!("thread: {:?} | event# {:?} | {}", thread.name(), event_name, msg);

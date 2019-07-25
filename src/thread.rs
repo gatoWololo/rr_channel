@@ -20,6 +20,18 @@ pub fn set_det_id(new_id: Option<DetThreadId>) {
     });
 }
 
+pub fn get_temp_det_id() -> Option<DetThreadId> {
+    TEMP_DET_ID.with(|di| {
+        di.borrow().clone()
+    })
+}
+
+pub fn set_temp_det_id(new_id: Option<DetThreadId>) {
+    TEMP_DET_ID.with(|id| {
+        *id.borrow_mut() = new_id;
+    });
+}
+
 
 // pub fn get_det_id() -> DetThreadId {
 //     DET_ID.with(|di| {
@@ -62,13 +74,16 @@ thread_local! {
     /// Hack to know when we're in the router. Forwading the DetThreadId to to the callback
     /// by temporarily setting DET_ID to a different value.
     static FORWADING_ID: RefCell<bool> = RefCell::new(false);
+    /// DetId set when forwading id. Should only be accessed if in_forwading() returns
+    /// true. Which is set by start_forwading_id() and ends by stop_forwading_id()
+    pub static TEMP_DET_ID: RefCell<Option<DetThreadId>> = RefCell::new(DetThreadId::new());
 }
 
 pub fn start_forwading_id(forwarding_id: Option<DetThreadId>) {
     FORWADING_ID.with(|fi| {
         *fi.borrow_mut() = true;
     });
-    set_det_id(forwarding_id);
+    set_temp_det_id(forwarding_id);
 }
 
 pub fn in_forwarding() -> bool {
@@ -79,7 +94,7 @@ pub fn stop_forwarding_id(original_id: Option<DetThreadId>) {
     FORWADING_ID.with(|fi| {
         *fi.borrow_mut() = false;
     });
-    set_det_id(original_id);
+    set_temp_det_id(original_id);
 }
 
 /// Wrapper around thread::spawn. We will need this later to assign a

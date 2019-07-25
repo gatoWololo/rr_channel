@@ -24,7 +24,7 @@ pub use ipc_channel::ipc::{IpcBytesReceiver, IpcBytesSender};
 pub use ipc_channel::Error;
 pub use ipc_channel::ipc::IpcOneShotServer;
 use crate::record_replay::DetChannelId;
-
+use crate::record_replay::RecordReplaySend;
 
 // pub struct OpaqueIpcReceiver {
     // ???
@@ -92,16 +92,6 @@ impl<T> RecordReplay<T, ipc_channel::Error> for IpcReceiver<T>
             }
         }
     }
-
-    fn replay_recv(&self, sender: &Option<DetThreadId>) -> T {
-        record_replay::replay_recv(
-            sender,
-            || self.receiver.recv(),
-            &mut self.buffer.borrow_mut(),
-            &mut self.none_buffer.borrow_mut(),
-            &self.metadata.id,
-        )
-    }
 }
 
 impl<T> IpcReceiver<T>
@@ -120,16 +110,22 @@ impl<T> IpcReceiver<T>
     pub fn to_opaque(self) -> OpaqueIpcReceiver {
         self.receiver.to_opaque()
     }
+
+    fn replay_recv(&self, sender: &Option<DetThreadId>) -> T {
+        record_replay::replay_recv(
+            sender,
+            || self.receiver.recv(),
+            &mut self.buffer.borrow_mut(),
+            &mut self.none_buffer.borrow_mut(),
+            &self.metadata.id,
+        )
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct IpcSender<T> {
     sender: ipc::IpcSender<(Option<DetThreadId>, T)>,
-    /// Unique identifier assigned to every channel. Deterministic and unique
-    /// even with racing thread creation. DetThreadId refers to the original
-    /// creator of this thread.
-    /// The partner Receiver and Sender shares the same id.
-    pub(crate) id: DetChannelId,
+    pub(crate) metadata: RecordMetadata,
 }
 
 impl<T> Clone for IpcSender<T> where T: Serialize,
@@ -137,8 +133,29 @@ impl<T> Clone for IpcSender<T> where T: Serialize,
     fn clone(&self) -> Self {
         IpcSender {
             sender: self.sender.clone(),
-            id: self.id.clone(),
+            metadata: self.metadata.clone(),
         }
+    }
+}
+
+impl<T> RecordReplaySend<T, Error> for IpcSender<T> where T: Serialize {
+    fn check_log_entry(&self, entry: Recorded) {
+        match entry {
+            Recorded::IpcSender(chan_id) => {
+                if chan_id != self.metadata.id {
+                    panic!("Expected {:?}, saw {:?}", chan_id, self.metadata.id)
+                }
+            }
+            _ => panic!("Expected Recorded::Sender. Saw: {:?}", entry),
+        }
+    }
+
+    fn send(&self, thread_id: Option<DetThreadId>, msg: T) -> Result<(), Error> {
+        self.sender.send((thread_id, msg))
+    }
+
+    fn to_recorded_event(&self, id: DetChannelId) -> Recorded {
+        Recorded::IpcSender(id)
     }
 }
 
@@ -147,14 +164,14 @@ impl<T> IpcSender<T> where T: Serialize,
     /// Send our det thread id along with the actual message for both
     /// record and replay.
     pub fn send(&self, data: T) -> Result<(), ipc_channel::Error> {
-        log_trace(&format!("Sender<{:?}>::send()", self.id));
-        // Include send events as increasing the event id for more granular
-        // logical times.
-        inc_event_id();
-
-        // We send the det_id even when running in RecordReplayMode::NoRR,
-        // but that's okay. It makes logic a little simpler.
-        self.sender.send((get_det_id(), data))
+        self.record_replay_send(
+            data,
+            &self.metadata.mode,
+            &self.metadata.id,
+            &self.metadata.type_name,
+            &self.metadata.flavor,
+            "IpcSender",
+        )
     }
 
     pub fn connect(name: String) -> Result<IpcSender<T>, std::io::Error> {
@@ -166,8 +183,14 @@ impl<T> IpcSender<T> where T: Serialize,
         let type_name = unsafe { std::intrinsics::type_name::<T>() };
         log_trace(&format!("Sender connected created: {:?} {:?}", id, type_name));
 
+        let metadata = RecordMetadata {
+            type_name: type_name.to_string(),
+            flavor: FlavorMarker::Ipc,
+            mode: *RECORD_MODE,
+            id,
+        };
         ipc_channel::ipc::IpcSender::connect(name).
-            map(|sender| IpcSender { sender, id })
+            map(|sender| IpcSender { sender, metadata })
     }
 }
 
@@ -185,10 +208,17 @@ where
     let type_name = unsafe { std::intrinsics::type_name::<T>() };
     log_trace(&format!("IPC channel created: {:?} {:?}", id, type_name));
 
+    let metadata = RecordMetadata {
+        type_name: type_name.to_string(),
+        flavor: FlavorMarker::Ipc,
+        mode: *RECORD_MODE,
+        id: id.clone(),
+    };
+
     Ok((
         IpcSender {
             sender,
-            id: id.clone(),
+            metadata,
         },
         IpcReceiver::new(receiver, id),
     ))
