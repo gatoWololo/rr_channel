@@ -9,7 +9,6 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
-use crate::thread;
 use crate::thread::DetThreadId;
 use crate::log_trace;
 use crate::thread::get_det_id;
@@ -18,10 +17,9 @@ use crate::thread::set_det_id;
 use crate::thread::start_forwading_id;
 use crate::thread::stop_forwarding_id;
 
-// use crate::ipc::OpaqueIpcReceiver;
-use ipc_channel::ipc::OpaqueIpcReceiver;
 use crate::ipc::{
     self, IpcReceiver, IpcReceiverSet, IpcSelectionResult, IpcSender, OpaqueIpcMessage,
+    OpaqueIpcReceiver
 };
 use crate::{Receiver, Sender};
 use serde::{Deserialize, Serialize};
@@ -40,7 +38,10 @@ impl RouterProxy {
     pub fn new() -> RouterProxy {
         let (msg_sender, msg_receiver) = crate::unbounded();
         let (wakeup_sender, wakeup_receiver) = ipc::channel().unwrap();
-        thread::spawn(move || Router::new(msg_receiver, wakeup_receiver).run());
+
+        crate::thread::spawn(move || {
+            Router::new(msg_receiver, wakeup_receiver).run()
+        });
         RouterProxy {
             comm: Mutex::new(RouterProxyComm {
                 msg_sender: msg_sender,
@@ -49,21 +50,15 @@ impl RouterProxy {
         }
     }
 
-    // pub fn add_route(&self, receiver: OpaqueIpcReceiver, callback: RouterHandler) {
-    //     let comm = self.comm.lock().unwrap();
-    //     comm.msg_sender
-    //         .send(RouterMsg::AddRoute(receiver, callback))
-    //         .unwrap();
-    //     comm.wakeup_sender.send(()).unwrap();
-    // }
-
     pub fn add_route<T: 'static>(&self, receiver: IpcReceiver<T>,
                               mut callback: Box<FnMut(Result<T, ipc_channel::Error>) + Send>)
     where T: for<'de> Deserialize<'de> + Serialize {
         let comm = self.comm.lock().unwrap();
 
         let callback_wrapper = Box::new(move |msg: OpaqueIpcMessage| {
-            match msg.to::<(Option<DetThreadId>, T)>() {
+            // We want to forward the DetThreadId. Access the real opaque channel
+            // underneath our wrapper. As our wrapper throws the DetThreadId away.
+            match msg.opaque.to::<(Option<DetThreadId>, T)>() {
                 Ok((forward_id, msg)) => {
                     // Big Hack: Temporarily set TLS DetThreadId so original sender's
                     // DetThreadId is properly forwarded to receiver.

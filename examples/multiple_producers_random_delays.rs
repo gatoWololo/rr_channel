@@ -5,8 +5,6 @@ use rr_channel::thread;
 /// Random delays to bring out more nondeterminism.
 use std::time;
 
-// UGH Add check for threads spawned not through our API!!!!!
-
 fn main() {
     let (s, r) = rr_channel::unbounded();
     let (_s2, r2) = rr_channel::unbounded::<i32>();

@@ -48,6 +48,7 @@ pub enum FlavorMarker {
     Never,
     None,
     Ipc,
+    IpcSelect,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -120,10 +121,20 @@ pub enum Recorded {
 
     Sender(DetChannelId),
     IpcSender(DetChannelId),
+    IpcSelectAdd(/*index:*/ u64),
+    IpcSelect {
+        select_events: Vec<IpcSelectEvent>
+    }
     // IpcRouterSelectSucc {
     //     select_indices: Vec<u64>,
     // }
     // IpcRouterSelectErr,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum IpcSelectEvent {
+    MessageReceived(/*index:*/ u64, Option<DetThreadId>),
+    ChannelClosed(/*index:*/ u64),
 }
 
 // pub enum IpcSelectionResult {
@@ -442,12 +453,22 @@ pub(crate) trait RecordReplaySend<T, E> {
             RecordReplayMode::Replay => {
                 match get_det_id() {
                     // Nothing for us to check...
-                    None => warn!("det_id is None. This execution may be nondeterministic"),
+                    None => {
+                        warn!("det_id is None. This execution may be nondeterministic");
+                    }
                     Some(det_id) => {
-                        let (recorded, sender_flavor, chan_id) =
-                            record_replay::get_log_entry(det_id, get_event_id()).
-                            unwrap();
+                        let event = record_replay::get_log_entry(det_id, get_event_id());
 
+                        // No sender event. This thread never got this far in record.
+                        if event.is_none() {
+                            log_trace("Putting thread to sleep!");
+                            loop {
+                                std::thread::park();
+                                log_trace("Spurious wakeup, going back to sleep.");
+                            }
+                        }
+
+                        let (recorded, sender_flavor, chan_id) = event.unwrap();
                         if sender_flavor != flavor {
                             panic!("Expected {:?}, saw {:?}", flavor, sender_flavor);
                         }
