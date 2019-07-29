@@ -33,19 +33,6 @@ pub fn set_temp_det_id(new_id: Option<DetThreadId>) {
 }
 
 
-// pub fn get_det_id() -> DetThreadId {
-//     DET_ID.with(|di| {
-//         match di.borrow().as_ref() {
-//             None => {
-//                 log_trace("OMAR HERE");
-//                 panic!(format!("{:?}", Backtrace::new()));
-//             }
-//             Some(di) => di.clone(),
-//         }
-//     })
-// }
-
-
 pub fn get_event_id() -> EventId {
     EVENT_ID.with(|id| *id.borrow())
 }

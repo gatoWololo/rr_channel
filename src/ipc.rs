@@ -1,4 +1,5 @@
 use crate::log_trace;
+use log::warn;
 use crate::record_replay::RecordMetadata;
 use crate::record_replay::{self, FlavorMarker, IpcDummyError, RecordReplay, Recorded, Blocking};
 use crate::thread::get_and_inc_channel_id;
@@ -252,8 +253,9 @@ pub struct IpcReceiverSet {
     receivers: HashMap<u64, OpaqueIpcReceiver>,
     /// On multiple producer channels, sometimes we get the wrong event.
     /// buffer those here for later.
-    /// Idexed first by channel idex, then by expected DetThreadId.
-    buffer: HashMap<u64, HashMap<DetThreadId, VecDeque<OpaqueIpcMessage>>>,
+    /// Indexed first by channel index, then by expected Some(DetThreadId)
+    /// (We hold messaged from None on this buffer as well).
+    buffer: HashMap<u64, HashMap<Option<DetThreadId>, VecDeque<OpaqueIpcMessage>>>,
 }
 
 #[derive(Debug)]
@@ -271,6 +273,27 @@ pub enum IpcSelectionResult {
     /// The channel has been closed for the [IpcReceiver] identified by the `u64` value.
     /// [IpcReceiver]: struct.IpcReceiver.html
     ChannelClosed(u64),
+}
+
+impl IpcSelectionResult {
+    /// Helper method to move the value out of the [IpcSelectionResult] if it
+    /// is [MessageReceived].
+    ///
+    /// # Panics
+    ///
+    /// If the result is [ChannelClosed] this call will panic.
+    ///
+    /// [IpcSelectionResult]: enum.IpcSelectionResult.html
+    /// [MessageReceived]: enum.IpcSelectionResult.html#variant.MessageReceived
+    /// [ChannelClosed]: enum.IpcSelectionResult.html#variant.ChannelClosed
+    pub fn unwrap(self) -> (u64, OpaqueIpcMessage) {
+        match self {
+            IpcSelectionResult::MessageReceived(id, message) => (id, message),
+            IpcSelectionResult::ChannelClosed(id) => {
+                panic!("IpcSelectionResult::unwrap(): channel {} closed", id)
+            }
+        }
+    }
 }
 
 impl OpaqueIpcMessage {
@@ -368,7 +391,13 @@ impl IpcReceiverSet {
                     Some((Recorded::IpcSelect {select_events}, _, _)) => {
                         for event in select_events {
                             match event {
-                                IpcSelectEvent::MessageReceived(index, Some(expected_sender)) => {
+                                IpcSelectEvent::MessageReceived(index, expected_sender) => {
+                                    if expected_sender.is_none() {
+                                        // Since we don't have a expected_sender, it may be the case this
+                                        // is nondeterminism if there are multiple producers both writing
+                                        // to this channel as None.
+                                        warn!("Expected sender is None. This execution may be nondeterministic");
+                                    }
                                     // Fetch the receiver and explicitly wait the message.
                                     let receiver = self.receivers.get_mut(index).
                                         expect("Missing key in receivers");
@@ -379,9 +408,6 @@ impl IpcReceiverSet {
                                         expected_sender,
                                         receiver);
                                     events.push(entry);
-                                }
-                                IpcSelectEvent::MessageReceived(index, None) => {
-                                    unimplemented!()
                                 }
                                 IpcSelectEvent::ChannelClosed(index) => {
                                     let receiver = self.receivers.get_mut(index).
@@ -418,9 +444,9 @@ impl IpcReceiverSet {
     /// have this function be a method with (&mut self). So I pass everything
     /// explicitly for now.
     fn do_replay_recv_for_entry(
-        buffer: &mut HashMap<u64, HashMap<DetThreadId, VecDeque<OpaqueIpcMessage>>>,
+        buffer: &mut HashMap<u64, HashMap<Option<DetThreadId>, VecDeque<OpaqueIpcMessage>>>,
         index: u64,
-        expected_sender: &DetThreadId,
+        expected_sender: &Option<DetThreadId>,
         receiver: &mut OpaqueIpcReceiver)
         -> IpcSelectionResult {
 
@@ -449,7 +475,6 @@ impl IpcReceiverSet {
             (Option<DetThreadId>, /*Unknown T*/()) =
                 bincode::deserialize(&msg.opaque.data).
                 expect("Unable to deserialize DetThreadId");
-            let det_id = det_id.expect("HERE: None in det_id");
 
             if &det_id == expected_sender {
                 return IpcSelectionResult::MessageReceived(index, msg);
@@ -498,7 +523,7 @@ impl IpcReceiverSet {
                 let type_name = metadata.type_name;
 
                 let index = self.receiver_set.add_opaque(receiver.opaque_receiver).
-                    expect("Did not exected add() to fail...");
+                    expect("Did not expect add() to fail...");
 
                 let event = Recorded::IpcSelectAdd(index);
                 record_replay::log(event, flavor, &type_name, &id);
