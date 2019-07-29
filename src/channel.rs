@@ -1,7 +1,7 @@
 use crate::log_trace;
 use crate::log_trace_with;
-use crate::record_replay::RecordReplaySend;
-use crate::record_replay::{self, Blocking, FlavorMarker, Recorded};
+use crate::record_replay::{self, Blocking, FlavorMarker, Recorded,
+                           RecordMetadata, RecordReplayRecv, RecordReplaySend, DetChannelId};
 use crate::thread::get_and_inc_channel_id;
 use crate::thread::*;
 use crate::RecordReplayMode;
@@ -12,28 +12,22 @@ use crossbeam_channel::RecvError;
 use crossbeam_channel::SendError;
 use crossbeam_channel::{RecvTimeoutError, TryRecvError};
 use log::{debug, info, trace, warn};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::error::Error;
 use std::time::Duration;
 use std::time::Instant;
 
-use crate::record_replay::DetChannelId;
-use std::cell::RefCell;
 
 pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
     *ENV_LOGGER;
 
     let (sender, receiver) = crossbeam_channel::unbounded();
-    let receiver = Flavor::Unbounded(receiver);
     let mode = *RECORD_MODE;
     let channel_type = FlavorMarker::Unbounded;
-
     let type_name = unsafe { std::intrinsics::type_name::<T>() };
-    let id = DetChannelId {
-        det_thread_id: get_det_id(),
-        channel_id: get_and_inc_channel_id(),
-    };
+    let id = DetChannelId::new();
 
     log_trace(&format!(
         "Unbounded channel created: {:?} {:?}",
@@ -47,7 +41,7 @@ pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
             channel_id: id.clone(),
             type_name: type_name.to_string(),
         },
-        Receiver::new(receiver, id),
+        Receiver::new(Flavor::Unbounded(receiver), id),
     )
 }
 
@@ -88,13 +82,9 @@ impl<T> Clone for Sender<T> {
 }
 
 impl<T> RecordReplaySend<T, SendError<T>> for Sender<T> {
-    fn check_log_entry(&self, entry: Recorded) {
+    fn check_log_entry(&self, entry: Recorded) -> bool {
         match entry {
-            Recorded::Sender(chan_id) => {
-                if chan_id != self.channel_id {
-                    panic!("Expected {:?}, saw {:?}", chan_id, self.channel_id)
-                }
-            }
+            Recorded::Sender => true,
             _ => panic!("Expected Recorded::Sender. Saw: {:?}", entry),
         }
     }
@@ -105,8 +95,8 @@ impl<T> RecordReplaySend<T, SendError<T>> for Sender<T> {
             .map_err(|e| SendError(e.into_inner().1))
     }
 
-    fn to_recorded_event(&self, id: DetChannelId) -> Recorded {
-        Recorded::Sender(id)
+    fn as_recorded_event(&self) -> Recorded {
+        Recorded::Sender
     }
 }
 
@@ -141,8 +131,6 @@ pub enum Flavor<T> {
 macro_rules! generate_channel_method {
     ($method:ident, $error_type:ty) => {
         pub fn $method(&self) -> Result<(Option<DetThreadId>, T), $error_type> {
-            // Not really useful.
-            // log_trace(concat!("Flavor::", stringify!($method)));
             match self {
                 Flavor::After(receiver) => {
                     match receiver.$method() {
@@ -166,14 +154,14 @@ impl<T> Flavor<T> {
         &self,
         duration: Duration,
     ) -> Result<(Option<DetThreadId>, T), RecvTimeoutError> {
-        // Not really useful.
-        // log_trace("Flavor::recv_timeout");
-        match self {
+         match self {
             Flavor::After(receiver) => match receiver.recv_timeout(duration) {
                 Ok(msg) => Ok((get_det_id(), msg)),
                 e => e.map(|_| unreachable!()),
             },
-            Flavor::Bounded(receiver) | Flavor::Never(receiver) | Flavor::Unbounded(receiver) => {
+             Flavor::Bounded(receiver) |
+             Flavor::Never(receiver) |
+             Flavor::Unbounded(receiver) => {
                 receiver.recv_timeout(duration)
             }
         }
@@ -197,27 +185,29 @@ pub struct Receiver<T> {
 
 macro_rules! impl_RecordReplay {
     ($err_type:ty, $succ: ident, $err:ident) => {
-        impl<T> RecordReplay<T, $err_type> for Receiver<T> {
+        impl<T> RecordReplayRecv<T, $err_type> for Receiver<T> {
             fn to_recorded_event(
                 &self,
                 event: Result<(Option<DetThreadId>, T), $err_type>,
             ) -> (Result<T, $err_type>, Recorded) {
                 match event {
-                    Ok((sender_thread, msg)) => (Ok(msg), Recorded::$succ { sender_thread }),
-                    Err(e) => (Err(e), Recorded::$err(e)),
+                    Ok((sender_thread, msg)) => {
+                        (Ok(msg), Recorded::$succ { sender_thread })
+                    }
+                    Err(e) => {
+                        (Err(e), Recorded::$err(e))
+                    }
                 }
             }
 
             fn expected_recorded_events(&self, event: &Recorded) -> Result<T, $err_type> {
                 match event {
                     Recorded::$succ { sender_thread } => {
-                        let sender_thread = sender_thread.clone();
                         let retval = self.replay_recv(&sender_thread);
                         // Here is where we explictly increment our event_id!
                         inc_event_id();
                         Ok(retval)
                     }
-
                     Recorded::$err(e) => {
                         log_trace(&format!(
                             "Creating error event for: {:?}",
@@ -238,9 +228,6 @@ macro_rules! impl_RecordReplay {
         }
     };
 }
-
-use crate::record_replay::RecordMetadata;
-use crate::record_replay::RecordReplay;
 
 impl_RecordReplay!(RecvError, RecvSucc, RecvErr);
 impl_RecordReplay!(TryRecvError, TryRecvSucc, TryRecvErr);
@@ -321,35 +308,20 @@ impl<T> Receiver<T> {
 }
 
 pub fn after(duration: Duration) -> Receiver<Instant> {
-    // Init log, happens once, lazily.
-    // Users always have to make channels before using the rest of this code.
-    // So we put it here.
     *ENV_LOGGER;
-    let id = DetChannelId {
-        det_thread_id: get_det_id(),
-        channel_id: get_and_inc_channel_id(),
-    };
+
+    let id = DetChannelId::new();
     log_trace(&format!("After channel receiver created: {:?}", id));
     Receiver::new(Flavor::After(crossbeam_channel::after(duration)), id)
 }
 
 pub fn bounded<T>(cap: usize) -> (Sender<T>, Receiver<T>) {
-    // Init log, happens once, lazily.
-    // Users always have to make channels before using the rest of this code.
-    // So we put it here.
     *ENV_LOGGER;
 
     let (sender, receiver) = crossbeam_channel::bounded(cap);
-    let receiver = Flavor::Bounded(receiver);
-    let mode = *RECORD_MODE;
-    let channel_type = FlavorMarker::Bounded;
+    let id = DetChannelId::new();
     let type_name = unsafe { std::intrinsics::type_name::<T>() };
-    let id = DetChannelId {
-        det_thread_id: get_det_id(),
-        channel_id: get_and_inc_channel_id(),
-    };
 
-    let type_name = unsafe { std::intrinsics::type_name::<T>() };
     log_trace(&format!(
         "Bounded channel created: {:?} {:?}",
         id, type_name
@@ -357,22 +329,19 @@ pub fn bounded<T>(cap: usize) -> (Sender<T>, Receiver<T>) {
     (
         Sender {
             sender,
-            mode,
-            channel_type,
+            mode: *RECORD_MODE,
+            channel_type: FlavorMarker::Bounded,
             channel_id: id.clone(),
             type_name: type_name.to_string(),
         },
-        Receiver::new(receiver, id),
+        Receiver::new(Flavor::Bounded(receiver), id),
     )
 }
 
 pub fn never<T>() -> Receiver<T> {
     *ENV_LOGGER;
     let type_name = unsafe { std::intrinsics::type_name::<T>().to_string() };
-    let id = DetChannelId {
-        det_thread_id: get_det_id(),
-        channel_id: get_and_inc_channel_id(),
-    };
+    let id = DetChannelId::new();
 
     Receiver {
         buffer: RefCell::new(HashMap::new()),

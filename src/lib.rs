@@ -20,7 +20,6 @@ pub use channel::{after, bounded, never, unbounded, Receiver, Sender};
 pub use crossbeam_channel::RecvError;
 pub use crossbeam_channel::RecvTimeoutError;
 pub use crossbeam_channel::TryRecvError;
-// pub use ipc::channel;
 pub use record_replay::{LogEntry, RECORDED_INDICES, WRITE_LOG_FILE};
 pub use select::{Select, SelectedOperation};
 use thread::in_forwarding;
@@ -29,7 +28,6 @@ pub use thread::{get_det_id, get_event_id, inc_event_id, DetIdSpawner, DetThread
 
 use crate::record_replay::DetChannelId;
 
-/// A singleton instance exists globally for the current mode via lazy_static global variable.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum RecordReplayMode {
     Record,
@@ -43,15 +41,8 @@ lazy_static! {
     /// Singleton environment logger. Must be initialized somewhere, and only once.
     pub static ref ENV_LOGGER: () = {
         env_logger::init();
-        // Init logger with no timestamp data or module name.
-        // env_logger::Builder::from_default_env().
-        //     default_format_timestamp(false).
-        //     default_format_module_path(false).
-        //     format(|buf, record| writeln!(buf, "({:?}, {:?}) {}",
-        //                                   get_det_id_clone(),
-        //                                   get_event_id(), record.args())).
-        //     init();
     };
+
     /// Record type. Initialized from environment variable RR_CHANNEL.
     pub static ref RECORD_MODE: RecordReplayMode = {
         log_trace("Initializing RECORD_MODE lazy static.");
@@ -83,45 +74,34 @@ lazy_static! {
 
 fn log_trace(msg: &str) {
     let thread = std::thread::current();
-    if in_forwarding() {
-        let event_name = "ROUTER";
-        trace!(
-            "thread: {:?} | event# {:?} {} | {}",
-            thread.name(),
-            event_name,
-            get_event_id(),
-            msg
-        );
+    let event_name = if in_forwarding() {
+        "ROUTER".to_string()
     } else {
-        let event_name = (get_det_id(), get_event_id());
-        trace!(
-            "thread: {:?} | event# {:?} | {}",
-            thread.name(),
-            event_name,
-            msg
-        );
-    }
+        format!("{:?}", (get_det_id(), get_event_id()))
+    };
+
+    trace!(
+        "thread: {:?} | event# {:?} {} | {}",
+        thread.name(),
+        event_name,
+        get_event_id(),
+        msg
+    );
 }
 
 fn log_trace_with(msg: &str, id: &DetChannelId) {
     let thread = std::thread::current();
-    if in_forwarding() {
-        let event_name = "ROUTER";
-        trace!(
-            "thread: {:?} | event# {:?} | {} | chan: {:?}",
-            thread.name(),
-            event_name,
-            msg,
-            id
-        );
+    let event_name = if in_forwarding() {
+        "ROUTER".to_string()
     } else {
-        let event_name = (get_det_id(), get_event_id());
-        trace!(
-            "thread: {:?} | event# {:?} | {} | chan: {:?}",
-            thread.name(),
-            event_name,
-            msg,
-            id
-        );
-    }
+        format!("{:?}", (get_det_id(), get_event_id()))
+    };
+
+    trace!(
+        "thread: {:?} | event# {:?} | {} | chan: {:?}",
+        thread.name(),
+        event_name,
+        msg,
+        id
+    );
 }

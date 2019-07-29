@@ -101,10 +101,7 @@ impl<'a> Select<'a> {
                     FlavorMarker::None,
                     "ready",
                     // Ehh, we fake it here. We never check this value anyways.
-                    &DetChannelId {
-                        det_thread_id: None,
-                        channel_id: 0,
-                    },
+                    &DetChannelId::fake()
                 );
                 select_index
             }

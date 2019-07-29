@@ -1,6 +1,7 @@
 use crate::log_trace;
 use crate::record_replay::RecordMetadata;
-use crate::record_replay::{self, Blocking, FlavorMarker, IpcDummyError, RecordReplay, Recorded};
+use crate::record_replay::{self, Blocking, FlavorMarker, IpcDummyError,
+                           RecordReplayRecv, Recorded};
 use crate::thread::get_and_inc_channel_id;
 use crate::thread::get_det_id;
 use crate::thread::DetThreadId;
@@ -59,7 +60,7 @@ impl<T> IpcReceiver<T> {
     }
 }
 
-impl<T> RecordReplay<T, ipc_channel::Error> for IpcReceiver<T>
+impl<T> RecordReplayRecv<T, ipc_channel::Error> for IpcReceiver<T>
 where
     T: for<'de> Deserialize<'de> + Serialize,
 {
@@ -165,14 +166,12 @@ impl<T> RecordReplaySend<T, Error> for IpcSender<T>
 where
     T: Serialize,
 {
-    fn check_log_entry(&self, entry: Recorded) {
+    fn check_log_entry(&self, entry: Recorded) -> bool {
         match entry {
-            Recorded::IpcSender(chan_id) => {
-                if chan_id != self.metadata.id {
-                    panic!("Expected {:?}, saw {:?}", chan_id, self.metadata.id)
-                }
+            Recorded::IpcSender => true,
+            _ => {
+                panic!("Expected Recorded::Sender. Saw: {:?}", entry);
             }
-            _ => panic!("Expected Recorded::Sender. Saw: {:?}", entry),
         }
     }
 
@@ -180,8 +179,8 @@ where
         self.sender.send((thread_id, msg))
     }
 
-    fn to_recorded_event(&self, id: DetChannelId) -> Recorded {
-        Recorded::IpcSender(id)
+    fn as_recorded_event(&self) -> Recorded {
+        Recorded::IpcSender
     }
 }
 
@@ -203,10 +202,7 @@ where
     }
 
     pub fn connect(name: String) -> Result<IpcSender<T>, std::io::Error> {
-        let id = DetChannelId {
-            det_thread_id: get_det_id(),
-            channel_id: get_and_inc_channel_id(),
-        };
+        let id = DetChannelId::new();
 
         let type_name = unsafe { std::intrinsics::type_name::<T>() };
         log_trace(&format!(
@@ -220,7 +216,8 @@ where
             mode: *RECORD_MODE,
             id,
         };
-        ipc_channel::ipc::IpcSender::connect(name).map(|sender| IpcSender { sender, metadata })
+        ipc_channel::ipc::IpcSender::connect(name).
+            map(|sender| IpcSender { sender, metadata })
     }
 }
 
@@ -231,10 +228,7 @@ where
     *ENV_LOGGER;
 
     let (sender, receiver) = ipc::channel()?;
-    let id = DetChannelId {
-        det_thread_id: get_det_id(),
-        channel_id: get_and_inc_channel_id(),
-    };
+    let id = DetChannelId::new();
     let type_name = unsafe { std::intrinsics::type_name::<T>() };
     log_trace(&format!("IPC channel created: {:?} {:?}", id, type_name));
 
@@ -363,7 +357,6 @@ impl IpcReceiverSet {
         log_trace("IpcSelect::select()");
 
         match self.mode {
-            // Record which events returned.
             RecordReplayMode::Record => {
                 // Events will be moved by our loop. So we put them back here.
                 let mut moved_events: Vec<IpcSelectionResult> = Vec::new();
@@ -388,14 +381,12 @@ impl IpcReceiverSet {
                         }
                     }
                 }
+
                 let event = Recorded::IpcSelect {
                     select_events: recorded_events,
                 };
                 // Ehh, we fake it here. We never check this value anyways.
-                let id = &DetChannelId {
-                    det_thread_id: None,
-                    channel_id: 0,
-                };
+                let id = &DetChannelId::fake();
                 record_replay::log(event, FlavorMarker::IpcSelect, "IpcSelect", id);
                 Ok(moved_events)
             }
@@ -455,6 +446,7 @@ impl IpcReceiverSet {
                                 }
                             }
                         }
+
                         inc_event_id();
                         Ok(events)
                     }
