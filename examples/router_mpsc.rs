@@ -1,5 +1,3 @@
-// TODO This is an example that is currently non deterministic.
-// MPSC through a router lose all the data about who the original sender was!!!
 use rr_channel::router;
 use rr_channel::router::ROUTER;
 use rr_channel::ipc;

@@ -526,7 +526,7 @@ impl IpcReceiverSet {
                         }
 
                         if *r_index != self.index {
-                            panic!("Expected {:?}, saw {:?}", r_index, self.index);
+                            panic!("IpcReceiverSet::rr_add. Wrong index. Expected {:?}, saw {:?}", r_index, self.index);
                         }
 
                         let index = self.index;
