@@ -5,13 +5,11 @@ use std::thread::JoinHandle;
 pub use std::thread::{current, panicking, park, park_timeout, sleep, yield_now};
 // use backtrace::Backtrace;
 use crate::log_trace;
-use std::sync::atomic::{AtomicU32, Ordering};
 use crate::record_replay::EventId;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 pub fn get_det_id() -> Option<DetThreadId> {
-    DET_ID.with(|di| {
-        di.borrow().clone()
-    })
+    DET_ID.with(|di| di.borrow().clone())
 }
 
 pub fn set_det_id(new_id: Option<DetThreadId>) {
@@ -21,9 +19,7 @@ pub fn set_det_id(new_id: Option<DetThreadId>) {
 }
 
 pub fn get_temp_det_id() -> Option<DetThreadId> {
-    TEMP_DET_ID.with(|di| {
-        di.borrow().clone()
-    })
+    TEMP_DET_ID.with(|di| di.borrow().clone())
 }
 
 pub fn set_temp_det_id(new_id: Option<DetThreadId>) {
@@ -31,7 +27,6 @@ pub fn set_temp_det_id(new_id: Option<DetThreadId>) {
         *id.borrow_mut() = new_id;
     });
 }
-
 
 pub fn get_event_id() -> EventId {
     EVENT_ID.with(|id| *id.borrow())

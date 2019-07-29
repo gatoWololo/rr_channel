@@ -1,7 +1,7 @@
-use rr_channel::router::ROUTER;
 use rr_channel::ipc;
+use rr_channel::router::ROUTER;
 
-fn main() -> Result<(), std::io::Error>{
+fn main() -> Result<(), std::io::Error> {
     // Send messages to ourself via the router.
     let (ipc_sender, ipc_receiver) = ipc::channel()?;
     let (sender, receiver) = rr_channel::unbounded();

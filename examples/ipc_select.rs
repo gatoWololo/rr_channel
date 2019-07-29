@@ -1,6 +1,6 @@
+use rand::Rng;
 use rr_channel::ipc;
 use rr_channel::ipc::IpcSelectionResult;
-use rand::Rng;
 use std::time;
 
 fn main() {
@@ -9,26 +9,20 @@ fn main() {
     let (s3, r3) = ipc::channel::<u32>().unwrap();
     let mut set = ipc::IpcReceiverSet::new().unwrap();
 
-    rr_channel::thread::spawn(move || {
-        loop {
-            let delay = rand::thread_rng().gen_range(0, 3);
-            std::thread::sleep(time::Duration::from_millis(delay));
-            s.send(1);
-        }
+    rr_channel::thread::spawn(move || loop {
+        let delay = rand::thread_rng().gen_range(0, 3);
+        std::thread::sleep(time::Duration::from_millis(delay));
+        s.send(1);
     });
-    rr_channel::thread::spawn(move ||  {
-        loop {
-            let delay = rand::thread_rng().gen_range(0, 5);
-            std::thread::sleep(time::Duration::from_millis(delay));
-            s2.send(2);
-        }
+    rr_channel::thread::spawn(move || loop {
+        let delay = rand::thread_rng().gen_range(0, 5);
+        std::thread::sleep(time::Duration::from_millis(delay));
+        s2.send(2);
     });
-    rr_channel::thread::spawn(move ||  {
-        loop {
-            let delay = rand::thread_rng().gen_range(0, 5);
-            std::thread::sleep(time::Duration::from_millis(delay));
-            s3.send(3);
-        }
+    rr_channel::thread::spawn(move || loop {
+        let delay = rand::thread_rng().gen_range(0, 5);
+        std::thread::sleep(time::Duration::from_millis(delay));
+        s3.send(3);
     });
 
     set.add(r);

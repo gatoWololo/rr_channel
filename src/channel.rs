@@ -1,8 +1,9 @@
 use crate::log_trace;
-use crate::record_replay::{self, FlavorMarker, Recorded, Blocking};
+use crate::log_trace_with;
+use crate::record_replay::RecordReplaySend;
+use crate::record_replay::{self, Blocking, FlavorMarker, Recorded};
 use crate::thread::get_and_inc_channel_id;
 use crate::thread::*;
-use crate::log_trace_with;
 use crate::RecordReplayMode;
 use crate::ENV_LOGGER;
 use crate::RECORD_MODE;
@@ -10,16 +11,15 @@ use crossbeam_channel;
 use crossbeam_channel::RecvError;
 use crossbeam_channel::SendError;
 use crossbeam_channel::{RecvTimeoutError, TryRecvError};
-use log::{debug, trace, warn, info};
+use log::{debug, info, trace, warn};
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::error::Error;
 use std::time::Duration;
 use std::time::Instant;
-use crate::record_replay::RecordReplaySend;
 
-use std::cell::RefCell;
 use crate::record_replay::DetChannelId;
+use std::cell::RefCell;
 
 pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
     *ENV_LOGGER;
@@ -35,14 +35,17 @@ pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
         channel_id: get_and_inc_channel_id(),
     };
 
-    log_trace(&format!("Unbounded channel created: {:?} {:?}", id, type_name));
+    log_trace(&format!(
+        "Unbounded channel created: {:?} {:?}",
+        id, type_name
+    ));
     (
         Sender {
             sender,
             mode,
             channel_type,
             channel_id: id.clone(),
-            type_name: type_name.to_string()
+            type_name: type_name.to_string(),
         },
         Receiver::new(receiver, id),
     )
@@ -79,7 +82,7 @@ impl<T> Clone for Sender<T> {
             mode: self.mode.clone(),
             channel_type: self.channel_type,
             channel_id: self.channel_id.clone(),
-            type_name: self.type_name.clone()
+            type_name: self.type_name.clone(),
         }
     }
 }
@@ -97,8 +100,9 @@ impl<T> RecordReplaySend<T, SendError<T>> for Sender<T> {
     }
 
     fn send(&self, thread_id: Option<DetThreadId>, msg: T) -> Result<(), SendError<T>> {
-        self.sender.send((thread_id, msg)).
-            map_err(|e| SendError(e.into_inner().1))
+        self.sender
+            .send((thread_id, msg))
+            .map_err(|e| SendError(e.into_inner().1))
     }
 
     fn to_recorded_event(&self, id: DetChannelId) -> Recorded {
@@ -158,7 +162,10 @@ impl<T> Flavor<T> {
     generate_channel_method!(recv, RecvError);
     generate_channel_method!(try_recv, TryRecvError);
 
-    pub fn recv_timeout(&self, duration: Duration) -> Result<(Option<DetThreadId>, T), RecvTimeoutError> {
+    pub fn recv_timeout(
+        &self,
+        duration: Duration,
+    ) -> Result<(Option<DetThreadId>, T), RecvTimeoutError> {
         // Not really useful.
         // log_trace("Flavor::recv_timeout");
         match self {
@@ -212,13 +219,17 @@ macro_rules! impl_RecordReplay {
                     }
 
                     Recorded::$err(e) => {
-                        log_trace(&format!("Creating error event for: {:?}", Recorded::$err(*e)));
+                        log_trace(&format!(
+                            "Creating error event for: {:?}",
+                            Recorded::$err(*e)
+                        ));
                         // Here is where we explictly increment our event_id!
                         inc_event_id();
                         Err(*e)
-                    },
+                    }
                     e => {
-                        let error = format!("Unexpected event: {:?} in replay for channel::recv()", e);
+                        let error =
+                            format!("Unexpected event: {:?} in replay for channel::recv()", e);
                         log_trace(&error);
                         panic!(error);
                     }
@@ -246,17 +257,18 @@ impl<T> Receiver<T> {
                 type_name: unsafe { std::intrinsics::type_name::<T>().to_string() },
                 flavor,
                 mode: *RECORD_MODE,
-                id
+                id,
             },
         }
     }
 
     pub(crate) fn replay_recv(&self, sender: &Option<DetThreadId>) -> T {
-        record_replay::replay_recv(&sender,
-                                   || self.receiver.recv(),
-                                   &mut self.buffer.borrow_mut(),
-                                   &mut self.none_buffer.borrow_mut(),
-                                   &self.metadata.id,
+        record_replay::replay_recv(
+            &sender,
+            || self.receiver.recv(),
+            &mut self.buffer.borrow_mut(),
+            &mut self.none_buffer.borrow_mut(),
+            &self.metadata.id,
         )
     }
 
@@ -265,21 +277,33 @@ impl<T> Receiver<T> {
     }
 
     pub fn recv(&self) -> Result<T, RecvError> {
-        self.record_replay(self.metadata(), || self.receiver.recv(),
-                           Blocking::CanBlock, "channel::recv()")
+        self.record_replay(
+            self.metadata(),
+            || self.receiver.recv(),
+            Blocking::CanBlock,
+            "channel::recv()",
+        )
     }
 
     pub fn try_recv(&self) -> Result<T, TryRecvError> {
-        self.record_replay(self.metadata(), || self.receiver.try_recv(),
-                           Blocking::CannotBlock, "channel::try_recv()")
+        self.record_replay(
+            self.metadata(),
+            || self.receiver.try_recv(),
+            Blocking::CannotBlock,
+            "channel::try_recv()",
+        )
     }
 
     // TODO: Hmmm, even though we label this function as CannotBlock.
     // We might not have an event if the program ended right as we were waiting
     // for recv_timeout() but before the timeout happended.
     pub fn recv_timeout(&self, timeout: Duration) -> Result<T, RecvTimeoutError> {
-        self.record_replay(self.metadata(), || self.receiver.recv_timeout(timeout),
-                           Blocking::CannotBlock, "channel::rect_timeout()")
+        self.record_replay(
+            self.metadata(),
+            || self.receiver.recv_timeout(timeout),
+            Blocking::CannotBlock,
+            "channel::rect_timeout()",
+        )
     }
 
     pub fn metadata(&self) -> &RecordMetadata {
@@ -302,8 +326,8 @@ pub fn after(duration: Duration) -> Receiver<Instant> {
     // So we put it here.
     *ENV_LOGGER;
     let id = DetChannelId {
-            det_thread_id: get_det_id(),
-            channel_id: get_and_inc_channel_id()
+        det_thread_id: get_det_id(),
+        channel_id: get_and_inc_channel_id(),
     };
     log_trace(&format!("After channel receiver created: {:?}", id));
     Receiver::new(Flavor::After(crossbeam_channel::after(duration)), id)
@@ -326,14 +350,17 @@ pub fn bounded<T>(cap: usize) -> (Sender<T>, Receiver<T>) {
     };
 
     let type_name = unsafe { std::intrinsics::type_name::<T>() };
-    log_trace(&format!("Bounded channel created: {:?} {:?}", id, type_name));
+    log_trace(&format!(
+        "Bounded channel created: {:?} {:?}",
+        id, type_name
+    ));
     (
         Sender {
             sender,
             mode,
             channel_type,
             channel_id: id.clone(),
-            type_name: type_name.to_string()
+            type_name: type_name.to_string(),
         },
         Receiver::new(receiver, id),
     )

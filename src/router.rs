@@ -7,23 +7,23 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use std::collections::HashMap;
-use std::sync::Mutex;
-use crate::thread::DetThreadId;
 use crate::log_trace;
 use crate::thread::get_det_id;
 use crate::thread::set_det_id;
+use crate::thread::DetThreadId;
+use std::collections::HashMap;
+use std::sync::Mutex;
 
 use crate::thread::start_forwading_id;
 use crate::thread::stop_forwarding_id;
 
 use crate::ipc::{
     self, IpcReceiver, IpcReceiverSet, IpcSelectionResult, IpcSender, OpaqueIpcMessage,
-    OpaqueIpcReceiver
+    OpaqueIpcReceiver,
 };
 use crate::{Receiver, Sender};
-use serde::{Deserialize, Serialize};
 use lazy_static::lazy_static;
+use serde::{Deserialize, Serialize};
 
 lazy_static! {
     pub static ref ROUTER: RouterProxy = RouterProxy::new();
@@ -39,9 +39,7 @@ impl RouterProxy {
         let (msg_sender, msg_receiver) = crate::unbounded();
         let (wakeup_sender, wakeup_receiver) = ipc::channel().unwrap();
 
-        crate::thread::spawn(move || {
-            Router::new(msg_receiver, wakeup_receiver).run()
-        });
+        crate::thread::spawn(move || Router::new(msg_receiver, wakeup_receiver).run());
         RouterProxy {
             comm: Mutex::new(RouterProxyComm {
                 msg_sender: msg_sender,
@@ -50,9 +48,13 @@ impl RouterProxy {
         }
     }
 
-    pub fn add_route<T: 'static>(&self, receiver: IpcReceiver<T>,
-                              mut callback: Box<FnMut(Result<T, ipc_channel::Error>) + Send>)
-    where T: for<'de> Deserialize<'de> + Serialize {
+    pub fn add_route<T: 'static>(
+        &self,
+        receiver: IpcReceiver<T>,
+        mut callback: Box<FnMut(Result<T, ipc_channel::Error>) + Send>,
+    ) where
+        T: for<'de> Deserialize<'de> + Serialize,
+    {
         let comm = self.comm.lock().unwrap();
 
         let callback_wrapper = Box::new(move |msg: OpaqueIpcMessage| {
@@ -88,8 +90,10 @@ impl RouterProxy {
     ) where
         T: for<'de> Deserialize<'de> + Serialize + Send + 'static,
     {
-        log_trace(&format!("Routing IpcReceiver<{:?}> to crossbeam_sender: {:?}",
-                           ipc_receiver.metadata.id, crossbeam_sender.channel_id));
+        log_trace(&format!(
+            "Routing IpcReceiver<{:?}> to crossbeam_sender: {:?}",
+            ipc_receiver.metadata.id, crossbeam_sender.channel_id
+        ));
         self.add_route(
             ipc_receiver,
             Box::new(move |message| drop(crossbeam_sender.send(message.unwrap()))),
@@ -105,10 +109,16 @@ impl RouterProxy {
     where
         T: for<'de> Deserialize<'de> + Serialize + Send + 'static,
     {
-        log_trace(&format!("Routing IpcReceiver<{:?}>", ipc_receiver.metadata.id));
+        log_trace(&format!(
+            "Routing IpcReceiver<{:?}>",
+            ipc_receiver.metadata.id
+        ));
 
         let (crossbeam_sender, crossbeam_receiver) = crate::unbounded();
-        log_trace(&format!("Created Channels<{:?} for routing.", crossbeam_receiver.metadata.id));
+        log_trace(&format!(
+            "Created Channels<{:?} for routing.",
+            crossbeam_receiver.metadata.id
+        ));
 
         self.route_ipc_receiver_to_crossbeam_sender(ipc_receiver, crossbeam_sender);
         crossbeam_receiver
@@ -149,19 +159,21 @@ impl Router {
             };
             for result in results.into_iter() {
                 match result {
-                    IpcSelectionResult::MessageReceived(id, _) if id == self.msg_wakeup_id =>
+                    IpcSelectionResult::MessageReceived(id, _) if id == self.msg_wakeup_id => {
                         match self.msg_receiver.recv().unwrap() {
                             RouterMsg::AddRoute(receiver, handler) => {
                                 let new_receiver_id =
                                     self.ipc_receiver_set.add_opaque(receiver).unwrap();
                                 self.handlers.insert(new_receiver_id, handler);
-                            },
-                        },
-                    IpcSelectionResult::MessageReceived(id, message) =>
-                        self.handlers.get_mut(&id).unwrap()(message),
+                            }
+                        }
+                    }
+                    IpcSelectionResult::MessageReceived(id, message) => {
+                        self.handlers.get_mut(&id).unwrap()(message)
+                    }
                     IpcSelectionResult::ChannelClosed(id) => {
                         self.handlers.remove(&id).unwrap();
-                    },
+                    }
                 }
             }
         }

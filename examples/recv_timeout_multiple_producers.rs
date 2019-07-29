@@ -1,8 +1,8 @@
 use rand::Rng;
-use rr_channel::{RecvTimeoutError, thread};
+use rr_channel::{thread, RecvTimeoutError};
 /// Thread write to the same sender with recv_timeout
 /// Random delays to bring out more nondeterminism.
-use std::{time};
+use std::time;
 
 fn main() {
     let (s, r) = rr_channel::unbounded();

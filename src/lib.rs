@@ -11,9 +11,9 @@ mod channel;
 mod crossbeam_select;
 pub mod ipc;
 mod record_replay;
+pub mod router;
 mod select;
 pub mod thread;
-pub mod router;
 
 // Rexports.
 pub use channel::{after, bounded, never, unbounded, Receiver, Sender};
@@ -23,11 +23,9 @@ pub use crossbeam_channel::TryRecvError;
 // pub use ipc::channel;
 pub use record_replay::{LogEntry, RECORDED_INDICES, WRITE_LOG_FILE};
 pub use select::{Select, SelectedOperation};
-pub use thread::{current, panicking, park, park_timeout, sleep, yield_now};
-pub use thread::{
-    get_det_id, get_event_id, inc_event_id, DetIdSpawner, DetThreadId,
-};
 use thread::in_forwarding;
+pub use thread::{current, panicking, park, park_timeout, sleep, yield_now};
+pub use thread::{get_det_id, get_event_id, inc_event_id, DetIdSpawner, DetThreadId};
 
 use crate::record_replay::DetChannelId;
 
@@ -87,24 +85,43 @@ fn log_trace(msg: &str) {
     let thread = std::thread::current();
     if in_forwarding() {
         let event_name = "ROUTER";
-        trace!("thread: {:?} | event# {:?} {} | {}",
-               thread.name(), event_name, get_event_id(), msg);
+        trace!(
+            "thread: {:?} | event# {:?} {} | {}",
+            thread.name(),
+            event_name,
+            get_event_id(),
+            msg
+        );
     } else {
         let event_name = (get_det_id(), get_event_id());
-        trace!("thread: {:?} | event# {:?} | {}", thread.name(), event_name, msg);
+        trace!(
+            "thread: {:?} | event# {:?} | {}",
+            thread.name(),
+            event_name,
+            msg
+        );
     }
-
 }
 
 fn log_trace_with(msg: &str, id: &DetChannelId) {
     let thread = std::thread::current();
     if in_forwarding() {
         let event_name = "ROUTER";
-        trace!("thread: {:?} | event# {:?} | {} | chan: {:?}",
-               thread.name(), event_name, msg, id);
+        trace!(
+            "thread: {:?} | event# {:?} | {} | chan: {:?}",
+            thread.name(),
+            event_name,
+            msg,
+            id
+        );
     } else {
         let event_name = (get_det_id(), get_event_id());
-        trace!("thread: {:?} | event# {:?} | {} | chan: {:?}",
-               thread.name(), event_name, msg, id);
+        trace!(
+            "thread: {:?} | event# {:?} | {} | chan: {:?}",
+            thread.name(),
+            event_name,
+            msg,
+            id
+        );
     }
 }

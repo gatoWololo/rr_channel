@@ -1,3 +1,4 @@
+use rand::Rng;
 /// Originally I expected this to panic since receivers are being added
 /// to a IpcReceiverSet (via ROUTER) in nondeterminism order. This is
 /// something IpcReceiverSet checks for. But since the router uses an
@@ -6,7 +7,6 @@
 use rr_channel::ipc;
 use rr_channel::ipc::IpcSelectionResult;
 use rr_channel::router::ROUTER;
-use rand::Rng;
 use std::time;
 
 fn main() {
@@ -16,10 +16,10 @@ fn main() {
     let h1 = rr_channel::thread::spawn(|| {
         add_receiver(1);
     });
-    let h2 = rr_channel::thread::spawn(||  {
+    let h2 = rr_channel::thread::spawn(|| {
         add_receiver(2);
     });
-    let h3 = rr_channel::thread::spawn(||  {
+    let h3 = rr_channel::thread::spawn(|| {
         add_receiver(3);
     });
 

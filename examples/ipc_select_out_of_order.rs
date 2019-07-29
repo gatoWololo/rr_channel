@@ -1,13 +1,13 @@
+use rand::Rng;
 /// IpcReceiverSet internally checks that receivers are added in the same order,
 /// with the same DetChannelId and index. This example should panic as receivers,
 /// race on being added to the IpcReceiverSet.
 use rr_channel::ipc;
-use rr_channel::ipc::IpcSelectionResult;
 use rr_channel::ipc::IpcReceiverSet;
+use rr_channel::ipc::IpcSelectionResult;
 use rr_channel::router::ROUTER;
-use rand::Rng;
-use std::time;
 use std::sync::{Arc, Mutex};
+use std::time;
 
 fn main() {
     let set = Arc::new(Mutex::new(IpcReceiverSet::new().expect("IpcReceiverSet")));
@@ -17,10 +17,10 @@ fn main() {
     let h1 = rr_channel::thread::spawn(move || {
         add_receiver(1, set);
     });
-    let h2 = rr_channel::thread::spawn(||  {
+    let h2 = rr_channel::thread::spawn(|| {
         add_receiver(2, set2);
     });
-    let h3 = rr_channel::thread::spawn(||  {
+    let h3 = rr_channel::thread::spawn(|| {
         add_receiver(3, set3);
     });
 

@@ -7,10 +7,10 @@ fn main() {
     let mut set = ipc::IpcReceiverSet::new().unwrap();
 
     rr_channel::thread::spawn(move || {
-            s.send(1);
+        s.send(1);
     });
-    rr_channel::thread::spawn(move ||  {
-            s2.send(2);
+    rr_channel::thread::spawn(move || {
+        s2.send(2);
     });
 
     set.add(r);

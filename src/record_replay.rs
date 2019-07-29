@@ -10,14 +10,14 @@ use crate::log_trace;
 use crate::log_trace_with;
 use crate::thread::get_det_id;
 use crate::thread::get_event_id;
-use crate::thread::inc_event_id;
+use crate::thread::get_temp_det_id;
 use crate::thread::in_forwarding;
+use crate::thread::inc_event_id;
 use crossbeam_channel::{RecvError, RecvTimeoutError, TryRecvError};
 use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::BufRead;
-use crate::thread::get_temp_det_id;
 
 // TODO use environment variables to generalize this.
 const LOG_FILE_NAME: &str = "/home/gatowololo/det_file.txt";
@@ -123,12 +123,11 @@ pub enum Recorded {
     IpcSender(DetChannelId),
     IpcSelectAdd(/*index:*/ u64),
     IpcSelect {
-        select_events: Vec<IpcSelectEvent>
-    }
-    // IpcRouterSelectSucc {
-    //     select_indices: Vec<u64>,
-    // }
-    // IpcRouterSelectErr,
+        select_events: Vec<IpcSelectEvent>,
+    }, // IpcRouterSelectSucc {
+       //     select_indices: Vec<u64>,
+       // }
+       // IpcRouterSelectErr,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -186,7 +185,7 @@ lazy_static! {
 
             let prev = recorded_indices.insert(key, value);
             if prev.is_some() {
-                panic!("Failed to replay. Adding key-value ({:?}, {:?}) but previous value \
+                panic!("Corrupted log file. Adding key-value ({:?}, {:?}) but previous value \
                         {:?} already exited. Hashmap entries should be unique.",
                        (entry.current_thread, entry.event_id),
                        (entry.event, entry.channel, entry.chan_id),
@@ -228,7 +227,11 @@ pub fn log(event: Recorded, channel: FlavorMarker, type_name: &str, chan_id: &De
         .write_fmt(format_args!("{}\n", serialized))
         .expect("Unable to write to log file.");
 
-    log_trace(&format!("{:?} Logged entry: {:?}", entry, (get_det_id(), event_id)));
+    log_trace(&format!(
+        "{:?} Logged entry: {:?}",
+        entry,
+        (get_det_id(), event_id)
+    ));
     inc_event_id();
 }
 
@@ -249,7 +252,7 @@ pub fn get_log_entry<'a>(
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub struct DetChannelId {
     pub det_thread_id: Option<DetThreadId>,
-    pub channel_id: u32
+    pub channel_id: u32,
 }
 pub type EventId = u32;
 
@@ -326,7 +329,10 @@ pub trait RecordReplay<T, E: Error> {
                                 // No need to inc_event_id here... This thread will hang
                                 // forever.
                                 if blocking == Blocking::CannotBlock {
-                                    panic!(format!("Missing entry in log. A call to {} should never block!", function_name));
+                                    panic!(format!(
+                                        "Missing entry in log. A call to {} should never block!",
+                                        function_name
+                                    ));
                                 }
                                 log_trace("No entry in log. Assuming this thread blocked on this select forever.");
                                 // No entry in log. This means that this event waiting forever
@@ -339,17 +345,17 @@ pub trait RecordReplay<T, E: Error> {
                         }
                     }
                 }
-
             }
             RecordReplayMode::NoRR => func().map(|v| v.1),
         }
     }
 
-    fn to_recorded_event(&self, event: Result<(Option<DetThreadId>, T), E>)
-                         -> (Result<T, E>, Recorded);
+    fn to_recorded_event(
+        &self,
+        event: Result<(Option<DetThreadId>, T), E>,
+    ) -> (Result<T, E>, Recorded);
 
-    fn expected_recorded_events(&self, event: &Recorded)
-                                -> Result<T, E>;
+    fn expected_recorded_events(&self, event: &Recorded) -> Result<T, E>;
 }
 
 use std::cell::RefMut;
@@ -363,7 +369,10 @@ pub fn replay_recv<T, E: Error>(
     none_buffer: &mut RefMut<VecDeque<T>>,
     id: &DetChannelId,
 ) -> T {
-    log_trace_with(&format!("replay_recv(expected_sender: {:?}) ...", expected_sender), id);
+    log_trace_with(
+        &format!("replay_recv(expected_sender: {:?}) ...", expected_sender),
+        id,
+    );
 
     match expected_sender {
         None => {
@@ -395,8 +404,7 @@ pub fn replay_recv<T, E: Error>(
             // Value did no match. Buffer it. Handles both `none_buffer` and
             // regular `buffer` case.
             Ok((msg_sender, msg)) => {
-                let wrong_val = &format!("Wrong value found. Queing it for: {:?}",
-                                         msg_sender);
+                let wrong_val = &format!("Wrong value found. Queing it for: {:?}", msg_sender);
                 log_trace_with(wrong_val, id);
 
                 match msg_sender {
@@ -405,12 +413,12 @@ pub fn replay_recv<T, E: Error>(
                     }
                     Some(msg_sender) => {
                         // ensure we don't drop temporary reference.
-                        buffer.entry(msg_sender).
-                            or_insert(VecDeque::new()).
-                            push_back(msg);
+                        buffer
+                            .entry(msg_sender)
+                            .or_insert(VecDeque::new())
+                            .push_back(msg);
                     }
                 }
-
             }
             Err(e) => {
                 log_trace(&format!("Saw Err({:?})", e));
@@ -434,10 +442,16 @@ pub(crate) trait RecordReplaySend<T, E> {
         // sometimes. However, for the record log, we still want to use the original
         // thread's DetThreadId. Otherwise we will have "repeated" entries in the log
         // which look like they're coming from the same thread.
-        let forwading_id = if in_forwarding() { get_temp_det_id() } else { get_det_id() };
+        let forwading_id = if in_forwarding() {
+            get_temp_det_id()
+        } else {
+            get_det_id()
+        };
 
-        log_trace(&format!("{}<{:?}>::send(({:?}, {:?}))",
-                           sender_name, id, forwading_id, type_name));
+        log_trace(&format!(
+            "{}<{:?}>::send(({:?}, {:?}))",
+            sender_name, id, forwading_id, type_name
+        ));
 
         match mode {
             // Record event.
@@ -497,4 +511,3 @@ pub(crate) trait RecordReplaySend<T, E> {
 
     fn to_recorded_event(&self, id: DetChannelId) -> Recorded;
 }
-
