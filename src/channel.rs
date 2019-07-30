@@ -1,16 +1,12 @@
 use crate::log_trace;
 use crate::log_trace_with;
 use crate::record_replay::{self, Blocking, FlavorMarker, Recorded,
-                           RecordMetadata, RecordReplayRecv, RecordReplaySend, DetChannelId};
+                           RecordMetadata, RecordReplayRecv, RecordReplaySend,
+                           DetChannelId, DesyncError, get_forward_id};
 use crate::thread::get_and_inc_channel_id;
 use crate::thread::*;
-use crate::RecordReplayMode;
-use crate::ENV_LOGGER;
-use crate::RECORD_MODE;
-use crossbeam_channel;
-use crossbeam_channel::RecvError;
-use crossbeam_channel::SendError;
-use crossbeam_channel::{RecvTimeoutError, TryRecvError};
+use crate::{RecordReplayMode, ENV_LOGGER, RECORD_MODE, DesyncMode, DESYNC_MODE};
+use crossbeam_channel::{self, RecvError, SendError, RecvTimeoutError, TryRecvError};
 use log::{debug, info, trace, warn};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -18,7 +14,7 @@ use std::collections::VecDeque;
 use std::error::Error;
 use std::time::Duration;
 use std::time::Instant;
-
+use std::cell::RefMut;
 
 pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
     *ENV_LOGGER;
@@ -45,6 +41,7 @@ pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
     )
 }
 
+/// TODO: Switch all these individual fields and use metadata instead.
 pub struct Sender<T> {
     pub(crate) sender: crossbeam_channel::Sender<(Option<DetThreadId>, T)>,
     // Unlike Receiver, whose channels may have different types, the Sender always
@@ -82,10 +79,10 @@ impl<T> Clone for Sender<T> {
 }
 
 impl<T> RecordReplaySend<T, SendError<T>> for Sender<T> {
-    fn check_log_entry(&self, entry: Recorded) -> bool {
+    fn check_log_entry(&self, entry: Recorded) -> Result<(), DesyncError> {
         match entry {
-            Recorded::Sender => true,
-            _ => panic!("Expected Recorded::Sender. Saw: {:?}", entry),
+            Recorded::Sender => Ok(()),
+            log_event => Err(DesyncError::EventMismatch(log_event, Recorded::Sender)),
         }
     }
 
@@ -104,14 +101,32 @@ impl<T> Sender<T> {
     /// Send our det thread id along with the actual message for both
     /// record and replay.
     pub fn send(&self, msg: T) -> Result<(), SendError<T>> {
-        self.record_replay_send(
+        match self.record_replay_send(
             msg,
             &self.mode,
             &self.channel_id,
             &self.type_name,
             &self.channel_type,
             "CrossbeamSender",
-        )
+        ) {
+            Ok(v) => v,
+            // send() should never hang. No need to check if NoEntryLog.
+            Err((error, msg)) => {
+                warn!("Desynchronization dected: {:?}", error);
+                match *DESYNC_MODE {
+                    DesyncMode::Panic => panic!("Desynchronization dected: {:?}", error),
+                    // TODO: One day we may want to record this alternate execution.
+                    DesyncMode::KeepGoing => {
+                        let res = RecordReplaySend::send(self, get_forward_id(), msg);
+                        // TODO Ugh, right now we have to carefully increase the event_id
+                        // in the "right places" or nothing will work correctly.
+                        // How can we make this a lot less error prone?
+                        inc_event_id();
+                        res
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -173,12 +188,6 @@ pub struct Receiver<T> {
     /// Crossbeam works with inmutable references, so we wrap in a RefCell
     /// to hide our mutation.
     buffer: RefCell<HashMap<Option<DetThreadId>, VecDeque<T>>>,
-    /// Separate buffer to hold entries whose DetThreadId was None.
-    /// TODO this might be nondeterministic if different threads are sending
-    /// these requests.
-    /// Even tracking their TID would be useful to check for multiple producers
-    /// "none" senders.
-    none_buffer: RefCell<VecDeque<T>>,
     pub(crate) receiver: Flavor<T>,
     pub(crate) metadata: RecordMetadata,
 }
@@ -200,30 +209,33 @@ macro_rules! impl_RecordReplay {
                 }
             }
 
-            fn expected_recorded_events(&self, event: &Recorded) -> Result<T, $err_type> {
+            fn expected_recorded_events(&self, event: Recorded)
+                                        -> Result<Result<T, $err_type>, DesyncError> {
                 match event {
                     Recorded::$succ { sender_thread } => {
                         let retval = self.replay_recv(&sender_thread);
                         // Here is where we explictly increment our event_id!
                         inc_event_id();
-                        Ok(retval)
+                        Ok(Ok(retval))
                     }
                     Recorded::$err(e) => {
                         log_trace(&format!(
                             "Creating error event for: {:?}",
-                            Recorded::$err(*e)
+                            Recorded::$err(e)
                         ));
                         // Here is where we explictly increment our event_id!
                         inc_event_id();
-                        Err(*e)
+                        Ok(Err(e))
                     }
                     e => {
-                        let error =
-                            format!("Unexpected event: {:?} in replay for channel::recv()", e);
-                        log_trace(&error);
-                        panic!(error);
+                        let mock_event = Recorded::$succ { sender_thread: None };
+                        Err(DesyncError::EventMismatch(e, mock_event))
                     }
                 }
+            }
+
+            fn get_buffer(&self) -> RefMut<HashMap<Option<DetThreadId>, VecDeque<T>>> {
+                self.buffer.borrow_mut()
             }
         }
     };
@@ -238,7 +250,6 @@ impl<T> Receiver<T> {
         let flavor = Receiver::get_marker(&real_receiver);
         Receiver {
             buffer: RefCell::new(HashMap::new()),
-            none_buffer: RefCell::new(VecDeque::new()),
             receiver: real_receiver,
             metadata: RecordMetadata {
                 type_name: unsafe { std::intrinsics::type_name::<T>().to_string() },
@@ -250,7 +261,7 @@ impl<T> Receiver<T> {
     }
 
     pub(crate) fn replay_recv(&self, sender: &Option<DetThreadId>) -> T {
-        record_replay::replay_recv(
+        self.recv_from_sender(
             &sender,
             || self.receiver.recv(),
             &mut self.buffer.borrow_mut(),
@@ -263,33 +274,21 @@ impl<T> Receiver<T> {
     }
 
     pub fn recv(&self) -> Result<T, RecvError> {
-        self.record_replay(
-            self.metadata(),
-            || self.receiver.recv(),
-            Blocking::CanBlock,
-            "channel::recv()",
-        )
+        let f = || self.receiver.recv();
+        self.record_replay_recv(self.metadata(), f, "channel::recv()").
+            unwrap_or_else(|e| self.handle_desync(e, true, || self.receiver.recv()))
     }
 
     pub fn try_recv(&self) -> Result<T, TryRecvError> {
-        self.record_replay(
-            self.metadata(),
-            || self.receiver.try_recv(),
-            Blocking::CannotBlock,
-            "channel::try_recv()",
-        )
+        let f = || self.receiver.try_recv();
+        self.record_replay_recv(self.metadata(), f, "channel::try_recv()").
+            unwrap_or_else(|e| self.handle_desync(e, false, f))
     }
 
-    // TODO: Hmmm, even though we label this function as CannotBlock.
-    // We might not have an event if the program ended right as we were waiting
-    // for recv_timeout() but before the timeout happended.
     pub fn recv_timeout(&self, timeout: Duration) -> Result<T, RecvTimeoutError> {
-        self.record_replay(
-            self.metadata(),
-            || self.receiver.recv_timeout(timeout),
-            Blocking::CannotBlock,
-            "channel::rect_timeout()",
-        )
+        let f = || self.receiver.recv_timeout(timeout);
+        self.record_replay_recv(self.metadata(), f, "channel::rect_timeout()").
+            unwrap_or_else(|e| self.handle_desync(e, false, f))
     }
 
     pub fn metadata(&self) -> &RecordMetadata {
@@ -345,7 +344,6 @@ pub fn never<T>() -> Receiver<T> {
     Receiver {
         buffer: RefCell::new(HashMap::new()),
         receiver: Flavor::Never(crossbeam_channel::never()),
-        none_buffer: RefCell::new(VecDeque::new()),
         metadata: RecordMetadata {
             type_name,
             flavor: FlavorMarker::Never,

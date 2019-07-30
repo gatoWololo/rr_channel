@@ -2,11 +2,13 @@ use crate::log_trace;
 use crate::record_replay::{self, Blocking, FlavorMarker, IpcDummyError,
                            RecordReplayRecv, Recorded, RecordMetadata,
                            get_log_entry, DetChannelId, IpcSelectEvent,
-                           RecordReplaySend };
+                           RecordReplaySend, get_log_entry_with, DesyncError,
+                           get_forward_id };
 use crate::thread::{get_and_inc_channel_id, get_det_id, DetThreadId,
                     get_event_id, inc_event_id};
-use crate::{RecordReplayMode, ENV_LOGGER, RECORD_MODE, log_trace_with};
-
+use crate::{RecordReplayMode, ENV_LOGGER, RECORD_MODE, log_trace_with,
+            DESYNC_MODE, DesyncMode};
+use std::cell::RefMut;
 use ipc_channel::ipc::{self};
 use log::warn;
 use bincode;
@@ -60,27 +62,31 @@ where
         }
     }
 
-    fn expected_recorded_events(&self, event: &Recorded) -> Result<T, ipc_channel::Error> {
+    fn expected_recorded_events(&self, event: Recorded)
+                                -> Result<Result<T, ipc_channel::Error>, DesyncError> {
         match event {
             Recorded::IpcRecvSucc { sender_thread } => {
-                let retval = self.replay_recv(sender_thread);
+                let retval = self.replay_recv(&sender_thread);
                 // Here is where we explictly increment our event_id!
                 inc_event_id();
-                Ok(retval)
+                Ok(Ok(retval))
             }
             Recorded::IpcRecvErr(e) => {
                 // TODO
                 let err = "ErrorKing::Custom TODO".to_string();
                 // Here is where we explictly increment our event_id!
                 inc_event_id();
-                Err(Box::new(ipc_channel::ErrorKind::Custom(err)))
+                Ok(Err(Box::new(ipc_channel::ErrorKind::Custom(err))))
             }
             e => {
-                let error = format!("Unexpected event: {:?} in replay for ipc_channel", e);
-                log_trace(&error);
-                panic!(error);
+                let mock_event = Recorded::IpcRecvSucc{ sender_thread: None };
+                Err(DesyncError::EventMismatch(e, mock_event))
             }
         }
+    }
+
+    fn get_buffer(&self) -> RefMut<HashMap<Option<DetThreadId>, VecDeque<T>>> {
+        self.buffer.borrow_mut()
     }
 }
 
@@ -90,25 +96,17 @@ pub struct OpaqueIpcReceiver {
 }
 
 impl<T> IpcReceiver<T>
-where
-    T: for<'de> Deserialize<'de> + Serialize,
-{
+where T: for<'de> Deserialize<'de> + Serialize {
     pub fn recv(&self) -> Result<T, ipc_channel::Error> {
-        self.record_replay(
-            &self.metadata,
-            || self.receiver.recv(),
-            Blocking::CanBlock,
-            "ipc_recv::recv()",
-        )
+        let f = || self.receiver.recv();
+        self.record_replay_recv(&self.metadata, f, "ipc_recv::recv()")
+            .unwrap_or_else(|e| self.handle_desync(e, true, f))
     }
 
     pub fn try_recv(&self) -> Result<T, ipc_channel::Error> {
-        self.record_replay(
-            &self.metadata,
-            || self.receiver.try_recv(),
-            Blocking::CannotBlock,
-            "ipc_recv::try_recv()",
-        )
+        let f = || self.receiver.try_recv();
+        self.record_replay_recv(&self.metadata, f, "ipc_recv::try_recv()")
+            .unwrap_or_else(|e| self.handle_desync(e, true, f))
     }
 
     pub fn to_opaque(self) -> OpaqueIpcReceiver {
@@ -119,8 +117,11 @@ where
         }
     }
 
+    /// Deterministic receiver which loops until event comes from `sender`.
+    /// All other entries are buffer is `self.buffer`. Buffer is always
+    /// checked before entries.
     fn replay_recv(&self, sender: &Option<DetThreadId>) -> T {
-        record_replay::replay_recv(
+        self.recv_from_sender(
             sender,
             || self.receiver.recv(),
             &mut self.buffer.borrow_mut(),
@@ -151,12 +152,10 @@ impl<T> RecordReplaySend<T, Error> for IpcSender<T>
 where
     T: Serialize,
 {
-    fn check_log_entry(&self, entry: Recorded) -> bool {
+    fn check_log_entry(&self, entry: Recorded) -> Result<(), DesyncError> {
         match entry {
-            Recorded::IpcSender => true,
-            _ => {
-                panic!("Expected Recorded::Sender. Saw: {:?}", entry);
-            }
+            Recorded::IpcSender => Ok(()),
+            event_entry => Err(DesyncError::EventMismatch(event_entry, Recorded::IpcSender)),
         }
     }
 
@@ -176,14 +175,31 @@ where
     /// Send our det thread id along with the actual message for both
     /// record and replay.
     pub fn send(&self, data: T) -> Result<(), ipc_channel::Error> {
-        self.record_replay_send(
+        match self.record_replay_send(
             data,
             &self.metadata.mode,
             &self.metadata.id,
             &self.metadata.type_name,
             &self.metadata.flavor,
-            "IpcSender",
-        )
+            "IpcSender") {
+            Ok(v) => v,
+            // send() should never hang. No need to check if NoEntryLog.
+            Err((error, msg)) => {
+                warn!("Desynchronization dected: {:?}", error);
+                match *DESYNC_MODE {
+                    DesyncMode::Panic => panic!("Desynchronization dected: {:?}", error),
+                    // TODO: One day we may want to record this alternate execution.
+                    DesyncMode::KeepGoing => {
+                        let res = RecordReplaySend::send(self, get_forward_id(), msg);
+                        // TODO Ugh, right now we have to carefully increase the event_id
+                        // in the "right places" or nothing will work correctly.
+                        // How can we make this a lot less error prone?
+                        inc_event_id();
+                        res
+                    }
+                }
+            }
+        }
     }
 
     pub fn connect(name: String) -> Result<IpcSender<T>, std::io::Error> {
@@ -387,7 +403,7 @@ impl IpcReceiverSet {
                 let det_id = get_det_id().expect("Select thread's det id not set.");
 
                 match get_log_entry(det_id, get_event_id()) {
-                    Some((Recorded::IpcSelect { select_events }, _, _)) => {
+                    Ok(Recorded::IpcSelect { select_events }) => {
                         for event in select_events {
                             match event {
                                 IpcSelectEvent::MessageReceived(index, expected_sender) => {
@@ -431,14 +447,15 @@ impl IpcReceiverSet {
                         inc_event_id();
                         Ok(events)
                     }
-                    Some((e, _, _)) => {
+                    Ok(e) => {
                         log_trace(&format!(
                             "IpcReceiverSet::select(): Unexpected event: {:?}",
                             e
                         ));
                         panic!("IpcReceiverSet::select(): Unexpected event: {:?}", e);
                     }
-                    None => {
+                    Err(e) => {
+                        panic!("OMAR Figure out what goes here.");
                         log_trace("No entry for IpcReceiverSet::select()");
                         // No entry present. Assume this select never returned!
                         log_trace("Putting thread to sleep!");
@@ -538,15 +555,8 @@ impl IpcReceiverSet {
                 let det_id = get_det_id().
                     expect("None found on thread calling IpcReceiver add");
 
-                match get_log_entry(det_id, get_event_id()) {
-                    Some((Recorded::IpcSelectAdd(r_index), r_flavor, r_id)) => {
-                        if *r_flavor != flavor {
-                            panic!("Expected {:?}, saw {:?}", r_flavor, flavor);
-                        }
-                        if *r_id != id {
-                            panic!("Expected {:?}, saw {:?}", r_id, id);
-                        }
-
+                match get_log_entry_with(det_id, get_event_id(), &flavor, &id) {
+                    Ok(Recorded::IpcSelectAdd(r_index)) => {
                         // Add our entry to map here.
                         if let Some(e) = self.receivers.insert(self.index, receiver) {
                             panic!("Map entry already exists.");
@@ -564,10 +574,10 @@ impl IpcReceiverSet {
                         inc_event_id();
                         Ok(index)
                     }
-                    Some((r, _, _)) => {
+                    Ok(r) => {
                         panic!("Expected IpcReceiverSetAddSucc instead saw {:?}", r);
                     }
-                    None => {
+                    Err(e) => {
                         panic!("Missing entry for IpcReceiverSet::add()");
                     }
                 }

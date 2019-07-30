@@ -1,7 +1,8 @@
 use crate::channel::Flavor;
 use crate::log_trace;
 use crate::record_replay::DetChannelId;
-use crate::record_replay::{self, get_log_entry, FlavorMarker, Recorded, SelectEvent};
+use crate::record_replay::{self, get_log_entry, FlavorMarker, Recorded, SelectEvent,
+                           get_log_entry_ret};
 use crate::thread::get_det_id;
 use crate::thread::get_event_id;
 use crate::thread::inc_event_id;
@@ -61,10 +62,11 @@ impl<'a> Select<'a> {
                 let det_id = get_det_id().unwrap_or_else(|| {
                     panic!("select(): get_det_id called from outside thread context")
                 });
+
                 // Query our log to see what index was selected!() during the replay phase.
                 // Flavor type not check on Select::select() but on Select::recv()
-                match get_log_entry(det_id, get_event_id()) {
-                    Some((event, flavor, chan_id)) => match event {
+                match get_log_entry_ret(det_id, get_event_id()) {
+                    Ok((event, flavor, chan_id)) => match event {
                         Recorded::Select(select_entry) => {
                             SelectedOperation::Replay(select_entry, *flavor, chan_id.clone())
                         }
@@ -73,7 +75,8 @@ impl<'a> Select<'a> {
                             panic!("Unexpected Recorded at Select::select(): {:?}", e);
                         }
                     },
-                    None => {
+                    Err(e) => {
+                        unimplemented!();
                         log_trace(
                             "No entry in log. Assuming this thread blocked on this \
                              select forever.",
@@ -109,8 +112,8 @@ impl<'a> Select<'a> {
             RecordReplayMode::Replay => {
                 let det_id = get_det_id().expect("ready(): get_det_id called outside thread");
                 // No channel flavor.
-                let (event, _, _) =
-                    get_log_entry(det_id, get_event_id()).expect("No such key in map.");
+                let event = get_log_entry(det_id, get_event_id()).
+                    expect("No such key in map.");
                 inc_event_id();
                 match event {
                     Recorded::SelectReady { select_index } => *select_index,
@@ -120,6 +123,10 @@ impl<'a> Select<'a> {
             RecordReplayMode::NoRR => self.selector.ready(),
         }
     }
+
+    // fn record_replay_select(&mut self) -> Result<SelectedOperation<'a>, DesyncError> {
+        
+    // }
 }
 
 pub enum SelectedOperation<'a> {

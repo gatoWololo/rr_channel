@@ -17,16 +17,15 @@ pub mod thread;
 
 // Rexports.
 pub use channel::{after, bounded, never, unbounded, Receiver, Sender};
-pub use crossbeam_channel::RecvError;
-pub use crossbeam_channel::RecvTimeoutError;
-pub use crossbeam_channel::TryRecvError;
-pub use record_replay::{LogEntry, RECORDED_INDICES, WRITE_LOG_FILE};
+pub use crossbeam_channel::{RecvError, RecvTimeoutError, TryRecvError};
+pub use record_replay::{LogEntry, RECORDED_INDICES, WRITE_LOG_FILE, DetChannelId};
 pub use select::{Select, SelectedOperation};
-use thread::in_forwarding;
-pub use thread::{current, panicking, park, park_timeout, sleep, yield_now};
-pub use thread::{get_det_id, get_event_id, inc_event_id, DetIdSpawner, DetThreadId};
+pub use thread::{current, panicking, park, park_timeout, sleep, yield_now,
+                 get_det_id, get_event_id, inc_event_id, DetIdSpawner, DetThreadId,
+                 in_forwarding};
 
-use crate::record_replay::DetChannelId;
+use std::env::var;
+use std::env::VarError;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum RecordReplayMode {
@@ -35,7 +34,14 @@ pub enum RecordReplayMode {
     NoRR,
 }
 
-const ENV_VAR_NAME: &str = "RR_CHANNEL";
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum DesyncMode {
+    Panic,
+    KeepGoing,
+}
+
+const RECORD_MODE_VAR: &str = "RR_CHANNEL";
+const DESYNC_MODE_VAR: &str = "DESYNC_MODE";
 
 lazy_static! {
     /// Singleton environment logger. Must be initialized somewhere, and only once.
@@ -46,9 +52,8 @@ lazy_static! {
     /// Record type. Initialized from environment variable RR_CHANNEL.
     pub static ref RECORD_MODE: RecordReplayMode = {
         log_trace("Initializing RECORD_MODE lazy static.");
-        use std::env::var;
-        use std::env::VarError;
-        let mode = match var(ENV_VAR_NAME) {
+
+        let mode = match var(RECORD_MODE_VAR) {
             Ok(value) => {
                 match value.as_str() {
                     "record" => RecordReplayMode::Record,
@@ -57,13 +62,39 @@ lazy_static! {
                     e        => {
                         warn!("Unkown record and replay mode: {}. Assuming noRR.", e);
                         RecordReplayMode::NoRR
-                }
+                    }
                 }
             }
             Err(VarError::NotPresent) => RecordReplayMode::NoRR,
             Err(e @ VarError::NotUnicode(_)) => {
                 warn!("RR_CHANNEL value is not valid unicode: {}, assuming noRR.", e);
                 RecordReplayMode::NoRR
+            }
+        };
+
+        log_trace(&format!("Mode {:?} selected.", mode));
+        mode
+    };
+
+    /// Record type. Initialized from environment variable RR_CHANNEL.
+    pub static ref DESYNC_MODE: DesyncMode = {
+        log_trace("Initializing DESYNC_MODE lazy static.");
+
+        let mode = match var(DESYNC_MODE_VAR) {
+            Ok(value) => {
+                match value.as_str() {
+                    "panic" => DesyncMode::Panic,
+                    "keep_going" => DesyncMode::KeepGoing,
+                    e => {
+                        warn!("Unkown DESYNC mode: {}. Assuming keep_going.", e);
+                        DesyncMode::KeepGoing
+                    }
+                }
+            }
+            Err(VarError::NotPresent) => DesyncMode::KeepGoing,
+            Err(e @ VarError::NotUnicode(_)) => {
+                warn!("DESYNC_MODE value is not valid unicode: {}, assuming keep_going.", e);
+                DesyncMode::KeepGoing
             }
         };
 
