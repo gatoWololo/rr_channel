@@ -181,10 +181,8 @@ lazy_static! {
                        (entry.event, entry.channel, entry.chan_id),
                        prev);
             }
-
         }
 
-        // log_trace("{:?}", recorded_indices);
         recorded_indices
     };
 }
@@ -298,7 +296,7 @@ pub trait RecordReplayRecv<T, E: Error> {
     fn record_replay(
         &self,
         metadata: &RecordMetadata,
-        func: impl FnOnce() -> Result<(Option<DetThreadId>, T), E>,
+        recv: impl FnOnce() -> Result<(Option<DetThreadId>, T), E>,
         blocking: Blocking,
         function_name: &str,
     ) -> Result<T, E> {
@@ -306,8 +304,9 @@ pub trait RecordReplayRecv<T, E: Error> {
 
         match metadata.mode {
             RecordReplayMode::Record => {
-                let (result, event) = self.to_recorded_event(func());
-                record_replay::log(event, metadata.flavor, &metadata.type_name, &metadata.id);
+                let (result, recorded) = self.to_recorded_event(recv());
+                record_replay::log(recorded, metadata.flavor,
+                                   &metadata.type_name, &metadata.id);
                 result
             }
             RecordReplayMode::Replay => {
@@ -315,7 +314,7 @@ pub trait RecordReplayRecv<T, E: Error> {
                     None => {
                         warn!("DetThreadId was None. This execution may not be deterministic.");
                         inc_event_id();
-                        func().map(|v| v.1)
+                        recv().map(|v| v.1)
                     }
                     Some(det_id) => {
                         match get_log_entry(det_id, get_event_id()) {
@@ -350,15 +349,11 @@ pub trait RecordReplayRecv<T, E: Error> {
                     }
                 }
             }
-            RecordReplayMode::NoRR => func().map(|v| v.1),
+            RecordReplayMode::NoRR => recv().map(|v| v.1),
         }
     }
-
-    fn to_recorded_event(
-        &self,
-        event: Result<(Option<DetThreadId>, T), E>,
-    ) -> (Result<T, E>, Recorded);
-
+    fn to_recorded_event(&self, event: Result<(Option<DetThreadId>, T), E>)
+                         -> (Result<T, E>, Recorded);
     fn expected_recorded_events(&self, event: &Recorded) -> Result<T, E>;
 }
 
@@ -368,9 +363,7 @@ use std::collections::VecDeque;
 pub fn replay_recv<T, E: Error>(
     expected_sender: &Option<DetThreadId>,
     recv: impl Fn() -> Result<(Option<DetThreadId>, T), E>,
-    // TODO: Change from mut to &mut
-    buffer: &mut RefMut<HashMap<DetThreadId, VecDeque<T>>>,
-    none_buffer: &mut RefMut<VecDeque<T>>,
+    buffer: &mut RefMut<HashMap<Option<DetThreadId>, VecDeque<T>>>,
     id: &DetChannelId,
 ) -> T {
     log_trace_with(
@@ -378,22 +371,10 @@ pub fn replay_recv<T, E: Error>(
         id,
     );
 
-    match expected_sender {
-        None => {
-            if let Some(entry) = none_buffer.pop_front() {
-                log_trace_with("replay_recv(): Recv message found in none buffer.", id);
-                return entry;
-            }
-        }
-        Some(expected_sender) => {
-            // Check our buffer to see if this value is already here.
-            if let Some(entries) = buffer.get_mut(expected_sender) {
-                if let Some(entry) = entries.pop_front() {
-                    log_trace_with("replay_recv(): Recv message found in buffer.", id);
-                    return entry;
-                }
-            }
-        }
+    // Check our buffer to see if this value is already here.
+    if let Some(val) = buffer.get_mut(expected_sender).and_then(|e| e.pop_front()) {
+        log_trace_with("replay_recv(): Recv message found in buffer.", id);
+        return val;
     }
 
     // Loop until we get the message we're waiting for. All "wrong" messages are
@@ -410,23 +391,12 @@ pub fn replay_recv<T, E: Error>(
             Ok((msg_sender, msg)) => {
                 let wrong_val = &format!("Wrong value found. Queing it for: {:?}", msg_sender);
                 log_trace_with(wrong_val, id);
-
-                match msg_sender {
-                    None => {
-                        none_buffer.push_back(msg);
-                    }
-                    Some(msg_sender) => {
-                        // ensure we don't drop temporary reference.
-                        buffer
-                            .entry(msg_sender)
-                            .or_insert(VecDeque::new())
-                            .push_back(msg);
-                    }
-                }
+                buffer.entry(msg_sender).or_insert(VecDeque::new()).push_back(msg);
             }
             Err(e) => {
+                // Got a disconnected message. keep going...
                 log_trace(&format!("Saw Err({:?})", e));
-                // Got a disconnected message. Ignore.
+                continue
             }
         }
     }
@@ -468,16 +438,8 @@ pub(crate) trait RecordReplaySend<T, E> {
                     }
                     Some(det_id) => {
                         let event = record_replay::get_log_entry(det_id, get_event_id());
-
                         // No event. This thread never got this far in record.
                         match event {
-                            None => {
-                                log_trace("Putting thread to sleep!");
-                                loop {
-                                    std::thread::park();
-                                    log_trace("Spurious wakeup, going back to sleep.");
-                                }
-                            }
                             Some((recorded, sender_flavor, chan_id)) => {
                                 if sender_flavor != flavor {
                                     panic!("Expected {:?}, saw {:?}", flavor, sender_flavor);
@@ -487,6 +449,14 @@ pub(crate) trait RecordReplaySend<T, E> {
                                 }
                                 self.check_log_entry(recorded.clone());
                             }
+                            None => {
+                                log_trace("Putting thread to sleep!");
+                                loop {
+                                    std::thread::park();
+                                    log_trace("Spurious wakeup, going back to sleep.");
+                                }
+                            }
+
                         }
                     }
                 }

@@ -172,7 +172,7 @@ pub struct Receiver<T> {
     /// Buffer holding values from the "wrong" thread on replay mode.
     /// Crossbeam works with inmutable references, so we wrap in a RefCell
     /// to hide our mutation.
-    buffer: RefCell<HashMap<DetThreadId, VecDeque<T>>>,
+    buffer: RefCell<HashMap<Option<DetThreadId>, VecDeque<T>>>,
     /// Separate buffer to hold entries whose DetThreadId was None.
     /// TODO this might be nondeterministic if different threads are sending
     /// these requests.
@@ -254,7 +254,6 @@ impl<T> Receiver<T> {
             &sender,
             || self.receiver.recv(),
             &mut self.buffer.borrow_mut(),
-            &mut self.none_buffer.borrow_mut(),
             &self.metadata.id,
         )
     }

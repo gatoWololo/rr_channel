@@ -9,6 +9,7 @@ use crate::{Receiver, RecordReplayMode, Sender, RECORD_MODE};
 use crossbeam_channel::RecvError;
 use crossbeam_channel::SendError;
 use log::{debug, info, trace, warn};
+use crate::thread::DetThreadId;
 
 /// Wrapper type around crossbeam's Select.
 pub struct Select<'a> {
@@ -163,7 +164,6 @@ impl<'a> SelectedOperation<'a> {
     /// Panics if an incorrect [`Sender`] reference is passed.
     pub fn send<T>(self, _s: &Sender<T>, _msg: T) -> Result<(), SendError<T>> {
         panic!("Unimplemented send for record and replay channels.")
-        // s.send(msg)
     }
 
     /// Completes the receive operation.
@@ -182,18 +182,8 @@ impl<'a> SelectedOperation<'a> {
             // Record value we get from direct use of Select API recv().
             SelectedOperation::Record(selected) => {
                 log_trace("SelectedOperation::Record");
-                // Our channel flavors return slightly different values...
-                // consolidate that here.
-                let msg = match &r.receiver {
-                    Flavor::After(receiver) => {
-                        selected.recv(receiver).map(|msg| (get_det_id(), msg))
-                    }
-                    Flavor::Bounded(receiver)
-                    | Flavor::Unbounded(receiver)
-                    | Flavor::Never(receiver) => selected.recv(receiver),
-                };
 
-                let (msg, select_event) = match msg {
+                let (msg, select_event) = match SelectedOperation::do_recv(selected, r) {
                     // Read value, log information needed for replay later.
                     Ok((sender_thread, msg)) => (
                         Ok(msg),
@@ -206,11 +196,10 @@ impl<'a> SelectedOperation<'a> {
                     Err(e) => (Err(e), SelectEvent::RecvError { selected_index }),
                 };
 
-                let type_name = unsafe { std::intrinsics::type_name::<T>() };
                 record_replay::log(
                     Recorded::Select(select_event),
                     r.flavor(),
-                    type_name,
+                    &r.metadata.type_name,
                     &r.metadata.id,
                 );
                 msg
@@ -218,44 +207,48 @@ impl<'a> SelectedOperation<'a> {
             // We do not use the select API at all on replays. Wait for correct
             // message to come by receving on channel directly.
             // replay_recv takes care of proper buffering.
-            SelectedOperation::Replay(
-                SelectEvent::Success { sender_thread, .. },
-                flavor,
-                ref chan_id,
-            ) => {
-                log_trace("SelectedOperation::Replay(SelectEvent::Success");
-                if flavor != r.flavor() {
-                    panic!("Expected {:?}, saw {:?}", flavor, r.flavor());
-                }
-                if chan_id != &r.metadata.id {
-                    panic!("Expected {:?}, saw {:?}", chan_id, r.metadata.id);
-                }
-                log_trace("Calling replay_recv()");
-                let retval = r.replay_recv(sender_thread);
-                inc_event_id();
-                Ok(retval)
-            }
-            SelectedOperation::Replay(SelectEvent::RecvError { .. }, flavor, chan_id) => {
-                log_trace("SelectedOperation::Replay(SelectEvent::RecvError");
+            SelectedOperation::Replay(event, flavor, chan_id) => {
+                // We cannot check these in `Select::select()` since we do not have
+                // the receiver until this function to compare values against.
                 if flavor != r.flavor() {
                     panic!("Expected {:?}, saw {:?}", flavor, r.flavor());
                 }
                 if chan_id != r.metadata.id {
                     panic!("Expected {:?}, saw {:?}", chan_id, r.metadata.id);
                 }
-                inc_event_id();
-                Err(RecvError)
-            }
-            SelectedOperation::NoRR(selected) => {
-                // Our channel flavors return slightly different values...
-                // consolidate that here.
-                match &r.receiver {
-                    Flavor::After(receiver) => selected.recv(receiver),
-                    Flavor::Bounded(receiver)
-                    | Flavor::Unbounded(receiver)
-                    | Flavor::Never(receiver) => selected.recv(receiver).map(|v| v.1),
+
+                match event {
+                    SelectEvent::Success { sender_thread, .. } => {
+                        log_trace("SelectedOperation::Replay(SelectEvent::Success");
+                        let retval = r.replay_recv(sender_thread);
+                        inc_event_id();
+                        Ok(retval)
+                    }
+                    SelectEvent::RecvError { .. } => {
+                        log_trace("SelectedOperation::Replay(SelectEvent::RecvError");
+                        inc_event_id();
+                        Err(RecvError)
+                    }
                 }
             }
+            SelectedOperation::NoRR(selected) => {
+                // NoRR doesn't need DetThreadId
+                SelectedOperation::do_recv(selected, r).map(|v| v.1)
+            }
+        }
+    }
+
+    // Our channel flavors return slightly different values. Consolidate that here.
+    fn do_recv<T>(selected: crossbeam_channel::SelectedOperation<'a>,
+                  r: &Receiver<T>)
+                  -> Result<(Option<DetThreadId>, T), RecvError>{
+        match &r.receiver {
+            Flavor::After(receiver) => {
+                selected.recv(receiver).map(|msg| (get_det_id(), msg))
+            }
+            Flavor::Bounded(receiver)
+                | Flavor::Unbounded(receiver)
+                | Flavor::Never(receiver) => selected.recv(receiver)
         }
     }
 }

@@ -1,34 +1,22 @@
 use crate::log_trace;
-use crate::record_replay::RecordMetadata;
 use crate::record_replay::{self, Blocking, FlavorMarker, IpcDummyError,
-                           RecordReplayRecv, Recorded};
-use crate::thread::get_and_inc_channel_id;
-use crate::thread::get_det_id;
-use crate::thread::DetThreadId;
-use crate::RecordReplayMode;
-use crate::ENV_LOGGER;
-use crate::RECORD_MODE;
+                           RecordReplayRecv, Recorded, RecordMetadata,
+                           get_log_entry, DetChannelId, IpcSelectEvent,
+                           RecordReplaySend };
+use crate::thread::{get_and_inc_channel_id, get_det_id, DetThreadId,
+                    get_event_id, inc_event_id};
+use crate::{RecordReplayMode, ENV_LOGGER, RECORD_MODE, log_trace_with};
+
 use ipc_channel::ipc::{self};
 use log::warn;
-// use ipc_channel::{Error, ErrorKind};
-use crate::log_trace_with;
-use crate::record_replay::get_log_entry;
-use crate::record_replay::DetChannelId;
-use crate::record_replay::IpcSelectEvent;
-use crate::record_replay::RecordReplaySend;
-use crate::thread::get_event_id;
-use crate::thread::inc_event_id;
 use bincode;
-pub use ipc_channel::ipc::bytes_channel;
-pub use ipc_channel::ipc::IpcOneShotServer;
-pub use ipc_channel::ipc::IpcSharedMemory;
-pub use ipc_channel::ipc::{IpcBytesReceiver, IpcBytesSender};
-use ipc_channel::platform::OsIpcSharedMemory;
-use ipc_channel::platform::OsOpaqueIpcChannel;
+pub use ipc_channel::ipc::{bytes_channel, IpcOneShotServer, IpcSharedMemory,
+                           IpcBytesReceiver, IpcBytesSender};
+use ipc_channel::platform::{OsIpcSharedMemory, OsOpaqueIpcChannel};
 pub use ipc_channel::Error;
 use serde::de::DeserializeOwned;
-use serde::Serializer;
-use serde::{ser::SerializeStruct, Deserialize, Serialize};
+use serde::{ser::SerializeStruct, Deserialize, Serialize, Serializer};
+
 use std::cell::RefCell;
 use std::collections::hash_map::HashMap;
 use std::collections::VecDeque;
@@ -36,8 +24,7 @@ use std::collections::VecDeque;
 #[derive(Debug, Serialize, Deserialize)]
 pub struct IpcReceiver<T> {
     pub(crate) receiver: ipc::IpcReceiver<(Option<DetThreadId>, T)>,
-    buffer: RefCell<HashMap<DetThreadId, VecDeque<T>>>,
-    none_buffer: RefCell<VecDeque<T>>,
+    buffer: RefCell<HashMap<Option<DetThreadId>, VecDeque<T>>>,
     pub(crate) metadata: RecordMetadata,
 }
 
@@ -49,7 +36,6 @@ impl<T> IpcReceiver<T> {
         IpcReceiver {
             receiver,
             buffer: RefCell::new(HashMap::new()),
-            none_buffer: RefCell::new(VecDeque::new()),
             metadata: RecordMetadata {
                 type_name: unsafe { std::intrinsics::type_name::<T>().to_string() },
                 flavor: FlavorMarker::Ipc,
@@ -138,7 +124,6 @@ where
             sender,
             || self.receiver.recv(),
             &mut self.buffer.borrow_mut(),
-            &mut self.none_buffer.borrow_mut(),
             &self.metadata.id,
         )
     }
@@ -349,6 +334,14 @@ impl IpcReceiverSet {
         self.rr_add(receiver)
     }
 
+    // Extrace DetThreadId from opaque message. Not easy :P
+    fn deserialize_id(opaque_msg: &OpaqueIpcMessage) -> Option<DetThreadId> {
+        let (det_id, _): (Option<DetThreadId>, /*Unknown T*/ ()) =
+            bincode::deserialize(&opaque_msg.opaque.data)
+            .expect("Unable to deserialize DetThreadId");
+        det_id
+    }
+
     /// By the time we hit a select. We assume all receivers have been added to this
     /// set. We verify this assumption by making all receivers be added in the order
     /// seen in the record. If not all receivers are present, we panic.
@@ -365,15 +358,13 @@ impl IpcReceiverSet {
                 // Iterate through events populating recorded_events.
                 for e in self.do_select()? {
                     match e {
-                        // Extrace DetThreadId from opaque message. Not easy :P
-                        IpcSelectionResult::MessageReceived(index, opaque_message) => {
-                            let (det_id, _): (Option<DetThreadId>, /*Unknown T*/ ()) =
-                                bincode::deserialize(&opaque_message.opaque.data)
-                                    .expect("Unable to deserialize DetThreadId");
+                        IpcSelectionResult::MessageReceived(index, opaque_msg) => {
+                            let det_id = IpcReceiverSet::deserialize_id(&opaque_msg);
 
-                            recorded_events.push(IpcSelectEvent::MessageReceived(index, det_id));
+                            recorded_events.
+                                push(IpcSelectEvent::MessageReceived(index, det_id));
                             moved_events
-                                .push(IpcSelectionResult::MessageReceived(index, opaque_message));
+                                .push(IpcSelectionResult::MessageReceived(index, opaque_msg));
                         }
                         IpcSelectionResult::ChannelClosed(index) => {
                             moved_events.push(IpcSelectionResult::ChannelClosed(index));
@@ -382,14 +373,13 @@ impl IpcReceiverSet {
                     }
                 }
 
-                let event = Recorded::IpcSelect {
-                    select_events: recorded_events,
-                };
+                let event = Recorded::IpcSelect { select_events: recorded_events };
                 // Ehh, we fake it here. We never check this value anyways.
                 let id = &DetChannelId::fake();
                 record_replay::log(event, FlavorMarker::IpcSelect, "IpcSelect", id);
                 Ok(moved_events)
             }
+
             // Use index to fetch correct receiver and read value directly from
             // receiver.
             RecordReplayMode::Replay => {
@@ -397,15 +387,6 @@ impl IpcReceiverSet {
                 let det_id = get_det_id().expect("Select thread's det id not set.");
 
                 match get_log_entry(det_id, get_event_id()) {
-                    None => {
-                        log_trace("No entry for IpcReceiverSet::select()");
-                        // No entry present. Assume this select never returned!
-                        log_trace("Putting thread to sleep!");
-                        loop {
-                            std::thread::park();
-                            log_trace("Spurious wakeup, going back to sleep.");
-                        }
-                    }
                     Some((Recorded::IpcSelect { select_events }, _, _)) => {
                         for event in select_events {
                             match event {
@@ -457,6 +438,15 @@ impl IpcReceiverSet {
                         ));
                         panic!("IpcReceiverSet::select(): Unexpected event: {:?}", e);
                     }
+                    None => {
+                        log_trace("No entry for IpcReceiverSet::select()");
+                        // No entry present. Assume this select never returned!
+                        log_trace("Putting thread to sleep!");
+                        loop {
+                            std::thread::park();
+                            log_trace("Spurious wakeup, going back to sleep.");
+                        }
+                    }
                 }
             }
             RecordReplayMode::NoRR => self.do_select(),
@@ -472,15 +462,13 @@ impl IpcReceiverSet {
         expected_sender: &Option<DetThreadId>,
         receiver: &mut OpaqueIpcReceiver,
     ) -> IpcSelectionResult {
-        // Check our buffer to see if this value is already here.
-        if let Some(inner_map) = buffer.get_mut(&index) {
-            if let Some(entries) = inner_map.get_mut(expected_sender) {
-                if let Some(entry) = entries.pop_front() {
-                    log_trace("IpcSelect(): Recv message found in buffer.");
-                    return IpcSelectionResult::MessageReceived(index, entry);
-                }
+        if let Some(entry) = buffer.
+            get_mut(&index).
+            and_then(|m| m.get_mut(expected_sender)).
+            and_then(|e| e.pop_front()) {
+                log_trace("IpcSelect(): Recv message found in buffer.");
+                return IpcSelectionResult::MessageReceived(index, entry);
             }
-        }
 
         loop {
             let (data, os_ipc_channels, os_ipc_shared_memory_regions) = receiver
@@ -491,8 +479,7 @@ impl IpcReceiverSet {
 
             // TODO: Yuck. Ugly. Refactor.
             let msg = OpaqueIpcMessage::new(data, os_ipc_channels, os_ipc_shared_memory_regions);
-            let (det_id, _): (Option<DetThreadId>, /*Unknown T*/ ()) =
-                bincode::deserialize(&msg.opaque.data).expect("Unable to deserialize DetThreadId");
+            let det_id = IpcReceiverSet::deserialize_id(&msg);
 
             if &det_id == expected_sender {
                 return IpcSelectionResult::MessageReceived(index, msg);
@@ -514,23 +501,18 @@ impl IpcReceiverSet {
     /// Call actual select for real IpcReceiverSet and convert their
     /// ipc_channel::ipc::IpcSelectionResult into our IpcSelectionResult.
     fn do_select(&mut self) -> Result<Vec<IpcSelectionResult>, std::io::Error> {
-        // TODO: Ugly. refactor.
-        let v = self
-            .receiver_set
-            .select()
-            .expect("Cannot do_select...")
-            .into_iter()
+        let selected = self.receiver_set.select()?;
+        let selected = selected.into_iter()
             .map(|selection| match selection {
                 ipc_channel::ipc::IpcSelectionResult::MessageReceived(i, opaque) => {
-                    let m = OpaqueIpcMessage { opaque };
-                    IpcSelectionResult::MessageReceived(i, m)
+                    IpcSelectionResult::MessageReceived(i, OpaqueIpcMessage { opaque })
                 }
                 ipc_channel::ipc::IpcSelectionResult::ChannelClosed(i) => {
                     IpcSelectionResult::ChannelClosed(i)
                 }
             })
             .collect();
-        Ok(v)
+        Ok(selected)
     }
 
     fn rr_add(&mut self, receiver: OpaqueIpcReceiver) -> Result<u64, std::io::Error> {
@@ -541,25 +523,23 @@ impl IpcReceiverSet {
 
         match self.mode {
             RecordReplayMode::Record => {
-                let type_name = metadata.type_name;
-
                 let index = self
                     .receiver_set
-                    .add_opaque(receiver.opaque_receiver)
-                    .expect("Did not expect add() to fail...");
+                    .add_opaque(receiver.opaque_receiver)?;
 
                 let event = Recorded::IpcSelectAdd(index);
-                record_replay::log(event, flavor, &type_name, &id);
+                record_replay::log(event, flavor, &metadata.type_name, &id);
                 Ok(index)
             }
             // Do not add receiver to IpcReceiverSet, intead move the receiver
             // to our own `receivers` hashmap where the index returned here is
             // the key.
             RecordReplayMode::Replay => {
-                let det_id = get_det_id().expect("None found on thread calling IpcReceiver add");
+                let det_id = get_det_id().
+                    expect("None found on thread calling IpcReceiver add");
+
                 match get_log_entry(det_id, get_event_id()) {
                     Some((Recorded::IpcSelectAdd(r_index), r_flavor, r_id)) => {
-                        // TODO change to assert EQ?
                         if *r_flavor != flavor {
                             panic!("Expected {:?}, saw {:?}", r_flavor, flavor);
                         }
