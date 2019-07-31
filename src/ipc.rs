@@ -185,9 +185,9 @@ where
             Ok(v) => v,
             // send() should never hang. No need to check if NoEntryLog.
             Err((error, msg)) => {
-                warn!("Desynchronization dected: {:?}", error);
+                warn!("Desynchronization detected: {:?}", error);
                 match *DESYNC_MODE {
-                    DesyncMode::Panic => panic!("Desynchronization dected: {:?}", error),
+                    DesyncMode::Panic => panic!("Desynchronization detected: {:?}", error),
                     // TODO: One day we may want to record this alternate execution.
                     DesyncMode::KeepGoing => {
                         let res = RecordReplaySend::send(self, get_forward_id(), msg);

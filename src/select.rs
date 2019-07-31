@@ -1,16 +1,13 @@
 use crate::channel::Flavor;
-use crate::log_trace;
-use crate::record_replay::DetChannelId;
-use crate::record_replay::{self, get_log_entry, FlavorMarker, Recorded, SelectEvent,
-                           get_log_entry_ret};
-use crate::thread::get_det_id;
-use crate::thread::get_event_id;
-use crate::thread::inc_event_id;
-use crate::{Receiver, RecordReplayMode, Sender, RECORD_MODE};
-use crossbeam_channel::RecvError;
-use crossbeam_channel::SendError;
+use crate::record_replay::{self, get_log_entry, FlavorMarker, Recorded,
+                           SelectEvent, get_log_entry_ret, DesyncError,
+                           DetChannelId};
+use crate::thread::{get_det_id, get_det_id_desync,
+                    get_event_id, inc_event_id, DetThreadId};
+use crate::{Receiver, RecordReplayMode, Sender, RECORD_MODE, log_trace, DESYNC_MODE,
+            DesyncMode};
+use crossbeam_channel::{RecvError, SendError};
 use log::{debug, info, trace, warn};
-use crate::thread::DetThreadId;
 
 /// Wrapper type around crossbeam's Select.
 pub struct Select<'a> {
@@ -51,52 +48,59 @@ impl<'a> Select<'a> {
 
     pub fn select(&mut self) -> SelectedOperation<'a> {
         log_trace("Select::select()");
-        match self.mode {
-            RecordReplayMode::Record => {
-                // We don't know the thread_id of sender until the select is complete
-                // when user call recv() on SelectedOperation. So do nothing here.
-                // Index will be recorded there.
-                SelectedOperation::Record(self.selector.select())
-            }
-            RecordReplayMode::Replay => {
-                let det_id = get_det_id().unwrap_or_else(|| {
-                    panic!("select(): get_det_id called from outside thread context")
-                });
+        self.record_replay_select().unwrap_or_else(|error| {
+            let selected = match &error {
+                // We expect this entry never to return on synchronized runs.
+                // but on desynchronization, this could lead to deadlocks.
+                // So we rely on the blocking behavior of select to
+                // validate our assumption.
+                // TODO: This is not perfect, it doesn't caputure the case
+                // where a blocking select "would have returned" but the
+                // program ended just before returning. However, this itself
+                // could be considrered a type of nondeterministic race =>
+                // between reading from a receiver/select and ending the
+                // program. Good programs should do this :)
+                e@DesyncError::NoEntryInLog(_, _) => {
+                    log_trace(&format!("Missing log entry: {:?}", e));
+                    log_trace("Assuming this thread blocked forever.");
 
-                // Query our log to see what index was selected!() during the replay phase.
-                // Flavor type not check on Select::select() but on Select::recv()
-                match get_log_entry_ret(det_id, get_event_id()) {
-                    Ok((event, flavor, chan_id)) => match event {
-                        Recorded::Select(select_entry) => {
-                            SelectedOperation::Replay(select_entry, *flavor, chan_id.clone())
-                        }
-                        e => {
-                            log_trace(&format!("Unexpected Recorded at Select::select(): {:?}", e));
-                            panic!("Unexpected Recorded at Select::select(): {:?}", e);
-                        }
-                    },
-                    Err(e) => {
-                        unimplemented!();
-                        log_trace(
-                            "No entry in log. Assuming this thread blocked on this \
-                             select forever.",
-                        );
-                        // No entry in log. This means that this event waiting forever
-                        // on select... Do the same here.
-                        loop {
-                            std::thread::park();
-                            log_trace("Spurious wakeup, going back to sleep.");
-                        }
-                    }
+                    // Assuming this select never returns! We should
+                    // hang here forever...
+                    let selected = self.selector.select();
+                    warn!("select() with missing log entry returned.");
+                    Some(selected)
+                }
+                _ => None,
+            };
+
+            warn!("Desynchronization detected! {:?}", error);
+            match *DESYNC_MODE {
+                DesyncMode::Panic => {
+                    panic!("Desynchronization detected: {:?}", error);
+                }
+                // Desync for crossbeam select is not so bad. We still register
+                // receivers with the selector. So on desync errors we can
+                // simply call select() directly.
+                DesyncMode::KeepGoing => {
+                    SelectedOperation::Desync(
+                        selected.unwrap_or_else(|| self.selector.select()))
                 }
             }
-            RecordReplayMode::NoRR => SelectedOperation::NoRR(self.selector.select()),
-        }
+        })
     }
 
     pub fn ready(&mut self) -> usize {
         log_trace("Select::ready()");
+        self.record_replay_ready().unwrap_or_else(|error| {
+            warn!("Desynchronization found: {:?}", error);
+            match *DESYNC_MODE {
+                DesyncMode::Panic => panic!("Desynchronization detected: {:?}", error),
+                DesyncMode::KeepGoing => self.selector.ready(),
+            }
+        })
+    }
 
+    fn record_replay_ready(&mut self) -> Result<usize, DesyncError> {
         match self.mode {
             RecordReplayMode::Record => {
                 let select_index = self.selector.ready();
@@ -107,30 +111,60 @@ impl<'a> Select<'a> {
                     // Ehh, we fake it here. We never check this value anyways.
                     &DetChannelId::fake()
                 );
-                select_index
+                Ok(select_index)
             }
             RecordReplayMode::Replay => {
-                let det_id = get_det_id().expect("ready(): get_det_id called outside thread");
-                // No channel flavor.
-                let event = get_log_entry(det_id, get_event_id()).
-                    expect("No such key in map.");
+                let det_id = get_det_id_desync()?;
+                let event = get_log_entry(det_id, get_event_id())?;
                 inc_event_id();
+
                 match event {
-                    Recorded::SelectReady { select_index } => *select_index,
-                    e => panic!("Unexpected event Recorded from ready(): {:?}", e),
+                    Recorded::SelectReady { select_index } => Ok(*select_index),
+                    event => {
+                        let dummy = Recorded::SelectReady{ select_index: 0 };
+                        Err(DesyncError::EventMismatch(event.clone(), dummy))
+                    }
                 }
             }
-            RecordReplayMode::NoRR => self.selector.ready(),
+            RecordReplayMode::NoRR => Ok(self.selector.ready()),
         }
     }
 
-    // fn record_replay_select(&mut self) -> Result<SelectedOperation<'a>, DesyncError> {
-        
-    // }
+    fn record_replay_select(&mut self) -> Result<SelectedOperation<'a>, DesyncError> {
+        match self.mode {
+            RecordReplayMode::Record => {
+                // We don't know the thread_id of sender until the select is complete
+                // when user call recv() on SelectedOperation. So do nothing here.
+                // Index will be recorded there.
+                Ok(SelectedOperation::Record(self.selector.select()))
+            }
+            RecordReplayMode::Replay => {
+                let det_id = get_det_id_desync()?;
+                // Query our log to see what index was selected!() during the replay phase.
+                // Flavor type not check on Select::select() but on Select::recv()
+                let (event, flavor, chan_id) = get_log_entry_ret(det_id, get_event_id())?;
+                match event {
+                    Recorded::Select(select_entry) => {
+                        Ok(SelectedOperation::Replay(select_entry, *flavor, chan_id.clone()))
+                    }
+                    e => {
+                        let dummy = SelectEvent::Success { sender_thread: None,
+                                                           selected_index: (0 - 1) as usize};
+                        Err(DesyncError::EventMismatch(e.clone(), Recorded::Select(dummy)))
+                    }
+                }
+            }
+            RecordReplayMode::NoRR => {
+                Ok(SelectedOperation::NoRR(self.selector.select()))
+            }
+        }
+    }
 }
 
 pub enum SelectedOperation<'a> {
     Replay(&'a SelectEvent, FlavorMarker, DetChannelId),
+    /// Special variant only seend once a desynchonization has happened.
+    Desync(crossbeam_channel::SelectedOperation<'a>),
     Record(crossbeam_channel::SelectedOperation<'a>),
     NoRR(crossbeam_channel::SelectedOperation<'a>),
 }
@@ -155,7 +189,9 @@ impl<'a> SelectedOperation<'a> {
             | SelectedOperation::Replay(SelectEvent::RecvError { selected_index, .. }, _, _) => {
                 *selected_index
             }
-            SelectedOperation::Record(selected) | SelectedOperation::NoRR(selected) => {
+            SelectedOperation::Record(selected) |
+            SelectedOperation::NoRR(selected)   |
+            SelectedOperation::Desync(selected) => {
                 selected.index()
             }
         }
@@ -183,33 +219,46 @@ impl<'a> SelectedOperation<'a> {
     /// Panics if an incorrect [`Receiver`] reference is passed.
     pub fn recv<T>(self, r: &Receiver<T>) -> Result<T, RecvError> {
         log_trace(&format!("SelectedOperation<{:?}>::recv()", r.metadata().id));
-        let selected_index = self.index();
+        self.record_replay_recv(r).unwrap_or_else(|error|{
+            // This type of desynchronization cannot be recovered from.
+            // This is due to how the Select API works for crossbeam channels...
+            // By the time we realize we have the "wrong receiver" e.g. flavor
+            // of chan_id mismatch, it is too late for us to do the selector.select()
+            // event. We cannot do this event preemptively as crossbeam will panic!()
+            // if we do select() but do not finish it by doing recv() on the selected
+            // operation. This should not really happen. So I think we're okay.
+            warn!("Desynchronization detected! {:?}", error);
+            panic!("SelectedOperation: Unrecoverable desynchonization: {:?}", error);
+        })
+    }
 
+    pub fn record_replay_recv<T>(self, r: &Receiver<T>)
+                                 -> Result<Result<T, RecvError>, DesyncError> {
+
+        let selected_index = self.index();
         match self {
+            SelectedOperation::Desync(selected) => {
+                Ok(SelectedOperation::do_recv(selected, r).map(|(_, msg)| msg))
+            }
             // Record value we get from direct use of Select API recv().
             SelectedOperation::Record(selected) => {
                 log_trace("SelectedOperation::Record");
 
                 let (msg, select_event) = match SelectedOperation::do_recv(selected, r) {
                     // Read value, log information needed for replay later.
-                    Ok((sender_thread, msg)) => (
-                        Ok(msg),
-                        SelectEvent::Success {
-                            sender_thread,
-                            selected_index,
-                        },
-                    ),
+                    Ok((sender_thread, msg)) => {
+                        (Ok(msg), SelectEvent::Success { sender_thread, selected_index })
+                    }
                     // Err(e) on the RHS is not the same type as Err(e) LHS.
-                    Err(e) => (Err(e), SelectEvent::RecvError { selected_index }),
+                    Err(e) => {
+                        (Err(e), SelectEvent::RecvError { selected_index })
+                    }
                 };
-
-                record_replay::log(
-                    Recorded::Select(select_event),
-                    r.flavor(),
-                    &r.metadata.type_name,
-                    &r.metadata.id,
-                );
-                msg
+                record_replay::log(Recorded::Select(select_event),
+                                   r.flavor(),
+                                   &r.metadata.type_name,
+                                   &r.metadata.id);
+                Ok(msg)
             }
             // We do not use the select API at all on replays. Wait for correct
             // message to come by receving on channel directly.
@@ -218,29 +267,29 @@ impl<'a> SelectedOperation<'a> {
                 // We cannot check these in `Select::select()` since we do not have
                 // the receiver until this function to compare values against.
                 if flavor != r.flavor() {
-                    panic!("Expected {:?}, saw {:?}", flavor, r.flavor());
+                    return Err(DesyncError::FlavorMismatch(flavor, r.flavor()));
                 }
                 if chan_id != r.metadata.id {
-                    panic!("Expected {:?}, saw {:?}", chan_id, r.metadata.id);
+                    return Err(DesyncError::ChannelMismatch(chan_id, r.metadata.id.clone()));
                 }
 
-                match event {
+                let retval = match event {
                     SelectEvent::Success { sender_thread, .. } => {
                         log_trace("SelectedOperation::Replay(SelectEvent::Success");
-                        let retval = r.replay_recv(sender_thread);
-                        inc_event_id();
-                        Ok(retval)
+                        Ok(r.replay_recv(sender_thread))
                     }
                     SelectEvent::RecvError { .. } => {
                         log_trace("SelectedOperation::Replay(SelectEvent::RecvError");
-                        inc_event_id();
                         Err(RecvError)
                     }
-                }
+                };
+
+                inc_event_id();
+                Ok(retval)
             }
             SelectedOperation::NoRR(selected) => {
                 // NoRR doesn't need DetThreadId
-                SelectedOperation::do_recv(selected, r).map(|v| v.1)
+                Ok(SelectedOperation::do_recv(selected, r).map(|v| v.1))
             }
         }
     }

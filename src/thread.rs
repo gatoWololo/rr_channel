@@ -5,11 +5,20 @@ use std::thread::JoinHandle;
 pub use std::thread::{current, panicking, park, park_timeout, sleep, yield_now};
 // use backtrace::Backtrace;
 use crate::log_trace;
-use crate::record_replay::EventId;
+use crate::record_replay::{EventId, DesyncError};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 pub fn get_det_id() -> Option<DetThreadId> {
     DET_ID.with(|di| di.borrow().clone())
+}
+
+/// Like `get_det_id` but treats missing DetThreadId as a
+/// desynchonization error.
+pub fn get_det_id_desync() -> Result<DetThreadId, DesyncError> {
+    match get_det_id() {
+        Some(v) => Ok(v),
+        None => Err(DesyncError::UnitializedDetThreadId),
+    }
 }
 
 pub fn set_det_id(new_id: Option<DetThreadId>) {

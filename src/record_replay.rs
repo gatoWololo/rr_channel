@@ -32,6 +32,7 @@ pub enum DesyncError {
     ChannelMismatch(DetChannelId, DetChannelId),
     /// Recorded log message was different. logged event vs current event.
     EventMismatch(Recorded, Recorded),
+    UnitializedDetThreadId,
 }
 
 // TODO use environment variables to generalize this.
@@ -447,40 +448,51 @@ pub trait RecordReplayRecv<T, E: Error> {
                         desync: DesyncError,
                         can_block: bool,
                         do_recv: impl Fn() -> Result<(Option<DetThreadId>, T), E>)
-                        -> Result<T, E>{
-        match desync {
-            // Assume this thread blocked forever here.
-            // TODO Add global bool which says if we have every desynchronized,
-            // if we have, it is probably safer to "recv()" instead of hanging.
-            DesyncError::NoEntryInLog(det_id, event_id) if can_block => {
-                warn!("Missing log entry for {:?}", (det_id, event_id));
-                log_trace("No entry in log. \
-                           Assuming this thread blocked on this select forever.");
-                // Spurious wakeup may happen, going back to sleep.
-                loop { std::thread::park(); }
+                     -> Result<T, E>{
+        let received = match &desync {
+            // We expect this entry never to return on synchronized runs.
+            // but on desynchronization, this could lead to deadlocks.
+            // So we rely on the blocking behavior of select to
+            // validate our assumption.
+            // TODO: This is not perfect, it doesn't caputure the case
+            // where a blocking select "would have returned" but the
+            // program ended just before returning. However, this itself
+            // could be considrered a type of nondeterministic race =>
+            // between reading from a receiver/select and ending the
+            // program. Good programs should do this :)
+            e@DesyncError::NoEntryInLog(_, _) if can_block => {
+                warn!("Missing log entry: {:?}", e);
+                log_trace("Assuming this thread blocked forever.");
+                Some(self.desync_get_next_entry(&do_recv))
             }
-            desync => {
-                log_trace(&format!("Desynchonization found: {:?}", desync));
-                match *DESYNC_MODE {
-                    DesyncMode::KeepGoing => {
-                        inc_event_id();
-                        // Try using entry from buffer before recv()-ing directly from
-                        // receiver. We don't care who the expected sender was. Any
-                        // value will do.
-                        for queue in self.get_buffer().values_mut()  {
-                            if let Some(val) = queue.pop_front() {
-                                return Ok(val);
-                            }
-                        }
-                        // No entries in buffer. Read from the wire.
-                        do_recv().map(|t| t.1)
-                    }
-                    DesyncMode::Panic => {
-                        panic!("Desynchonization found: {:?}", desync);
-                    }
-                }
+            _ => None,
+        };
+        warn!("Desynchonization found: {:?}", desync);
+
+        match *DESYNC_MODE {
+            DesyncMode::KeepGoing => {
+                inc_event_id();
+                received.unwrap_or_else(|| self.desync_get_next_entry(&do_recv))
+            }
+            DesyncMode::Panic => {
+                panic!("Desynchonization found: {:?}", desync);
             }
         }
+    }
+
+    fn desync_get_next_entry(&self,
+                             do_recv: &impl Fn() -> Result<(Option<DetThreadId>, T), E>)
+                             -> Result<T, E> {
+        // Try using entry from buffer before recv()-ing directly from
+        // receiver. We don't care who the expected sender was. Any
+        // value will do.
+        for queue in self.get_buffer().values_mut() {
+            if let Some(val) = queue.pop_front() {
+                return Ok(val);
+            }
+        }
+        // No entries in buffer. Read from the wire.
+        do_recv().map(|t| t.1)
     }
 
     fn get_buffer(&self) -> RefMut<HashMap<Option<DetThreadId>, VecDeque<T>>>;
