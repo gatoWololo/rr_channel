@@ -114,7 +114,8 @@ impl<T> Sender<T> {
             Err((error, msg)) => {
                 warn!("Desynchronization detected: {:?}", error);
                 match *DESYNC_MODE {
-                    DesyncMode::Panic => panic!("Desynchronization detected: {:?}", error),
+                    DesyncMode::Panic =>
+                        panic!("Send::Desynchronization detected: {:?}", error),
                     // TODO: One day we may want to record this alternate execution.
                     DesyncMode::KeepGoing => {
                         let res = RecordReplaySend::send(self, get_forward_id(), msg);
@@ -187,7 +188,7 @@ pub struct Receiver<T> {
     /// Buffer holding values from the "wrong" thread on replay mode.
     /// Crossbeam works with inmutable references, so we wrap in a RefCell
     /// to hide our mutation.
-    buffer: RefCell<HashMap<Option<DetThreadId>, VecDeque<T>>>,
+    pub(crate) buffer: RefCell<HashMap<Option<DetThreadId>, VecDeque<T>>>,
     pub(crate) receiver: Flavor<T>,
     pub(crate) metadata: RecordMetadata,
 }
@@ -258,6 +259,17 @@ impl<T> Receiver<T> {
                 id,
             },
         }
+    }
+
+    /// Fetch buffered value if any.
+    pub(crate) fn get_buffered_value(&self) -> Option<T> {
+        let mut hashmap = self.buffer.borrow_mut();
+        for queue in hashmap.values_mut() {
+            if let v@Some(_) = queue.pop_front() {
+                return v;
+            }
+        }
+        None
     }
 
     pub(crate) fn replay_recv(&self, sender: &Option<DetThreadId>) -> T {

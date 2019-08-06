@@ -160,19 +160,26 @@ impl Router {
             for result in results.into_iter() {
                 match result {
                     IpcSelectionResult::MessageReceived(id, _) if id == self.msg_wakeup_id => {
-                        match self.msg_receiver.recv().unwrap() {
+                        match self.msg_receiver.recv().expect("rr_channel:: RouterProxy::run(): Unable to receive message.") {
                             RouterMsg::AddRoute(receiver, handler) => {
+                                let id = receiver.metadata.id.clone();
                                 let new_receiver_id =
-                                    self.ipc_receiver_set.add_opaque(receiver).unwrap();
+                                    self.ipc_receiver_set.add_opaque(receiver).
+                                    expect("rr_channel:: RouterProxy::run(): Could not add_opaque");
                                 self.handlers.insert(new_receiver_id, handler);
+                                // println!("Added receiver {:?} at {:?} for handler", id, new_receiver_id);
                             }
                         }
                     }
                     IpcSelectionResult::MessageReceived(id, message) => {
-                        self.handlers.get_mut(&id).unwrap()(message)
+                        let handler = self.handlers.get_mut(&id).
+                            expect(&format!("rr_channel:: RouterProxy::run(): MessageReceived, No such handler: {:?}", id));
+                        handler(message)
                     }
                     IpcSelectionResult::ChannelClosed(id) => {
-                        self.handlers.remove(&id).unwrap();
+                        self.handlers.remove(&id).
+                            expect(&format!("rr_channel:: RouterProxy::run(): Channel Closed, No such handler: {:?}", id));
+                        // println!("Removed handler for {:?}", id);
                     }
                 }
             }

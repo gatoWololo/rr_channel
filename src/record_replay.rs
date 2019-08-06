@@ -5,6 +5,7 @@ use lazy_static::lazy_static;
 use std::fs::remove_file;
 use std::fs::File;
 use std::sync::Mutex;
+use std::thread;
 
 use crate::{DESYNC_MODE, DesyncMode};
 use crate::{log_trace};
@@ -33,6 +34,18 @@ pub enum DesyncError {
     /// Recorded log message was different. logged event vs current event.
     EventMismatch(Recorded, Recorded),
     UnitializedDetThreadId,
+    MissingReceiver(u64),
+    /// An entry already exists for the specificied index in IpcReceiverSet.
+    SelectExistingEntry(u64),
+    /// IpcReceiverSet expected first index, but found second index.
+    SelectIndexMismatch(u64, u64),
+    /// Generic error used for situations where we already know we're
+    /// desynchronized and want to alert caller.
+    Desynchronized,
+    /// Expected a channel close message, but saw actual value.
+    ChannelClosedExpected,
+    /// Expected a message, but channel returned closed.
+    ChannelClosedUnexpected(u64),
 }
 
 // TODO use environment variables to generalize this.
@@ -65,6 +78,7 @@ pub enum FlavorMarker {
     None,
     Ipc,
     IpcSelect,
+    Select,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -104,10 +118,23 @@ pub struct RecvErrorDef {}
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct IpcDummyError;
 
+// Types of operating that may block.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum BlockingOp {
+    Select,
+    IpcSelect,
+    Recv,
+    IpcRecv,
+}
+
 /// Main enum listing different types of events
 /// that our logger supports.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum Recorded {
+    /// Blocking operations may never return.
+    /// We use this event to tell when a blocking operation
+    /// was called but never returned.
+    BlockingOpStart(BlockingOp),
     // Crossbeam select.
     SelectReady {
         select_index: usize,
@@ -372,25 +399,53 @@ pub trait RecordReplayRecv<T, E: Error> {
 
         match metadata.mode {
             RecordReplayMode::Record => {
+                // Log the fact that we started a possibly blocking operation!
+                // TODO We don't need this for all variants e.g. try_recv.
+                let record = Recorded::BlockingOpStart(BlockingOp::Recv);
+                record_replay::log(record, metadata.flavor,
+                                   &metadata.type_name, &metadata.id);
                 let (result, recorded) = self.to_recorded_event(recv());
                 record_replay::log(recorded, metadata.flavor,
                                    &metadata.type_name, &metadata.id);
                 Ok(result)
             }
             RecordReplayMode::Replay => {
-                // TODO: We may want to consider None from get_det_id() type of desync
-                // as the handle_desync code will perfectly handle this.
                 match get_det_id() {
                     None => {
                         warn!("DetThreadId was None. \
                                This execution may not be deterministic.");
                         inc_event_id();
+                        // TODO: This seems wrong. I think we should be doing
+                        // a replay_recv() here even if the det_id is none.
                         Ok(recv().map(|v| v.1))
                     }
                     Some(det_id) => {
-                        let event =
-                            get_log_entry_with(det_id, get_event_id(), &metadata.flavor, &metadata.id)?;
-                        Ok(self.expected_recorded_events(event.clone())?)
+                        // We expect to see a start
+                        let event = get_log_entry_with(det_id.clone(),
+                                                       get_event_id(),
+                                                       &metadata.flavor,
+                                                       &metadata.id)?;
+                        match event {
+                            Recorded::BlockingOpStart(_ /*TODO*/) => { }
+                            event => {
+                                let dummy = Recorded::BlockingOpStart(BlockingOp::Recv);
+                                let e = DesyncError::EventMismatch(dummy, event.clone());
+                                return Err(e);
+                            }
+                        }
+                        inc_event_id();
+                        let entry = get_log_entry_with(det_id,
+                                                       get_event_id(),
+                                                       &metadata.flavor,
+                                                       &metadata.id);
+
+                        // Special case for NoEntryInLog. Hang this thread forever.
+                        if let Err(e@DesyncError::NoEntryInLog(_, _)) = entry {
+                            log_trace(&format!("Saw {:?}. Putting thread to sleep.", e));
+                            loop { thread::park() }
+                        }
+
+                        Ok(self.expected_recorded_events(entry?.clone())?)
                     }
                 }
             }
@@ -408,7 +463,7 @@ pub trait RecordReplayRecv<T, E: Error> {
         id: &DetChannelId,
     ) -> T {
         log_trace_with(
-            &format!("replay_recv(expected_sender: {:?}) ...", expected_sender),
+            &format!("recv_from_sender(expected_sender: {:?}) ...", expected_sender),
             id,
         );
 
@@ -448,31 +503,13 @@ pub trait RecordReplayRecv<T, E: Error> {
                         desync: DesyncError,
                         can_block: bool,
                         do_recv: impl Fn() -> Result<(Option<DetThreadId>, T), E>)
-                     -> Result<T, E>{
-        let received = match &desync {
-            // We expect this entry never to return on synchronized runs.
-            // but on desynchronization, this could lead to deadlocks.
-            // So we rely on the blocking behavior of select to
-            // validate our assumption.
-            // TODO: This is not perfect, it doesn't caputure the case
-            // where a blocking select "would have returned" but the
-            // program ended just before returning. However, this itself
-            // could be considrered a type of nondeterministic race =>
-            // between reading from a receiver/select and ending the
-            // program. Good programs should do this :)
-            e@DesyncError::NoEntryInLog(_, _) if can_block => {
-                warn!("Missing log entry: {:?}", e);
-                log_trace("Assuming this thread blocked forever.");
-                Some(self.desync_get_next_entry(&do_recv))
-            }
-            _ => None,
-        };
+                     -> Result<T, E> {
         warn!("Desynchonization found: {:?}", desync);
 
         match *DESYNC_MODE {
             DesyncMode::KeepGoing => {
                 inc_event_id();
-                received.unwrap_or_else(|| self.desync_get_next_entry(&do_recv))
+                self.desync_get_next_entry(&do_recv)
             }
             DesyncMode::Panic => {
                 panic!("Desynchonization found: {:?}", desync);

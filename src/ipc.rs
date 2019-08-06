@@ -3,14 +3,14 @@ use crate::record_replay::{self, Blocking, FlavorMarker, IpcDummyError,
                            RecordReplayRecv, Recorded, RecordMetadata,
                            get_log_entry, DetChannelId, IpcSelectEvent,
                            RecordReplaySend, get_log_entry_with, DesyncError,
-                           get_forward_id };
+                           get_forward_id, BlockingOp };
 use crate::thread::{get_and_inc_channel_id, get_det_id, DetThreadId,
-                    get_event_id, inc_event_id};
+                    get_event_id, inc_event_id, get_det_id_desync};
 use crate::{RecordReplayMode, ENV_LOGGER, RECORD_MODE, log_trace_with,
             DESYNC_MODE, DesyncMode};
 use std::cell::RefMut;
 use ipc_channel::ipc::{self};
-use log::warn;
+use log::{warn, trace};
 use bincode;
 pub use ipc_channel::ipc::{bytes_channel, IpcOneShotServer, IpcSharedMemory,
                            IpcBytesReceiver, IpcBytesSender};
@@ -22,6 +22,9 @@ use serde::{ser::SerializeStruct, Deserialize, Serialize, Serializer};
 use std::cell::RefCell;
 use std::collections::hash_map::HashMap;
 use std::collections::VecDeque;
+use std::collections::HashSet;
+use std::thread;
+use ipc_channel::ipc::OpaqueIpcSender;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct IpcReceiver<T> {
@@ -92,7 +95,12 @@ where
 
 pub struct OpaqueIpcReceiver {
     opaque_receiver: ipc_channel::ipc::OpaqueIpcReceiver,
-    metadata: RecordMetadata,
+    pub(crate) metadata: RecordMetadata,
+    /// For the IpceReceiverSet to work correctly, we keep track of when
+    /// a OpaqueIpcReceiver is closed, to avoid adding it to the set
+    /// of receivers when we desync. We track this information here.
+    /// See: https://github.com/gatoWololo/rr_channel/issues/28
+    closed: bool,
 }
 
 impl<T> IpcReceiver<T>
@@ -114,6 +122,7 @@ where T: for<'de> Deserialize<'de> + Serialize {
         OpaqueIpcReceiver {
             opaque_receiver: self.receiver.to_opaque(),
             metadata,
+            closed: false,
         }
     }
 
@@ -185,9 +194,9 @@ where
             Ok(v) => v,
             // send() should never hang. No need to check if NoEntryLog.
             Err((error, msg)) => {
-                warn!("Desynchronization detected: {:?}", error);
+                warn!("IpcSend::Desynchronization detected: {:?}", error);
                 match *DESYNC_MODE {
-                    DesyncMode::Panic => panic!("Desynchronization detected: {:?}", error),
+                    DesyncMode::Panic => panic!("IpcSend::Desynchronization detected: {:?}", error),
                     // TODO: One day we may want to record this alternate execution.
                     DesyncMode::KeepGoing => {
                         let res = RecordReplaySend::send(self, get_forward_id(), msg);
@@ -200,6 +209,10 @@ where
                 }
             }
         }
+    }
+
+    pub fn to_opaque(self) -> OpaqueIpcSender {
+        self.sender.to_opaque()
     }
 
     pub fn connect(name: String) -> Result<IpcSender<T>, std::io::Error> {
@@ -246,33 +259,6 @@ where
     ))
 }
 
-/// We assume that receivers will be added in deterministic order. We wrap the
-/// router to ensure this is true for `RouterProxy`'s use of `IpcReceiverSet`.
-/// If receivers are added in different order, this will cause replay to fail.
-/// panic!()/warn!()
-pub struct IpcReceiverSet {
-    receiver_set: ipc_channel::ipc::IpcReceiverSet,
-    mode: RecordReplayMode,
-    /// On replay, we don't actually register receivers with the real IpcReceiverSet.
-    /// Instead, we store them and assign them unique indices. This variable keeps
-    /// tracks of the next idex to assing. It can be used to access the receivers
-    /// through the `receivers` field.
-    index: u64,
-    /// On replay we don't use `receiver_set` instead we wait individually on
-    /// the opaque receiver handles based on the recorded indices.
-    receivers: HashMap<u64, OpaqueIpcReceiver>,
-    /// On multiple producer channels, sometimes we get the wrong event.
-    /// buffer those here for later.
-    /// Indexed first by channel index, then by expected Some(DetThreadId)
-    /// (We hold messaged from None on this buffer as well).
-    buffer: HashMap<u64, HashMap<Option<DetThreadId>, VecDeque<OpaqueIpcMessage>>>,
-}
-
-#[derive(Debug)]
-pub struct OpaqueIpcMessage {
-    pub opaque: ipc_channel::ipc::OpaqueIpcMessage,
-}
-
 pub enum IpcSelectionResult {
     /// A message received from the [IpcReceiver] in the [opaque] form,
     /// identified by the `u64` value.
@@ -306,6 +292,12 @@ impl IpcSelectionResult {
     }
 }
 
+#[derive(Debug)]
+pub struct OpaqueIpcMessage {
+    pub opaque: ipc_channel::ipc::OpaqueIpcMessage,
+}
+
+
 impl OpaqueIpcMessage {
     pub fn new(
         data: Vec<u8>,
@@ -328,14 +320,52 @@ impl OpaqueIpcMessage {
     }
 }
 
+/// We assume that receivers will be added in deterministic order. We wrap the
+/// router to ensure this is true for `RouterProxy`'s use of `IpcReceiverSet`.
+/// If receivers are added in different order, this will cause replay to fail.
+/// panic!()/warn!()
+pub struct IpcReceiverSet {
+    receiver_set: ipc_channel::ipc::IpcReceiverSet,
+    mode: RecordReplayMode,
+    /// On replay, we don't actually register receivers with the real IpcReceiverSet.
+    /// Instead, we store them and assign them unique indices. This variable keeps
+    /// tracks of the next idex to assing. It can be used to access the receivers
+    /// through the `receivers` field.
+    /// We use usize because that is what Vec uses.
+    index: usize,
+    /// On replay we don't use `receiver_set` instead we wait individually on
+    /// the opaque receiver handles based on the recorded indices.
+    /// TODO Should we "remove" receivers at some point? I feel like we should...
+    /// Maybe this should be a vector...
+    receivers: Vec<OpaqueIpcReceiver>,
+    /// On multiple producer channels, sometimes we get the wrong event.
+    /// buffer those here for later.
+    /// Indexed first by channel index, then by expected Some(DetThreadId)
+    /// (We hold messaged from None on this buffer as well).
+    /// TODO: this buffer may grow unbounded, we never clean up old entries.
+    buffer: HashMap<u64, HashMap<Option<DetThreadId>, VecDeque<OpaqueIpcMessage>>>,
+    /// This `IpcReceiverSet` has become desynchronized. Any call to methods that
+    /// return `DesyncError`s will return an error.
+    desynced: bool,
+    /// Holds on to senders counterparts for "dummy" receivers that have already
+    /// been closed and then we desynchronized. We need to hang on to these
+    /// receivers, but NEVER use them, have the "dummy" receivers act like
+    /// closed receivers. We add sendes in abitrary order and nothing should be
+    /// assumed about their ordering.
+    /// See https://github.com/gatoWololo/rr_channel/issues/28
+    dummy_senders: Vec<OpaqueIpcSender>
+}
+
 impl IpcReceiverSet {
     pub fn new() -> Result<IpcReceiverSet, std::io::Error> {
         ipc_channel::ipc::IpcReceiverSet::new().map(|r| IpcReceiverSet {
             receiver_set: r,
             mode: *RECORD_MODE,
             index: 0,
-            receivers: HashMap::new(),
+            receivers: Vec::new(),
             buffer: HashMap::new(),
+            desynced: false,
+            dummy_senders: Vec::new(),
         })
     }
 
@@ -343,44 +373,92 @@ impl IpcReceiverSet {
     where
         T: for<'de> Deserialize<'de> + Serialize,
     {
-        self.rr_add(receiver.to_opaque())
+        self.do_add(receiver.to_opaque())
     }
 
     pub fn add_opaque(&mut self, receiver: OpaqueIpcReceiver) -> Result<u64, std::io::Error> {
-        self.rr_add(receiver)
+        self.do_add(receiver)
     }
 
-    // Extrace DetThreadId from opaque message. Not easy :P
-    fn deserialize_id(opaque_msg: &OpaqueIpcMessage) -> Option<DetThreadId> {
-        let (det_id, _): (Option<DetThreadId>, /*Unknown T*/ ()) =
-            bincode::deserialize(&opaque_msg.opaque.data)
-            .expect("Unable to deserialize DetThreadId");
-        det_id
+    fn do_add(&mut self, receiver: OpaqueIpcReceiver) -> Result<u64, std::io::Error> {
+        self.record_replay_add(receiver).unwrap_or_else(|(e, receiver)| {
+            warn!("IpcReceiver::add::Desynchonization detected: {:?}", e);
+            match *DESYNC_MODE {
+                DesyncMode::Panic => panic!("IpcReceiver::add::Desynchronization detected: {:?}", e),
+                DesyncMode::KeepGoing => {
+                    self.move_receivers_to_set();
+                    inc_event_id();
+                    self.receiver_set.add_opaque(receiver.opaque_receiver)
+                }
+            }
+        })
+    }
+
+    pub fn select(&mut self) -> Result<Vec<IpcSelectionResult>, std::io::Error> {
+        log_trace("IpcSelect::select()");
+        self.record_replay_select().unwrap_or_else(|(e, entries)| {
+            warn!("IpcSelect::Desynchonization detected: {:?}", e);
+
+            match *DESYNC_MODE {
+                DesyncMode::Panic => {
+                    panic!("IpcSelect::Desynchronization detected: {:?}", e);
+                }
+                DesyncMode::KeepGoing => {
+                    log_trace("Looking for entry in buffers or directly through select()...");
+                    self.move_receivers_to_set();
+                    // First use up our buffered entries, if none. Do the
+                    // actual wait.
+                    match self.get_buffered_entries() {
+                        None => {
+                            log_trace("Doing direct do_select()");
+                            inc_event_id();
+                            self.do_select()
+                        }
+                        Some(be) => {
+                            log_trace("Using buffered entries.");
+                            inc_event_id();
+                            Ok(be)
+                        }
+                    }
+                }
+            }
+        })
     }
 
     /// By the time we hit a select. We assume all receivers have been added to this
     /// set. We verify this assumption by making all receivers be added in the order
-    /// seen in the record. If not all receivers are present, we panic.
-    /// (TODO switch to non panicking)
-    pub fn select(&mut self) -> Result<Vec<IpcSelectionResult>, std::io::Error> {
-        log_trace("IpcSelect::select()");
-
+    /// seen in the record. If not all receivers are present, it is a DesyncError.
+    /// On DesyncError, we may be "halfway" through replaying a select, we return
+    /// the entries we already have to avoid losing them.
+    fn record_replay_select(&mut self) ->
+        Result<Result<Vec<IpcSelectionResult>, std::io::Error>,
+               (DesyncError, Vec<IpcSelectionResult>)> {
         match self.mode {
             RecordReplayMode::Record => {
+                // Log the fact that we started a possibly blocking operation!
+                let record = Recorded::BlockingOpStart(BlockingOp::IpcSelect);
+                record_replay::log(record, FlavorMarker::IpcSelect,
+                                   "ipc_channel::IpcReceiverSet", &DetChannelId::fake());
+
                 // Events will be moved by our loop. So we put them back here.
                 let mut moved_events: Vec<IpcSelectionResult> = Vec::new();
                 let mut recorded_events = Vec::new();
 
+                let selected = match self.do_select() {
+                    Ok(v) => v,
+                    e => return Ok(e),
+                };
+
                 // Iterate through events populating recorded_events.
-                for e in self.do_select()? {
+                for e in selected {
                     match e {
                         IpcSelectionResult::MessageReceived(index, opaque_msg) => {
                             let det_id = IpcReceiverSet::deserialize_id(&opaque_msg);
 
-                            recorded_events.
-                                push(IpcSelectEvent::MessageReceived(index, det_id));
                             moved_events
                                 .push(IpcSelectionResult::MessageReceived(index, opaque_msg));
+                            recorded_events.
+                                push(IpcSelectEvent::MessageReceived(index, det_id));
                         }
                         IpcSelectionResult::ChannelClosed(index) => {
                             moved_events.push(IpcSelectionResult::ChannelClosed(index));
@@ -393,113 +471,166 @@ impl IpcReceiverSet {
                 // Ehh, we fake it here. We never check this value anyways.
                 let id = &DetChannelId::fake();
                 record_replay::log(event, FlavorMarker::IpcSelect, "IpcSelect", id);
-                Ok(moved_events)
+                Ok(Ok(moved_events))
             }
 
             // Use index to fetch correct receiver and read value directly from
             // receiver.
             RecordReplayMode::Replay => {
-                let mut events: Vec<IpcSelectionResult> = Vec::new();
-                let det_id = get_det_id().expect("Select thread's det id not set.");
+                if self.desynced {
+                    return Err((DesyncError::Desynchronized, vec![]));
+                }
+                let det_id = get_det_id_desync().map_err(|e| (e, vec![]))?;
 
-                match get_log_entry(det_id, get_event_id()) {
-                    Ok(Recorded::IpcSelect { select_events }) => {
+                // We expect to see a start message first.
+                match get_log_entry(det_id.clone(), get_event_id())
+                    .map_err(|e| (e, vec![]))? {
+                    // Ensure event is a BlockingOpStart
+                    Recorded::BlockingOpStart(_ /*TODO*/) => { }
+                    event => {
+                        let dummy = Recorded::BlockingOpStart(BlockingOp::Recv);
+                        let e = DesyncError::EventMismatch(dummy, event.clone());
+                        return Err((e, vec![]));
+                    }
+                }
+                inc_event_id();
+
+                // Here we put this thread to sleep if the entry is missing.
+                // On record, the thread never returned from blocking...
+                let entry = get_log_entry(det_id, get_event_id());
+                if let Err(e@DesyncError::NoEntryInLog(_, _)) = entry {
+                    log_trace(&format!("Saw {:?}. Putting thread to sleep.", e));
+                    loop { thread::park() }
+                }
+
+                match entry.map_err(|e| (e, vec![]))? {
+                    Recorded::IpcSelect { select_events } => {
+                        let mut events: Vec<IpcSelectionResult> = Vec::new();
+
                         for event in select_events {
-                            match event {
-                                IpcSelectEvent::MessageReceived(index, expected_sender) => {
-                                    if expected_sender.is_none() {
-                                        // Since we don't have a expected_sender, it may be the case this
-                                        // is nondeterminism if there are multiple producers both writing
-                                        // to this channel as None.
-                                        warn!("Expected sender is None. This execution may be nondeterministic");
-                                    }
-                                    // Fetch the receiver and explicitly wait the message.
-                                    let receiver = self
-                                        .receivers
-                                        .get_mut(index)
-                                        .expect("Missing key in receivers");
-                                    // Auto buffers results.
-                                    let entry = IpcReceiverSet::do_replay_recv_for_entry(
-                                        &mut self.buffer,
-                                        *index,
-                                        expected_sender,
-                                        receiver,
-                                    );
+                            match self.replay_select_event(event) {
+                                Err((e, entry)) => {
                                     events.push(entry);
+                                    return Err((e, events));
                                 }
-                                IpcSelectEvent::ChannelClosed(index) => {
-                                    let receiver = self
-                                        .receivers
-                                        .get_mut(index)
-                                        .expect("Missing key in receivers");
-                                    match receiver.opaque_receiver.os_receiver.recv() {
-                                        // TODO Check if this is some random error
-                                        // or a channel closed error!!!
-                                        Err(e) => {
-                                            events.push(IpcSelectionResult::ChannelClosed(*index))
-                                        }
-                                        Ok(_) => panic!("Expected ChannelClosed!"),
-                                    }
-                                }
+                                Ok(entry) => events.push(entry),
                             }
                         }
 
                         inc_event_id();
-                        Ok(events)
+                        Ok(Ok(events))
                     }
-                    Ok(e) => {
-                        log_trace(&format!(
-                            "IpcReceiverSet::select(): Unexpected event: {:?}",
-                            e
-                        ));
-                        panic!("IpcReceiverSet::select(): Unexpected event: {:?}", e);
-                    }
-                    Err(e) => {
-                        panic!("OMAR Figure out what goes here.");
-                        log_trace("No entry for IpcReceiverSet::select()");
-                        // No entry present. Assume this select never returned!
-                        log_trace("Putting thread to sleep!");
-                        loop {
-                            std::thread::park();
-                            log_trace("Spurious wakeup, going back to sleep.");
-                        }
+                    event => {
+                        let dummy = Recorded::IpcSelect { select_events: vec![] };
+                        Err((DesyncError::EventMismatch(event.clone(), dummy), vec![]))
                     }
                 }
             }
-            RecordReplayMode::NoRR => self.do_select(),
+            RecordReplayMode::NoRR => Ok(self.do_select()),
+        }
+    }
+
+    /// From a IpcSelectEvent, fetch the correct IpcSelectionResult.
+    /// On error return the event that caused Desync.
+    fn replay_select_event(&mut self, event: &IpcSelectEvent)
+                           -> Result<IpcSelectionResult, (DesyncError, IpcSelectionResult)> {
+        log_trace(&format!("replay_select_event for {:?}", event));
+        match event {
+            IpcSelectEvent::MessageReceived(index, expected_sender) => {
+                if expected_sender.is_none() {
+                    // Since we don't have a expected_sender, it may be the case this
+                    // is nondeterminism if there are multiple producers both writing
+                    // to this channel as None.
+                    warn!("Expected sender is None. This execution may be nondeterministic");
+                }
+                let receiver = self.receivers.get_mut(*index as usize).
+                // This should never happen. The way the code is written, by the
+                // time we get here, all receivers have been registered with us correctly.
+                // If any of them are missing. We would have seen it already.
+                // expect here represents a bug on the internal assumptions of our code.
+                    expect("Unable to fetch correct receiver from map.");
+
+                // Auto buffers results.
+                Ok(IpcReceiverSet::do_replay_recv_for_entry(&mut self.buffer,
+                                                         *index,
+                                                         expected_sender,
+                                                         receiver)?)
+            }
+            IpcSelectEvent::ChannelClosed(index) => {
+                let receiver = self.receivers.get_mut(*index as usize).
+                // This should never happen. The way the code is written, by the
+                // time we get here, all receivers have been registered with us correctly.
+                // If any of them are missing. We would have seen it already.
+                // expect here represents a bug on the internal assumptions of our code.
+                    expect("Unable to fetch correct receiver from map.");
+
+                match receiver.opaque_receiver.os_receiver.recv() {
+                    Err(e) if e.channel_is_closed() => {
+                        trace!("replay_select_event(): Saw channel closed for {:?}", index);
+                        // remember that this receiver closed!
+                        receiver.closed = true;
+                        Ok(IpcSelectionResult::ChannelClosed(*index))
+                    }
+                    Err(e) => {
+                        panic!("Unknown reason for error: {:?}", e);
+                    }
+                    Ok(val) => {
+                        // Expected a channel closed, saw a real message...
+                        trace!("Expected channel closed! Saw success: {:?}", index);
+                        log_trace("Expected channel closed! Saw success.");
+                        Err((DesyncError::ChannelClosedExpected,
+                             IpcReceiverSet::convert(*index, val.0, val.1, val.2)))
+                    }
+                }
+            }
         }
     }
 
     /// TODO: There is borrowing issues if I mut borrow the receiver, and
     /// have this function be a method with (&mut self). So I pass everything
     /// explicitly for now.
+
+    /// Loop until correct message is found for passed receiver. If the message
+    /// is from the "wrong" sender, it is buffered.
+    /// DesyncError is returned if the channel closes on us. We return the
+    /// Channel closed event.
     fn do_replay_recv_for_entry(
         buffer: &mut HashMap<u64, HashMap<Option<DetThreadId>, VecDeque<OpaqueIpcMessage>>>,
         index: u64,
         expected_sender: &Option<DetThreadId>,
         receiver: &mut OpaqueIpcReceiver,
-    ) -> IpcSelectionResult {
+    ) -> Result<IpcSelectionResult, (DesyncError, IpcSelectionResult)> {
+        log_trace("do_replay_recv_for_entry");
         if let Some(entry) = buffer.
             get_mut(&index).
             and_then(|m| m.get_mut(expected_sender)).
             and_then(|e| e.pop_front()) {
                 log_trace("IpcSelect(): Recv message found in buffer.");
-                return IpcSelectionResult::MessageReceived(index, entry);
+                return Ok(IpcSelectionResult::MessageReceived(index, entry));
             }
 
         loop {
-            let (data, os_ipc_channels, os_ipc_shared_memory_regions) = receiver
-                .opaque_receiver
-                .os_receiver
-                .recv()
-                .expect("failed to recv() from OS receiver.");
+            let (data, channels, shared_memory_regions) =
+                match receiver.opaque_receiver.os_receiver.recv() {
+                    Ok(v) => v,
+                    Err(e) if e.channel_is_closed() => {
+                        log_trace("do_replay_recv_for_entry: \
+                                   Expected message, saw channel closed.");
+                        // remember that this receiver closed!
+                        receiver.closed = true;
+                        return Err((DesyncError::ChannelClosedUnexpected(index),
+                                   IpcSelectionResult::ChannelClosed(index)));
+                    }
+                    Err(e) => panic!("do_replay_recv_for_entry: \
+                                      Unknown reason for error: {:?}", e),
+            };
 
-            // TODO: Yuck. Ugly. Refactor.
-            let msg = OpaqueIpcMessage::new(data, os_ipc_channels, os_ipc_shared_memory_regions);
+            let msg = OpaqueIpcMessage::new(data, channels, shared_memory_regions);
             let det_id = IpcReceiverSet::deserialize_id(&msg);
 
             if &det_id == expected_sender {
-                return IpcSelectionResult::MessageReceived(index, msg);
+                log_trace("do_replay_recv_for_entry: message found via recv()");
+                return Ok(IpcSelectionResult::MessageReceived(index, msg));
             } else {
                 log_trace(&format!(
                     "Wrong message received from {:?}, adding it to buffer",
@@ -518,8 +649,10 @@ impl IpcReceiverSet {
     /// Call actual select for real IpcReceiverSet and convert their
     /// ipc_channel::ipc::IpcSelectionResult into our IpcSelectionResult.
     fn do_select(&mut self) -> Result<Vec<IpcSelectionResult>, std::io::Error> {
+        log_trace("IpcReceiverSet::do_select()");
+
         let selected = self.receiver_set.select()?;
-        let selected = selected.into_iter()
+        let selected: Vec<IpcSelectionResult> = selected.into_iter()
             .map(|selection| match selection {
                 ipc_channel::ipc::IpcSelectionResult::MessageReceived(i, opaque) => {
                     IpcSelectionResult::MessageReceived(i, OpaqueIpcMessage { opaque })
@@ -529,60 +662,166 @@ impl IpcReceiverSet {
                 }
             })
             .collect();
+        log_trace(&format!("Found {:?} entries.", selected.len()));
         Ok(selected)
     }
 
-    fn rr_add(&mut self, receiver: OpaqueIpcReceiver) -> Result<u64, std::io::Error> {
+    /// On error we return the back to the user, otherwise it would be moved forever.
+    fn record_replay_add(&mut self, receiver: OpaqueIpcReceiver)
+              -> Result<Result<u64, std::io::Error>, (DesyncError, OpaqueIpcReceiver)> {
         let metadata = receiver.metadata.clone();
         let flavor = metadata.flavor;
         let id = metadata.id;
         log_trace(&format!("IpcSelect::rr_add<{:?}>()", id));
 
+        // After the first time we desynchronize, this is set to true and future times
+        // we eill be sent here.
+        if self.desynced {
+            return Err((DesyncError::Desynchronized, receiver));
+        }
+
         match self.mode {
             RecordReplayMode::Record => {
-                let index = self
-                    .receiver_set
-                    .add_opaque(receiver.opaque_receiver)?;
+                let index = match self.receiver_set.add_opaque(receiver.opaque_receiver) {
+                    Ok(v) => v,
+                    e@Err(_) => return Ok(e),
+                };
 
                 let event = Recorded::IpcSelectAdd(index);
                 record_replay::log(event, flavor, &metadata.type_name, &id);
-                Ok(index)
+                Ok(Ok(index))
             }
-            // Do not add receiver to IpcReceiverSet, intead move the receiver
+            // Do not add receiver to IpcReceiverSet, instead move the receiver
             // to our own `receivers` hashmap where the index returned here is
             // the key.
             RecordReplayMode::Replay => {
-                let det_id = get_det_id().
-                    expect("None found on thread calling IpcReceiver add");
-
-                match get_log_entry_with(det_id, get_event_id(), &flavor, &id) {
-                    Ok(Recorded::IpcSelectAdd(r_index)) => {
-                        // Add our entry to map here.
-                        if let Some(e) = self.receivers.insert(self.index, receiver) {
-                            panic!("Map entry already exists.");
+                let det_id = match get_det_id_desync() {
+                    Err(e) => return Err((e, receiver)),
+                    Ok(v) => v,
+                };
+                let log_entry = match get_log_entry_with(det_id, get_event_id(), &flavor, &id) {
+                    Err(e) => return Err((e, receiver)),
+                    Ok(v) => v,
+                };
+                let index = self.index as u64;
+                match log_entry {
+                    Recorded::IpcSelectAdd(r_index) => {
+                        if *r_index != index {
+                            let error = DesyncError::SelectIndexMismatch(*r_index, index);
+                            return Err((error, receiver));
+                        }
+                        if let Some(_) = self.receivers.get(self.index) {
+                            let error = DesyncError::SelectExistingEntry(index);
+                            return Err((error, receiver));
                         }
 
-                        if *r_index != self.index {
-                            panic!(
-                                "IpcReceiverSet::rr_add. Wrong index. Expected {:?}, saw {:?}",
-                                r_index, self.index
-                            );
-                        }
+                        self.receivers.insert(self.index, receiver);
 
-                        let index = self.index;
                         self.index += 1;
                         inc_event_id();
-                        Ok(index)
+                        Ok(Ok(index))
                     }
-                    Ok(r) => {
-                        panic!("Expected IpcReceiverSetAddSucc instead saw {:?}", r);
-                    }
-                    Err(e) => {
-                        panic!("Missing entry for IpcReceiverSet::add()");
+                    event => {
+                        let dummy = Recorded::IpcSelectAdd((0 - 1) as u64);
+                        Err((DesyncError::EventMismatch(event.clone(), dummy), receiver))
                     }
                 }
             }
-            RecordReplayMode::NoRR => self.receiver_set.add_opaque(receiver.opaque_receiver),
+            RecordReplayMode::NoRR => {
+                Ok(self.receiver_set.add_opaque(receiver.opaque_receiver))
+            }
         }
+    }
+
+    /// Fetch all buffered entries and treat them as the results of a
+    /// select.
+    fn get_buffered_entries(&mut self) -> Option<Vec<IpcSelectionResult>> {
+        trace!("Desynchronized detected. Fetching buffered Entries.");
+        let mut entries = vec![];
+        // Add all events that we have buffered up to this point if any.
+        for (index, mut hashmap) in self.buffer.drain() {
+            for (_, mut queue) in hashmap.drain() {
+                for entry in queue.drain(..) {
+                    trace!("Entry found through buffer!");
+                    entries.push(IpcSelectionResult::MessageReceived(index, entry));
+                }
+            }
+        }
+        if entries.len() == 0 {
+            trace!("No buffered entries.");
+            None
+        } else {
+            for e in &entries {
+                match e {
+                    IpcSelectionResult::MessageReceived(i, _) => {
+                        trace!("IpcSelectionResult::MessageReceived({:?}, _)", i);
+                    }
+                    IpcSelectionResult::ChannelClosed(i) => {
+                        trace!("IpcSelectionResult::ChannelClosed({:?}, _)", i);
+                    }
+                }
+            }
+            Some(entries)
+        }
+    }
+
+    /// We have detected a desynchonization. Get all receivers in our map and add them
+    /// to the actual set as we will be calling methods on the set directly instead
+    /// of faking it.
+    fn move_receivers_to_set(&mut self) {
+        // Move all our receivers into the receiver set.
+        if ! self.desynced {
+            log_trace("Moving all receivers into actual select set.");
+
+            // IMPORTANT: Vec ensures that element are drained in order they were added!
+            // This is necessary for the receiver set indices to match.
+            for r in self.receivers.drain(..) {
+                if r.closed {
+                    // This receiver has closed. Use dummy receiver to avoid duplicating
+                    // closed message.
+
+                    // We don't know the correct type of this message, but that is
+                    // okay. We will never read from this receiver.
+                    let (s, r) = channel::<()>().
+                        expect("Unable to create channels for dummy receiver");
+                    // keep sender around forever to avoid dropping channel.
+                    self.dummy_senders.push(s.to_opaque());
+                    let index = self.receiver_set.add_opaque(r.to_opaque().opaque_receiver).
+                        expect("Unable to add dummy receiver while \
+                                handling desynchronization.");
+                    trace!("Adding dummy receiver at index {:?}", index);
+                } else {
+                    // Add the real receiver.
+                    let id = r.metadata.id.clone();
+                    let i = self.receiver_set.add_opaque(r.opaque_receiver).
+                        expect("Unable to add receiver while handling desynchronization.");
+
+                    trace!("move_receivers_to_set: Added receiver {:?} with index: {:?}",
+                           id, i);
+                }
+
+
+            }
+            self.desynced = true;
+        }
+    }
+
+    /// Extract DetThreadId from opaque message. Not easy :P
+    fn deserialize_id(opaque_msg: &OpaqueIpcMessage) -> Option<DetThreadId> {
+        let (det_id, _): (Option<DetThreadId>, /*Unknown T*/ ()) =
+            bincode::deserialize(&opaque_msg.opaque.data)
+            .expect("Unable to deserialize DetThreadId");
+        det_id
+    }
+
+    fn convert(index: u64,
+               data: Vec<u8>,
+               os_ipc_channels: Vec<OsOpaqueIpcChannel>,
+               os_ipc_shared_memory_regions: Vec<OsIpcSharedMemory>) ->
+        IpcSelectionResult {
+        let msg = OpaqueIpcMessage::new(data,
+                                        os_ipc_channels,
+                                        os_ipc_shared_memory_regions);
+        IpcSelectionResult::MessageReceived(index, msg)
     }
 }

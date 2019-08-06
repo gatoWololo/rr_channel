@@ -1,18 +1,40 @@
 use crate::channel::Flavor;
 use crate::record_replay::{self, get_log_entry, FlavorMarker, Recorded,
                            SelectEvent, get_log_entry_ret, DesyncError,
-                           DetChannelId};
+                           DetChannelId, BlockingOp};
 use crate::thread::{get_det_id, get_det_id_desync,
                     get_event_id, inc_event_id, DetThreadId};
 use crate::{Receiver, RecordReplayMode, Sender, RECORD_MODE, log_trace, DESYNC_MODE,
             DesyncMode};
 use crossbeam_channel::{RecvError, SendError};
 use log::{debug, info, trace, warn};
+use std::collections::HashMap;
+use std::thread;
+
+trait BufferedReceiver {
+    /// Returns true if there is any buffered values in this receiver.
+    fn buffered_value(&self) -> bool;
+}
+
+impl<T> BufferedReceiver for Receiver<T> {
+    fn buffered_value(&self) -> bool {
+        let hashmap = self.buffer.borrow();
+        for queue in hashmap.values() {
+            if ! queue.is_empty() {
+                return true;
+            }
+        }
+        return false;
+    }
+}
 
 /// Wrapper type around crossbeam's Select.
 pub struct Select<'a> {
     selector: crossbeam_channel::Select<'a>,
     mode: RecordReplayMode,
+    // Use existential to abstract over the `T` which may vary
+    // per receiver. We only care if it has entries anyways.
+    receivers: HashMap<usize, &'a dyn BufferedReceiver>,
 }
 
 impl<'a> Select<'a> {
@@ -22,68 +44,60 @@ impl<'a> Select<'a> {
         Select {
             mode,
             selector: crossbeam_channel::Select::new(),
+            receivers: HashMap::new()
         }
     }
 
     /// Adds a send operation.
     /// Returns the index of the added operation.
     pub fn send<T>(&mut self, s: &'a Sender<T>) -> usize {
-        log_trace("Select::send()");
-        self.selector.send(&s.sender)
+        unimplemented!("Send on select not supported?");
+        // log_trace("Select::send()");
+        // self.selector.send(&s.sender)
     }
 
     /// Adds a receive operation.
     /// Returns the index of the added operation.
     pub fn recv<T>(&mut self, r: &'a Receiver<T>) -> usize {
         log_trace(&format!("Select adding receiver<{:?}>", r.metadata.id));
-        // We don't really need this on replay... Just returning a fake "dummy index"
-        // would be enough. It still must be the "correct" index otherwise the select!
-        // macro will pick the wrong match arm when picking index.
-        match &r.receiver {
+
+        // We still register all receivers with selector, even on replay. As on
+        // desynchonization we will have to select on the real selector.
+        let index = match &r.receiver {
             Flavor::After(r) => self.selector.recv(&r),
             Flavor::Bounded(r) | Flavor::Unbounded(r) => self.selector.recv(&r),
             Flavor::Never(r) => self.selector.recv(&r),
+        };
+        if let Some(v) = self.receivers.insert(index, r) {
+            panic!("Entry already exists at {:?} This should be impossible.", index);
         }
+        index
     }
 
     pub fn select(&mut self) -> SelectedOperation<'a> {
         log_trace("Select::select()");
         self.record_replay_select().unwrap_or_else(|error| {
-            let selected = match &error {
-                // We expect this entry never to return on synchronized runs.
-                // but on desynchronization, this could lead to deadlocks.
-                // So we rely on the blocking behavior of select to
-                // validate our assumption.
-                // TODO: This is not perfect, it doesn't caputure the case
-                // where a blocking select "would have returned" but the
-                // program ended just before returning. However, this itself
-                // could be considrered a type of nondeterministic race =>
-                // between reading from a receiver/select and ending the
-                // program. Good programs should do this :)
-                e@DesyncError::NoEntryInLog(_, _) => {
-                    log_trace(&format!("Missing log entry: {:?}", e));
-                    log_trace("Assuming this thread blocked forever.");
+            warn!("Select: Desynchronization detected! {:?}", error);
+            log_trace(&format!("Select: Desynchronization detected! {:?}", error));
 
-                    // Assuming this select never returns! We should
-                    // hang here forever...
-                    let selected = self.selector.select();
-                    warn!("select() with missing log entry returned.");
-                    Some(selected)
-                }
-                _ => None,
-            };
-
-            warn!("Desynchronization detected! {:?}", error);
             match *DESYNC_MODE {
                 DesyncMode::Panic => {
-                    panic!("Desynchronization detected: {:?}", error);
+                    panic!("Select: Desynchronization detected: {:?}", error);
                 }
                 // Desync for crossbeam select is not so bad. We still register
                 // receivers with the selector. So on desync errors we can
-                // simply call select() directly.
+                // simply call select() directly, we check if any receiver's buffer
+                // has values which we could "flush" first...
                 DesyncMode::KeepGoing => {
-                    SelectedOperation::Desync(
-                        selected.unwrap_or_else(|| self.selector.select()))
+                    for (index, receiver) in self.receivers.iter() {
+                        if receiver.buffered_value() {
+                            log_trace("Buffered value chosen from receiver.");
+                            return SelectedOperation::DesyncBufferEntry(*index);
+                        }
+                    }
+                    // No values in buffers, read directly from selector.
+                    log_trace("No value in buffer, calling select directly.");
+                    SelectedOperation::Desync(self.selector.select())
                 }
             }
         })
@@ -92,10 +106,13 @@ impl<'a> Select<'a> {
     pub fn ready(&mut self) -> usize {
         log_trace("Select::ready()");
         self.record_replay_ready().unwrap_or_else(|error| {
-            warn!("Desynchronization found: {:?}", error);
+            warn!("Ready::Desynchronization found: {:?}", error);
             match *DESYNC_MODE {
                 DesyncMode::Panic => panic!("Desynchronization detected: {:?}", error),
-                DesyncMode::KeepGoing => self.selector.ready(),
+                DesyncMode::KeepGoing => {
+                    inc_event_id();
+                    self.selector.ready()
+                }
             }
         })
     }
@@ -104,13 +121,11 @@ impl<'a> Select<'a> {
         match self.mode {
             RecordReplayMode::Record => {
                 let select_index = self.selector.ready();
-                record_replay::log(
-                    Recorded::SelectReady { select_index },
-                    FlavorMarker::None,
-                    "ready",
-                    // Ehh, we fake it here. We never check this value anyways.
-                    &DetChannelId::fake()
-                );
+                record_replay::log(Recorded::SelectReady { select_index },
+                                   FlavorMarker::None,
+                                   "ready",
+                                   // Ehh, we fake it here. We never check this value anyways.
+                                   &DetChannelId::fake());
                 Ok(select_index)
             }
             RecordReplayMode::Replay => {
@@ -133,6 +148,10 @@ impl<'a> Select<'a> {
     fn record_replay_select(&mut self) -> Result<SelectedOperation<'a>, DesyncError> {
         match self.mode {
             RecordReplayMode::Record => {
+                // Log the fact that we started a possibly blocking operation!
+                let record = Recorded::BlockingOpStart(BlockingOp::Select);
+                record_replay::log(record, FlavorMarker::Select,
+                                   "crossbeam_channel::Select", &DetChannelId::fake());
                 // We don't know the thread_id of sender until the select is complete
                 // when user call recv() on SelectedOperation. So do nothing here.
                 // Index will be recorded there.
@@ -140,9 +159,32 @@ impl<'a> Select<'a> {
             }
             RecordReplayMode::Replay => {
                 let det_id = get_det_id_desync()?;
+
+                // We expect to see a start message first.
+                let (event, _, _) = get_log_entry_ret(det_id.clone(), get_event_id())?;
+                match event {
+                    // Ensure event is a BlockingOpStart
+                    Recorded::BlockingOpStart(_ /*TODO*/) => { }
+                    event => {
+                        let dummy = Recorded::BlockingOpStart(BlockingOp::Recv);
+                        let e = DesyncError::EventMismatch(dummy, event.clone());
+                        return Err(e);
+                    }
+                }
+                inc_event_id();
+
                 // Query our log to see what index was selected!() during the replay phase.
                 // Flavor type not check on Select::select() but on Select::recv()
-                let (event, flavor, chan_id) = get_log_entry_ret(det_id, get_event_id())?;
+                let entry = get_log_entry_ret(det_id, get_event_id());
+
+                // Here we put this thread to sleep if the entry is missing.
+                // On record, the thread never returned from blocking...
+                if let Err(e@DesyncError::NoEntryInLog(_, _)) = entry {
+                    log_trace(&format!("Saw {:?}. Putting thread to sleep.", e));
+                    loop { thread::park() }
+                }
+
+                let (event, flavor, chan_id) = entry?;
                 match event {
                     Recorded::Select(select_entry) => {
                         Ok(SelectedOperation::Replay(select_entry, *flavor, chan_id.clone()))
@@ -163,10 +205,14 @@ impl<'a> Select<'a> {
 
 pub enum SelectedOperation<'a> {
     Replay(&'a SelectEvent, FlavorMarker, DetChannelId),
-    /// Special variant only seend once a desynchonization has happened.
-    Desync(crossbeam_channel::SelectedOperation<'a>),
+    /// Desynchonization happened and receiver still has buffered entries. Index
+    /// of receiver has been returned to user.
+    DesyncBufferEntry(usize),
     Record(crossbeam_channel::SelectedOperation<'a>),
     NoRR(crossbeam_channel::SelectedOperation<'a>),
+    /// Desynchonization happened, no entries in buffer, we call selector.select()
+    /// to have crossbeam do the work for us.
+    Desync(crossbeam_channel::SelectedOperation<'a>),
 }
 
 /// A selected operation that needs to be completed.
@@ -185,7 +231,8 @@ impl<'a> SelectedOperation<'a> {
     /// We don't log calls to this method as they will always be determinstic.
     pub fn index(&self) -> usize {
         match self {
-            SelectedOperation::Replay(SelectEvent::Success { selected_index, .. }, _, _)
+            SelectedOperation::DesyncBufferEntry(selected_index)
+            | SelectedOperation::Replay(SelectEvent::Success { selected_index, .. }, _, _)
             | SelectedOperation::Replay(SelectEvent::RecvError { selected_index, .. }, _, _) => {
                 *selected_index
             }
@@ -219,25 +266,34 @@ impl<'a> SelectedOperation<'a> {
     /// Panics if an incorrect [`Receiver`] reference is passed.
     pub fn recv<T>(self, r: &Receiver<T>) -> Result<T, RecvError> {
         log_trace(&format!("SelectedOperation<{:?}>::recv()", r.metadata().id));
-        self.record_replay_recv(r).unwrap_or_else(|error|{
-            // This type of desynchronization cannot be recovered from.
-            // This is due to how the Select API works for crossbeam channels...
-            // By the time we realize we have the "wrong receiver" e.g. flavor
-            // of chan_id mismatch, it is too late for us to do the selector.select()
-            // event. We cannot do this event preemptively as crossbeam will panic!()
-            // if we do select() but do not finish it by doing recv() on the selected
-            // operation. This should not really happen. So I think we're okay.
-            warn!("Desynchronization detected! {:?}", error);
-            panic!("SelectedOperation: Unrecoverable desynchonization: {:?}", error);
-        })
+
+        match self.record_replay_select_recv(r) {
+            Ok(v) => v,
+            Err(error) => {
+                // This type of desynchronization cannot be recovered from.
+                // This is due to how the Select API works for crossbeam channels...
+                // By the time we realize we have the "wrong receiver" e.g. flavor
+                // of chan_id mismatch, it is too late for us to do the selector.select()
+                // event. We cannot do this event preemptively as crossbeam will panic!()
+                // if we do select() but do not finish it by doing recv() on the selected
+                // operation. This should not really happen. So I think we're okay.
+                warn!("Desynchronization detected! {:?}", error);
+                panic!("SelectedOperation: Unrecoverable desynchonization: {:?}", error);
+            }
+        }
     }
 
-    pub fn record_replay_recv<T>(self, r: &Receiver<T>)
+    pub fn record_replay_select_recv<T>(self, r: &Receiver<T>)
                                  -> Result<Result<T, RecvError>, DesyncError> {
-
         let selected_index = self.index();
         match self {
+            SelectedOperation::DesyncBufferEntry(index) => {
+                log_trace("SelectedOperation::DesyncBufferEntry");
+                Ok(Ok(r.get_buffered_value().
+                    expect("Expected buffer value to be there. This is a bug.")))
+            }
             SelectedOperation::Desync(selected) => {
+                log_trace("SelectedOperation::Desync");
                 Ok(SelectedOperation::do_recv(selected, r).map(|(_, msg)| msg))
             }
             // Record value we get from direct use of Select API recv().
