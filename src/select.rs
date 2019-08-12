@@ -1,3 +1,5 @@
+use crate::record_replay::mark_program_as_desynced;
+use crate::record_replay::program_desyned;
 use crate::channel::Flavor;
 use crate::record_replay::{self, get_log_entry, FlavorMarker, Recorded,
                            SelectEvent, get_log_entry_ret, DesyncError,
@@ -89,6 +91,7 @@ impl<'a> Select<'a> {
                 // simply call select() directly, we check if any receiver's buffer
                 // has values which we could "flush" first...
                 DesyncMode::KeepGoing => {
+                    mark_program_as_desynced();
                     for (index, receiver) in self.receivers.iter() {
                         if receiver.buffered_value() {
                             log_trace("Buffered value chosen from receiver.");
@@ -110,6 +113,7 @@ impl<'a> Select<'a> {
             match *DESYNC_MODE {
                 DesyncMode::Panic => panic!("Desynchronization detected: {:?}", error),
                 DesyncMode::KeepGoing => {
+                    mark_program_as_desynced();
                     inc_event_id();
                     self.selector.ready()
                 }
@@ -118,6 +122,9 @@ impl<'a> Select<'a> {
     }
 
     fn record_replay_ready(&mut self) -> Result<usize, DesyncError> {
+        if program_desyned() {
+            return Err(DesyncError::Desynchronized);
+        }
         match self.mode {
             RecordReplayMode::Record => {
                 let select_index = self.selector.ready();
@@ -146,6 +153,9 @@ impl<'a> Select<'a> {
     }
 
     fn record_replay_select(&mut self) -> Result<SelectedOperation<'a>, DesyncError> {
+        if program_desyned() {
+            return Err(DesyncError::Desynchronized);
+        }
         match self.mode {
             RecordReplayMode::Record => {
                 // Log the fact that we started a possibly blocking operation!
@@ -284,7 +294,11 @@ impl<'a> SelectedOperation<'a> {
     }
 
     pub fn record_replay_select_recv<T>(self, r: &Receiver<T>)
-                                 -> Result<Result<T, RecvError>, DesyncError> {
+                                        -> Result<Result<T, RecvError>, DesyncError> {
+        // Do not add check for program_desynced() here! This type of desync
+        // is fatal. It is better to make sure it just dones't happen.
+        // See recv() above for more information.
+
         let selected_index = self.index();
         match self {
             SelectedOperation::DesyncBufferEntry(index) => {
@@ -332,7 +346,7 @@ impl<'a> SelectedOperation<'a> {
                 let retval = match event {
                     SelectEvent::Success { sender_thread, .. } => {
                         log_trace("SelectedOperation::Replay(SelectEvent::Success");
-                        Ok(r.replay_recv(sender_thread))
+                        Ok(r.replay_recv(sender_thread)?)
                     }
                     SelectEvent::RecvError { .. } => {
                         log_trace("SelectedOperation::Replay(SelectEvent::RecvError");

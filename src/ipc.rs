@@ -1,3 +1,5 @@
+use crate::record_replay::mark_program_as_desynced;
+use crate::record_replay::program_desyned;
 use crate::log_trace;
 use crate::record_replay::{self, Blocking, FlavorMarker, IpcDummyError,
                            RecordReplayRecv, Recorded, RecordMetadata,
@@ -8,6 +10,10 @@ use crate::thread::{get_and_inc_channel_id, get_det_id, DetThreadId,
                     get_event_id, inc_event_id, get_det_id_desync};
 use crate::{RecordReplayMode, ENV_LOGGER, RECORD_MODE, log_trace_with,
             DESYNC_MODE, DesyncMode};
+use crate::record_replay::recv_from_sender;
+use std::thread::sleep;
+use std::time::Duration;
+use crate::record_replay::RecvErrorRR;
 use std::cell::RefMut;
 use ipc_channel::ipc::{self};
 use log::{warn, trace};
@@ -69,7 +75,7 @@ where
                                 -> Result<Result<T, ipc_channel::Error>, DesyncError> {
         match event {
             Recorded::IpcRecvSucc { sender_thread } => {
-                let retval = self.replay_recv(&sender_thread);
+                let retval = self.replay_recv(&sender_thread)?;
                 // Here is where we explictly increment our event_id!
                 inc_event_id();
                 Ok(Ok(retval))
@@ -105,6 +111,18 @@ pub struct OpaqueIpcReceiver {
 
 impl<T> IpcReceiver<T>
 where T: for<'de> Deserialize<'de> + Serialize {
+    fn rr_try_recv(&self) -> Result<(Option<DetThreadId>, T), RecvErrorRR> {
+        for i in 0..10 {
+            match self.receiver.try_recv() {
+                Ok(v) => return Ok(v),
+                Err(_) =>{
+                    thread::sleep(Duration::from_millis(100))
+                }
+            }
+        }
+        Err(RecvErrorRR::Timeout)
+    }
+
     pub fn recv(&self) -> Result<T, ipc_channel::Error> {
         let f = || self.receiver.recv();
         self.record_replay_recv(&self.metadata, f, "ipc_recv::recv()")
@@ -129,10 +147,10 @@ where T: for<'de> Deserialize<'de> + Serialize {
     /// Deterministic receiver which loops until event comes from `sender`.
     /// All other entries are buffer is `self.buffer`. Buffer is always
     /// checked before entries.
-    fn replay_recv(&self, sender: &Option<DetThreadId>) -> T {
-        self.recv_from_sender(
+    fn replay_recv(&self, sender: &Option<DetThreadId>) -> Result<T, DesyncError> {
+        recv_from_sender(
             sender,
-            || self.receiver.recv(),
+            || self.rr_try_recv(),
             &mut self.buffer.borrow_mut(),
             &self.metadata.id,
         )
@@ -199,6 +217,7 @@ where
                     DesyncMode::Panic => panic!("IpcSend::Desynchronization detected: {:?}", error),
                     // TODO: One day we may want to record this alternate execution.
                     DesyncMode::KeepGoing => {
+                        mark_program_as_desynced();
                         let res = RecordReplaySend::send(self, get_forward_id(), msg);
                         // TODO Ugh, right now we have to carefully increase the event_id
                         // in the "right places" or nothing will work correctly.
@@ -386,6 +405,7 @@ impl IpcReceiverSet {
             match *DESYNC_MODE {
                 DesyncMode::Panic => panic!("IpcReceiver::add::Desynchronization detected: {:?}", e),
                 DesyncMode::KeepGoing => {
+                    mark_program_as_desynced();
                     self.move_receivers_to_set();
                     inc_event_id();
                     self.receiver_set.add_opaque(receiver.opaque_receiver)
@@ -404,6 +424,7 @@ impl IpcReceiverSet {
                     panic!("IpcSelect::Desynchronization detected: {:?}", e);
                 }
                 DesyncMode::KeepGoing => {
+                    mark_program_as_desynced();
                     log_trace("Looking for entry in buffers or directly through select()...");
                     self.move_receivers_to_set();
                     // First use up our buffered entries, if none. Do the
@@ -430,9 +451,10 @@ impl IpcReceiverSet {
     /// seen in the record. If not all receivers are present, it is a DesyncError.
     /// On DesyncError, we may be "halfway" through replaying a select, we return
     /// the entries we already have to avoid losing them.
-    fn record_replay_select(&mut self) ->
-        Result<Result<Vec<IpcSelectionResult>, std::io::Error>,
-               (DesyncError, Vec<IpcSelectionResult>)> {
+    fn record_replay_select(&mut self) -> Result<Result<Vec<IpcSelectionResult>, std::io::Error>, (DesyncError, Vec<IpcSelectionResult>)> {
+        if program_desyned() {
+            return Err((DesyncError::Desynchronized, vec![]));
+        }
         match self.mode {
             RecordReplayMode::Record => {
                 // Log the fact that we started a possibly blocking operation!
@@ -668,7 +690,10 @@ impl IpcReceiverSet {
 
     /// On error we return the back to the user, otherwise it would be moved forever.
     fn record_replay_add(&mut self, receiver: OpaqueIpcReceiver)
-              -> Result<Result<u64, std::io::Error>, (DesyncError, OpaqueIpcReceiver)> {
+                         -> Result<Result<u64, std::io::Error>, (DesyncError, OpaqueIpcReceiver)> {
+        if program_desyned() {
+            return Err((DesyncError::Desynchronized, receiver));
+        }
         let metadata = receiver.metadata.clone();
         let flavor = metadata.flavor;
         let id = metadata.id;

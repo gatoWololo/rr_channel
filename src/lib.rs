@@ -41,7 +41,8 @@ pub enum DesyncMode {
 }
 
 const RECORD_MODE_VAR: &str = "RR_CHANNEL";
-const DESYNC_MODE_VAR: &str = "DESYNC_MODE";
+const DESYNC_MODE_VAR: &str = "RR_DESYNC_MODE";
+const RECORD_FILE_VAR: &str = "RR_RECORD_FILE";
 
 lazy_static! {
     /// Singleton environment logger. Must be initialized somewhere, and only once.
@@ -95,6 +96,26 @@ lazy_static! {
             Err(e @ VarError::NotUnicode(_)) => {
                 warn!("DESYNC_MODE value is not valid unicode: {}, assuming keep_going.", e);
                 DesyncMode::KeepGoing
+            }
+        };
+
+        log_trace(&format!("Mode {:?} selected.", mode));
+        mode
+    };
+
+    /// Name of record file.
+    pub static ref LOG_FILE_NAME: String = {
+        log_trace("Initializing RECORD_FILE lazy static.");
+
+        let mode = match var(RECORD_FILE_VAR) {
+            Ok(value) => {
+                value
+            }
+            Err(VarError::NotPresent) => {
+                panic!("Unspecified record file. Please use env var RR_RECORD_FILE");
+            }
+            Err(e @ VarError::NotUnicode(_)) => {
+                panic!("RECORD_FILE value is not valid unicode: {}.", e);
             }
         };
 

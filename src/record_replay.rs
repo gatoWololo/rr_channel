@@ -7,7 +7,7 @@ use std::fs::File;
 use std::sync::Mutex;
 use std::thread;
 
-use crate::{DESYNC_MODE, DesyncMode};
+use crate::{DESYNC_MODE, DesyncMode, LOG_FILE_NAME};
 use crate::{log_trace};
 use crate::log_trace_with;
 use crate::thread::get_det_id;
@@ -22,6 +22,14 @@ use std::io::BufRead;
 
 use std::cell::RefMut;
 use std::collections::VecDeque;
+
+use std::sync::atomic::AtomicBool;
+
+#[derive(Debug)]
+pub enum RecvErrorRR {
+    Timeout,
+    Disconnected,
+}
 
 #[derive(Debug)]
 pub enum DesyncError {
@@ -46,10 +54,9 @@ pub enum DesyncError {
     ChannelClosedExpected,
     /// Expected a message, but channel returned closed.
     ChannelClosedUnexpected(u64),
+    /// Waited too long and no message ever came.
+    Timedout,
 }
-
-// TODO use environment variables to generalize this.
-const LOG_FILE_NAME: &str = "/home/gatowololo/det_file.txt";
 
 /// Record representing a sucessful select from a channel. Used in replay mode.
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -186,7 +193,20 @@ pub enum IpcSelectEvent {
     ChannelClosed(/*index:*/ u64),
 }
 
+use std::sync::atomic::Ordering;
+pub(crate) fn program_desyned() -> bool {
+    DESYNC.load(Ordering::SeqCst)
+}
+
+pub(crate) fn mark_program_as_desynced() {
+    DESYNC.store(true, Ordering::SeqCst)
+}
+
 lazy_static! {
+    pub static ref DESYNC: AtomicBool = {
+        AtomicBool::new(false)
+    };
+
     /// Global log file which all threads write to.
     pub static ref WRITE_LOG_FILE: Mutex<File> = {
         log_trace("Initializing WRITE_LOG_FILE lazy static.");
@@ -194,9 +214,9 @@ lazy_static! {
         match *RECORD_MODE {
             RecordReplayMode::Record => {
                 // Delete file if it already existed... file may not exist. That's okay.
-                let _ = remove_file(LOG_FILE_NAME);
-                let error = & format!("Unable to open {} for record logging.", LOG_FILE_NAME);
-                Mutex::new(File::create(LOG_FILE_NAME).expect(error))
+                let _ = remove_file(LOG_FILE_NAME.as_str());
+                let error = & format!("Unable to open {} for record logging.", *LOG_FILE_NAME);
+                Mutex::new(File::create(LOG_FILE_NAME.as_str()).expect(error))
             }
             RecordReplayMode::Replay =>
                 panic!("Write log file should not be accessed in replay mode."),
@@ -212,8 +232,8 @@ lazy_static! {
         use std::io::BufReader;
 
         let mut recorded_indices = HashMap::new();
-        let log = File::open(LOG_FILE_NAME).
-            expect(& format!("Unable to open {} for replay.", LOG_FILE_NAME));
+        let log = File::open(LOG_FILE_NAME.as_str()).
+            expect(& format!("Unable to open {} for replay.", LOG_FILE_NAME.as_str()));
         let log = BufReader::new(log);
 
         for line in log.lines() {
@@ -453,51 +473,6 @@ pub trait RecordReplayRecv<T, E: Error> {
         }
     }
 
-    /// Generic function to loop on differnt kinds of replays: recv(), try_recv(), etc.
-    /// and buffer wrong entries.
-    fn recv_from_sender(
-        &self,
-        expected_sender: &Option<DetThreadId>,
-        recv: impl Fn() -> Result<(Option<DetThreadId>, T), E>,
-        buffer: &mut RefMut<HashMap<Option<DetThreadId>, VecDeque<T>>>,
-        id: &DetChannelId,
-    ) -> T {
-        log_trace_with(
-            &format!("recv_from_sender(expected_sender: {:?}) ...", expected_sender),
-            id,
-        );
-
-        // Check our buffer to see if this value is already here.
-        if let Some(val) = buffer.get_mut(expected_sender).and_then(|e| e.pop_front()) {
-            log_trace_with("replay_recv(): Recv message found in buffer.", id);
-            return val;
-        }
-
-        // Loop until we get the message we're waiting for. All "wrong" messages are
-        // buffered into self.buffer.
-        loop {
-            match recv() {
-                // Value matches return it!
-                Ok((msg_sender, msg)) if msg_sender == *expected_sender => {
-                    log_trace("Recv message found through recv()");
-                    return msg;
-                }
-                // Value did no match. Buffer it. Handles both `none_buffer` and
-                // regular `buffer` case.
-                Ok((msg_sender, msg)) => {
-                    let wrong_val = &format!("Wrong value found. Queing it for: {:?}", msg_sender);
-                    log_trace_with(wrong_val, id);
-                    buffer.entry(msg_sender).or_insert(VecDeque::new()).push_back(msg);
-                }
-                Err(e) => {
-                    // Got a disconnected message. keep going...
-                    log_trace(&format!("Saw Err({:?})", e));
-                    continue
-                }
-            }
-        }
-    }
-
     /// Handles desynchronization events based on global DESYNC_MODE.
     fn handle_desync(&self,
                         desync: DesyncError,
@@ -508,6 +483,7 @@ pub trait RecordReplayRecv<T, E: Error> {
 
         match *DESYNC_MODE {
             DesyncMode::KeepGoing => {
+                mark_program_as_desynced();
                 inc_event_id();
                 self.desync_get_next_entry(&do_recv)
             }
@@ -550,6 +526,9 @@ pub(crate) trait RecordReplaySend<T, E> {
         flavor: &FlavorMarker,
         sender_name: &str,
     ) -> Result<Result<(), E>, (DesyncError, T)> {
+        if program_desyned() {
+            return Err((DesyncError::Desynchronized, msg));
+        }
         // However, for the record log, we still want to use the original
         // thread's DetThreadId. Otherwise we will have "repeated" entries in the log
         // which look like they're coming from the same thread.
@@ -607,4 +586,51 @@ pub(crate) trait RecordReplaySend<T, E> {
 /// sometimes.
 pub fn get_forward_id() -> Option<DetThreadId> {
     if in_forwarding() { get_temp_det_id() } else { get_det_id() }
+}
+
+/// Generic function to loop on differnt kinds of replays: recv(), try_recv(), etc.
+/// and buffer wrong entries.
+pub fn recv_from_sender<T>(
+    expected_sender: &Option<DetThreadId>,
+    rr_try_recv: impl Fn() -> Result<(Option<DetThreadId>, T), RecvErrorRR>,
+    buffer: &mut RefMut<HashMap<Option<DetThreadId>, VecDeque<T>>>,
+    id: &DetChannelId,
+) -> Result<T, DesyncError> {
+    log_trace_with(
+        &format!("recv_from_sender(expected_sender: {:?}) ...", expected_sender),
+        id,
+    );
+
+    // Check our buffer to see if this value is already here.
+    if let Some(val) = buffer.get_mut(expected_sender).and_then(|e| e.pop_front()) {
+        log_trace_with("replay_recv(): Recv message found in buffer.", id);
+        return Ok(val);
+    }
+
+    // Loop until we get the message we're waiting for. All "wrong" messages are
+    // buffered into self.buffer.
+    loop {
+        match rr_try_recv() {
+            // Value matches return it!
+            Ok((msg_sender, msg)) if msg_sender == *expected_sender => {
+                log_trace("Recv message found through recv()");
+                return Ok(msg);
+            }
+            // Value did no match. Buffer it. Handles both `none_buffer` and
+            // regular `buffer` case.
+            Ok((msg_sender, msg)) => {
+                let wrong_val = &format!("Wrong value found. Queing it for: {:?}", msg_sender);
+                log_trace_with(wrong_val, id);
+                buffer.entry(msg_sender).or_insert(VecDeque::new()).push_back(msg);
+            }
+            Err(RecvErrorRR::Disconnected) => {
+                // Got a disconnected message. keep going...
+                log_trace("Saw Discoonected, trying again.");
+                continue
+            }
+            Err(RecvErrorRR::Timeout) => {
+                return Err(DesyncError::Timedout);
+            }
+        }
+    }
 }

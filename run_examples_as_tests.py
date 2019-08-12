@@ -6,14 +6,16 @@ import sys
 def cargo_run_record(example):
     env = os.environ.copy()
     env["RR_CHANNEL"] = "record"
-    env["DESYNC_MODE"] = "panic"
+    env["RR_DESYNC_MODE"] = "panic"
+    env["RR_RECORD_FILE"] = "record.log"
     return subprocess.check_output("cargo run --example " + example,
                                    env=env, shell=True, stderr=subprocess.DEVNULL)
 
 def cargo_run_replay(example):
     env = os.environ.copy()
     env["RR_CHANNEL"] = "replay"
-    env["DESYNC_MODE"] = "keep_going"
+    env["RR_DESYNC_MODE"] = "keep_going"
+    env["RR_RECORD_FILE"] = "record.log"
     return subprocess.check_output("cargo run --example " + example,
                                    env=env, shell=True, stderr=subprocess.DEVNULL)
 

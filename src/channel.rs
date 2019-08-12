@@ -1,13 +1,16 @@
 use crate::log_trace;
 use crate::log_trace_with;
+use crate::record_replay::recv_from_sender;
 use crate::record_replay::{self, Blocking, FlavorMarker, Recorded,
                            RecordMetadata, RecordReplayRecv, RecordReplaySend,
-                           DetChannelId, DesyncError, get_forward_id};
+                           DetChannelId, DesyncError, get_forward_id,
+                           RecvErrorRR};
 use crate::thread::get_and_inc_channel_id;
 use crate::thread::*;
 use crate::{RecordReplayMode, ENV_LOGGER, RECORD_MODE, DesyncMode, DESYNC_MODE};
 use crossbeam_channel::{self, RecvError, SendError, RecvTimeoutError, TryRecvError};
 use log::{debug, info, trace, warn};
+use crate::record_replay::mark_program_as_desynced;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::collections::VecDeque;
@@ -118,6 +121,7 @@ impl<T> Sender<T> {
                         panic!("Send::Desynchronization detected: {:?}", error),
                     // TODO: One day we may want to record this alternate execution.
                     DesyncMode::KeepGoing => {
+                        mark_program_as_desynced();
                         let res = RecordReplaySend::send(self, get_forward_id(), msg);
                         // TODO Ugh, right now we have to carefully increase the event_id
                         // in the "right places" or nothing will work correctly.
@@ -214,7 +218,7 @@ macro_rules! impl_RecordReplay {
                                         -> Result<Result<T, $err_type>, DesyncError> {
                 match event {
                     Recorded::$succ { sender_thread } => {
-                        let retval = self.replay_recv(&sender_thread);
+                        let retval = self.replay_recv(&sender_thread)?;
                         // Here is where we explictly increment our event_id!
                         inc_event_id();
                         Ok(Ok(retval))
@@ -272,10 +276,19 @@ impl<T> Receiver<T> {
         None
     }
 
-    pub(crate) fn replay_recv(&self, sender: &Option<DetThreadId>) -> T {
-        self.recv_from_sender(
+    fn rr_try_recv(&self) -> Result<(Option<DetThreadId>, T), RecvErrorRR> {
+        let d = Duration::from_secs(1);
+        self.receiver.recv_timeout(d).
+            map_err(|e| match e {
+                RecvTimeoutError::Timeout => RecvErrorRR::Timeout,
+                RecvTimeoutError::Disconnected => RecvErrorRR::Disconnected,
+            })
+    }
+
+    pub(crate) fn replay_recv(&self, sender: &Option<DetThreadId>) -> Result<T, DesyncError> {
+        recv_from_sender(
             &sender,
-            || self.receiver.recv(),
+            || self.rr_try_recv(),
             &mut self.buffer.borrow_mut(),
             &self.metadata.id,
         )
