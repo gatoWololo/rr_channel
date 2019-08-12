@@ -6,14 +6,13 @@
 // <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
-
-use crate::log_trace;
+use log::Level::*;
 use crate::thread::get_det_id;
 use crate::thread::set_det_id;
 use crate::thread::DetThreadId;
 use std::collections::HashMap;
 use std::sync::Mutex;
-
+use crate::log_rr;
 use crate::thread::start_forwading_id;
 use crate::thread::stop_forwarding_id;
 
@@ -90,10 +89,8 @@ impl RouterProxy {
     ) where
         T: for<'de> Deserialize<'de> + Serialize + Send + 'static,
     {
-        log_trace(&format!(
-            "Routing IpcReceiver<{:?}> to crossbeam_sender: {:?}",
-            ipc_receiver.metadata.id, crossbeam_sender.channel_id
-        ));
+        log_rr!(Info, "Routing IpcReceiver<{:?}> to crossbeam_sender: {:?}",
+                ipc_receiver.metadata.id, crossbeam_sender.channel_id);
         self.add_route(
             ipc_receiver,
             Box::new(move |message| drop(crossbeam_sender.send(message.unwrap()))),
@@ -109,16 +106,10 @@ impl RouterProxy {
     where
         T: for<'de> Deserialize<'de> + Serialize + Send + 'static,
     {
-        log_trace(&format!(
-            "Routing IpcReceiver<{:?}>",
-            ipc_receiver.metadata.id
-        ));
+        log_rr!(Info, "Routing IpcReceiver<{:?}>", ipc_receiver.metadata.id);
 
         let (crossbeam_sender, crossbeam_receiver) = crate::unbounded();
-        log_trace(&format!(
-            "Created Channels<{:?} for routing.",
-            crossbeam_receiver.metadata.id
-        ));
+        log_rr!(Info, "Created Channels<{:?} for routing.", crossbeam_receiver.metadata.id);
 
         self.route_ipc_receiver_to_crossbeam_sender(ipc_receiver, crossbeam_sender);
         crossbeam_receiver

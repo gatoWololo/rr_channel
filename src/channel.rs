@@ -1,5 +1,3 @@
-use crate::log_trace;
-use crate::log_trace_with;
 use crate::record_replay::recv_from_sender;
 use crate::record_replay::{self, Blocking, FlavorMarker, Recorded,
                            RecordMetadata, RecordReplayRecv, RecordReplaySend,
@@ -9,7 +7,7 @@ use crate::thread::get_and_inc_channel_id;
 use crate::thread::*;
 use crate::{RecordReplayMode, ENV_LOGGER, RECORD_MODE, DesyncMode, DESYNC_MODE};
 use crossbeam_channel::{self, RecvError, SendError, RecvTimeoutError, TryRecvError};
-use log::{debug, info, trace, warn};
+use log::Level::*;
 use crate::record_replay::mark_program_as_desynced;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -18,6 +16,7 @@ use std::error::Error;
 use std::time::Duration;
 use std::time::Instant;
 use std::cell::RefMut;
+use crate::log_rr;
 
 pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
     *ENV_LOGGER;
@@ -28,10 +27,7 @@ pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
     let type_name = unsafe { std::intrinsics::type_name::<T>() };
     let id = DetChannelId::new();
 
-    log_trace(&format!(
-        "Unbounded channel created: {:?} {:?}",
-        id, type_name
-    ));
+    log_rr!(Info, "Unbounded channel created: {:?} {:?}", id, type_name);
     (
         Sender {
             sender,
@@ -66,10 +62,9 @@ impl<T> Clone for Sender<T> {
         // We do not support MPSC for bounded channels as the blocking semantics are
         // more complicated to implement.
         if self.channel_type == FlavorMarker::Bounded {
-            warn!(
-                "MPSC for bounded channels not supported. Blocking semantics \
-                 of bounded channels will not be preseved!"
-            );
+            log_rr!(Warn,
+                    "MPSC for bounded channels not supported. Blocking semantics \
+                     of bounded channels will not be preseved!");
         }
         Sender {
             sender: self.sender.clone(),
@@ -115,7 +110,7 @@ impl<T> Sender<T> {
             Ok(v) => v,
             // send() should never hang. No need to check if NoEntryLog.
             Err((error, msg)) => {
-                warn!("Desynchronization detected: {:?}", error);
+                log_rr!(Warn, "Desynchronization detected: {:?}", error);
                 match *DESYNC_MODE {
                     DesyncMode::Panic =>
                         panic!("Send::Desynchronization detected: {:?}", error),
@@ -224,10 +219,7 @@ macro_rules! impl_RecordReplay {
                         Ok(Ok(retval))
                     }
                     Recorded::$err(e) => {
-                        log_trace(&format!(
-                            "Creating error event for: {:?}",
-                            Recorded::$err(e)
-                        ));
+                        log_rr!(Trace, "Creating error event for: {:?}", Recorded::$err(e));
                         // Here is where we explictly increment our event_id!
                         inc_event_id();
                         Ok(Err(e))
@@ -276,9 +268,45 @@ impl<T> Receiver<T> {
         None
     }
 
-    fn rr_try_recv(&self) -> Result<(Option<DetThreadId>, T), RecvErrorRR> {
-        let d = Duration::from_secs(1);
-        self.receiver.recv_timeout(d).
+    /// Poll to see if receiver has this entry. Polling is side-effect-y and
+    /// takes the message off the channel. The message is sent to the internal
+    /// buffer to be retreived later.
+    /// Notice even on `false`, an arbitrary number of messages from _other_ senders
+    /// may be buffered.
+    pub(crate) fn poll_entry(&self, sender: &Option<DetThreadId>, timeout: Duration)
+                             -> bool {
+        log_rr!(Debug, "poll_entry()");
+        // There is already an entry in the buffer.
+        if let Some(queue) = self.buffer.borrow_mut().get(sender) {
+            if ! queue.is_empty() {
+                log_rr!(Debug, "Entry found in buffer");
+                return true;
+            }
+        }
+
+        match self.replay_recv_timeout(sender, timeout) {
+            Ok(msg) => {
+                log_rr!(Debug, "Correct message found while polling and buffered.");
+                // Save message in buffer for use later.
+                self.buffer.borrow_mut().entry(sender.clone()).
+                    or_insert(VecDeque::new()).
+                    push_back(msg);
+                true
+            }
+            Err(DesyncError::Timedout) => {
+                log_rr!(Debug, "No entry found while polling...");
+                false
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    /// This is the raw function called in a loop by our record_replay trait.
+    /// It should not be called directly by anyone, as there is buffering
+    /// that will not be properly taken into account if called directly.
+    fn rr_recv_timeout(&self, timeout: Duration)
+                       -> Result<(Option<DetThreadId>, T), RecvErrorRR> {
+        self.receiver.recv_timeout(timeout).
             map_err(|e| match e {
                 RecvTimeoutError::Timeout => RecvErrorRR::Timeout,
                 RecvTimeoutError::Disconnected => RecvErrorRR::Disconnected,
@@ -286,15 +314,20 @@ impl<T> Receiver<T> {
     }
 
     pub(crate) fn replay_recv(&self, sender: &Option<DetThreadId>) -> Result<T, DesyncError> {
+        self.replay_recv_timeout(sender, Duration::from_secs(1))
+    }
+
+    pub(crate) fn replay_recv_timeout(&self, sender: &Option<DetThreadId>, timeout: Duration)
+                                 -> Result<T, DesyncError> {
         recv_from_sender(
             &sender,
-            || self.rr_try_recv(),
+            || self.rr_recv_timeout(timeout),
             &mut self.buffer.borrow_mut(),
             &self.metadata.id,
         )
     }
 
-    pub fn flavor(&self) -> FlavorMarker {
+    pub(crate) fn flavor(&self) -> FlavorMarker {
         self.metadata.flavor
     }
 
@@ -334,7 +367,7 @@ pub fn after(duration: Duration) -> Receiver<Instant> {
     *ENV_LOGGER;
 
     let id = DetChannelId::new();
-    log_trace(&format!("After channel receiver created: {:?}", id));
+    log_rr!(Info, "After channel receiver created: {:?}", id);
     Receiver::new(Flavor::After(crossbeam_channel::after(duration)), id)
 }
 
@@ -345,10 +378,7 @@ pub fn bounded<T>(cap: usize) -> (Sender<T>, Receiver<T>) {
     let id = DetChannelId::new();
     let type_name = unsafe { std::intrinsics::type_name::<T>() };
 
-    log_trace(&format!(
-        "Bounded channel created: {:?} {:?}",
-        id, type_name
-    ));
+    log_rr!(Info, "Bounded channel created: {:?} {:?}", id, type_name);
     (
         Sender {
             sender,

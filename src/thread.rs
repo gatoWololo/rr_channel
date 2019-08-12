@@ -2,9 +2,10 @@ use log::{error, info, trace};
 use std::cell::RefCell;
 use std::thread;
 use std::thread::JoinHandle;
+use crate::log_rr;
+use log::Level::*;
 pub use std::thread::{current, panicking, park, park_timeout, sleep, yield_now};
 // use backtrace::Backtrace;
-use crate::log_trace;
 use crate::record_replay::{EventId, DesyncError};
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -45,7 +46,7 @@ pub fn get_event_id() -> EventId {
 pub fn inc_event_id() {
     EVENT_ID.with(|id| {
         *id.borrow_mut() += 1;
-        log_trace(&format!("Incremented TLS event_id: {:?}", *id.borrow()));
+        log_rr!(Debug, "Incremented TLS event_id: {:?}", *id.borrow());
     });
 }
 
@@ -99,10 +100,8 @@ where
 {
     let new_id = DET_ID_SPAWNER.with(|spawner| spawner.borrow_mut().new_child_det_id());
     let new_spawner = DetIdSpawner::from(new_id.clone());
-    log_trace(&format!(
-        "thread::spawn() Assigned determinsitic id {:?} for new thread.",
-        new_id
-    ));
+    log_rr!(Info, "thread::spawn() Assigned determinsitic id {:?} for new thread.",
+            new_id);
 
     thread::spawn(|| {
         // Initialize TLS for this thread.
@@ -220,10 +219,8 @@ impl Builder {
         let new_id = DET_ID_SPAWNER.with(|spawner| spawner.borrow_mut().new_child_det_id());
 
         let new_spawner = DetIdSpawner::from(new_id.clone());
-        log_trace(&format!(
-            "Builder: Assigned determinsitic id {:?} for new thread.",
-            new_id
-        ));
+        log_rr!(Info, "Builder: Assigned determinsitic id {:?} for new thread.",
+                new_id);
 
         self.builder.spawn(|| {
             // Initialize TLS for this thread.

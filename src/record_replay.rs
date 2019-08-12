@@ -8,14 +8,13 @@ use std::sync::Mutex;
 use std::thread;
 
 use crate::{DESYNC_MODE, DesyncMode, LOG_FILE_NAME};
-use crate::{log_trace};
-use crate::log_trace_with;
+use crate::log_rr;
+use log::Level::*;
 use crate::thread::get_det_id;
 use crate::thread::get_event_id;
 use crate::thread::get_temp_det_id;
 use crate::thread::{inc_event_id , get_and_inc_channel_id, in_forwarding};
 use crossbeam_channel::{RecvError, RecvTimeoutError, TryRecvError};
-use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::BufRead;
@@ -42,6 +41,7 @@ pub enum DesyncError {
     /// Recorded log message was different. logged event vs current event.
     EventMismatch(Recorded, Recorded),
     UnitializedDetThreadId,
+    /// Receiver was expected for select operation but entry is missing.
     MissingReceiver(u64),
     /// An entry already exists for the specificied index in IpcReceiverSet.
     SelectExistingEntry(u64),
@@ -199,6 +199,9 @@ pub(crate) fn program_desyned() -> bool {
 }
 
 pub(crate) fn mark_program_as_desynced() {
+    if ! DESYNC.load(Ordering::SeqCst) {
+        log_rr!(Warn, "Program marked as desynced!");
+    }
     DESYNC.store(true, Ordering::SeqCst)
 }
 
@@ -209,7 +212,7 @@ lazy_static! {
 
     /// Global log file which all threads write to.
     pub static ref WRITE_LOG_FILE: Mutex<File> = {
-        log_trace("Initializing WRITE_LOG_FILE lazy static.");
+        log_rr!(Debug, "Initializing WRITE_LOG_FILE lazy static.");
 
         match *RECORD_MODE {
             RecordReplayMode::Record => {
@@ -228,7 +231,7 @@ lazy_static! {
     /// Global map holding all indexes from the record phase.
     /// Lazily initialized on replay mode.
     pub static ref RECORDED_INDICES: HashMap<(DetThreadId, u32), (Recorded, FlavorMarker, DetChannelId)> = {
-        log_trace("Initializing RECORDED_INDICES lazy static.");
+        log_rr!(Debug, "Initializing RECORDED_INDICES lazy static.");
         use std::io::BufReader;
 
         let mut recorded_indices = HashMap::new();
@@ -241,7 +244,7 @@ lazy_static! {
             let entry: LogEntry = serde_json::from_str(&line).expect("Malformed log entry.");
 
             if entry.current_thread.is_none() {
-                log_trace(&format!("Skipping None entry in log for entry: {:?}", entry));
+                log_rr!(Trace, "Skipping None entry in log for entry: {:?}", entry);
                 continue;
             }
             let curr_thread = entry.current_thread.clone().unwrap();
@@ -263,7 +266,7 @@ lazy_static! {
 }
 
 pub fn log(event: Recorded, channel: FlavorMarker, type_name: &str, chan_id: &DetChannelId) {
-    log_trace("record_replay::log()");
+    log_rr!(Debug, "record_replay::log()");
     use std::io::Write;
 
     // Write our (DET_ID, EVENT_ID) -> index to our log file
@@ -290,11 +293,7 @@ pub fn log(event: Recorded, channel: FlavorMarker, type_name: &str, chan_id: &De
         .write_fmt(format_args!("{}\n", serialized))
         .expect("Unable to write to log file.");
 
-    log_trace(&format!(
-        "{:?} Logged entry: {:?}",
-        entry,
-        (get_det_id(), event_id)
-    ));
+    log_rr!(Info, "{:?} Logged entry: {:?}", entry, (get_det_id(), event_id));
     inc_event_id();
 }
 
@@ -310,8 +309,8 @@ fn get_log_entry_do<'a>(
     let key = (our_thread, event_id);
     match RECORDED_INDICES.get(&key) {
         Some((recorded, log_flavor, log_id)) => {
-            log_trace(&format!("Event fetched: {:?} for keys: {:?}",
-                               (recorded, log_flavor, log_id), key));
+            log_rr!(Debug, "Event fetched: {:?} for keys: {:?}",
+                    (recorded, log_flavor, log_id), key);
 
             if let Some(curr_flavor) = curr_flavor {
                 if log_flavor != curr_flavor {
@@ -415,7 +414,7 @@ pub trait RecordReplayRecv<T, E: Error> {
         recv: impl FnOnce() -> Result<(Option<DetThreadId>, T), E>,
         function_name: &str,
     ) -> Result<Result<T, E>, DesyncError> {
-        log_trace(&format!("Receiver<{:?}>::{}", metadata.id, function_name));
+        log_rr!(Debug, "Receiver<{:?}>::{}", metadata.id, function_name);
 
         match metadata.mode {
             RecordReplayMode::Record => {
@@ -432,7 +431,7 @@ pub trait RecordReplayRecv<T, E: Error> {
             RecordReplayMode::Replay => {
                 match get_det_id() {
                     None => {
-                        warn!("DetThreadId was None. \
+                        log_rr!(Warn, "DetThreadId was None. \
                                This execution may not be deterministic.");
                         inc_event_id();
                         // TODO: This seems wrong. I think we should be doing
@@ -461,7 +460,7 @@ pub trait RecordReplayRecv<T, E: Error> {
 
                         // Special case for NoEntryInLog. Hang this thread forever.
                         if let Err(e@DesyncError::NoEntryInLog(_, _)) = entry {
-                            log_trace(&format!("Saw {:?}. Putting thread to sleep.", e));
+                            log_rr!(Info, "Saw {:?}. Putting thread to sleep.", e);
                             loop { thread::park() }
                         }
 
@@ -479,7 +478,7 @@ pub trait RecordReplayRecv<T, E: Error> {
                         can_block: bool,
                         do_recv: impl Fn() -> Result<(Option<DetThreadId>, T), E>)
                      -> Result<T, E> {
-        warn!("Desynchonization found: {:?}", desync);
+        log_rr!(Warn, "Desynchonization found: {:?}", desync);
 
         match *DESYNC_MODE {
             DesyncMode::KeepGoing => {
@@ -533,10 +532,8 @@ pub(crate) trait RecordReplaySend<T, E> {
         // thread's DetThreadId. Otherwise we will have "repeated" entries in the log
         // which look like they're coming from the same thread.
         let forwading_id = get_forward_id();
-        log_trace(&format!(
-            "{}<{:?}>::send(({:?}, {:?}))",
-            sender_name, id, forwading_id, type_name
-        ));
+        log_rr!(Info, "{}<{:?}>::send(({:?}, {:?}))",
+                sender_name, id, forwading_id, type_name);
 
         match mode {
             RecordReplayMode::Record => {
@@ -553,6 +550,11 @@ pub(crate) trait RecordReplaySend<T, E> {
                     // If we encounter an error we need to return the `T` back up to the caller.
                     // crossbeam_channel::send() does pretty much the same thing.
                     match record_replay::get_log_entry_with(det_id, get_event_id(), flavor, id) {
+                        // Special case for NoEntryInLog. Hang this thread forever.
+                        Err(e@DesyncError::NoEntryInLog(_, _)) => {
+                            log_rr!(Info, "Saw {:?}. Putting thread to sleep.", e);
+                            loop { thread::park() }
+                        }
                         Err(e) => return Err((e, msg)),
                         Ok(event) => {
                             match self.check_log_entry(event.clone()) {
@@ -562,7 +564,7 @@ pub(crate) trait RecordReplaySend<T, E> {
                         }
                     }
                 } else {
-                    warn!("det_id is None. This execution may be nondeterministic");
+                    log_rr!(Warn, "det_id is None. This execution may be nondeterministic");
                 }
 
                 let result = self.send(forwading_id, msg);
@@ -596,14 +598,11 @@ pub fn recv_from_sender<T>(
     buffer: &mut RefMut<HashMap<Option<DetThreadId>, VecDeque<T>>>,
     id: &DetChannelId,
 ) -> Result<T, DesyncError> {
-    log_trace_with(
-        &format!("recv_from_sender(expected_sender: {:?}) ...", expected_sender),
-        id,
-    );
+    log_rr!(Debug, "recv_from_sender(sender: {:?}, id: {:?}) ...", expected_sender, id);
 
     // Check our buffer to see if this value is already here.
     if let Some(val) = buffer.get_mut(expected_sender).and_then(|e| e.pop_front()) {
-        log_trace_with("replay_recv(): Recv message found in buffer.", id);
+        log_rr!(Debug, "replay_recv(): Recv message found in buffer. Channel id: {:?}", id);
         return Ok(val);
     }
 
@@ -613,19 +612,18 @@ pub fn recv_from_sender<T>(
         match rr_try_recv() {
             // Value matches return it!
             Ok((msg_sender, msg)) if msg_sender == *expected_sender => {
-                log_trace("Recv message found through recv()");
+                log_rr!(Debug, "Recv message found through recv()");
                 return Ok(msg);
             }
             // Value did no match. Buffer it. Handles both `none_buffer` and
             // regular `buffer` case.
             Ok((msg_sender, msg)) => {
-                let wrong_val = &format!("Wrong value found. Queing it for: {:?}", msg_sender);
-                log_trace_with(wrong_val, id);
+                log_rr!(Debug, "Wrong value found. Queing it for: {:?}", id);
                 buffer.entry(msg_sender).or_insert(VecDeque::new()).push_back(msg);
             }
             Err(RecvErrorRR::Disconnected) => {
                 // Got a disconnected message. keep going...
-                log_trace("Saw Discoonected, trying again.");
+                log_rr!(Trace, "Saw Discoonected, trying again.");
                 continue
             }
             Err(RecvErrorRR::Timeout) => {

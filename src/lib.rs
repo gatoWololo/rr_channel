@@ -6,7 +6,6 @@ use env_logger;
 use lazy_static::lazy_static;
 use log::{debug, trace, warn};
 use serde::{Deserialize, Serialize};
-
 mod channel;
 mod crossbeam_select;
 pub mod ipc;
@@ -14,7 +13,6 @@ mod record_replay;
 pub mod router;
 mod select;
 pub mod thread;
-
 // Rexports.
 pub use channel::{after, bounded, never, unbounded, Receiver, Sender};
 pub use crossbeam_channel::{RecvError, RecvTimeoutError, TryRecvError};
@@ -24,6 +22,7 @@ pub use thread::{current, panicking, park, park_timeout, sleep, yield_now,
                  get_det_id, get_event_id, inc_event_id, DetIdSpawner, DetThreadId,
                  in_forwarding};
 
+use log::Level::*;
 use std::env::var;
 use std::env::VarError;
 
@@ -52,7 +51,7 @@ lazy_static! {
 
     /// Record type. Initialized from environment variable RR_CHANNEL.
     pub static ref RECORD_MODE: RecordReplayMode = {
-        log_trace("Initializing RECORD_MODE lazy static.");
+        log_rr!(Debug, "Initializing RECORD_MODE lazy static.");
 
         let mode = match var(RECORD_MODE_VAR) {
             Ok(value) => {
@@ -73,13 +72,13 @@ lazy_static! {
             }
         };
 
-        log_trace(&format!("Mode {:?} selected.", mode));
+        log_rr!(Info, "Mode {:?} selected.", mode);
         mode
     };
 
     /// Record type. Initialized from environment variable RR_CHANNEL.
     pub static ref DESYNC_MODE: DesyncMode = {
-        log_trace("Initializing DESYNC_MODE lazy static.");
+        log_rr!(Debug, "Initializing DESYNC_MODE lazy static.");
 
         let mode = match var(DESYNC_MODE_VAR) {
             Ok(value) => {
@@ -99,13 +98,13 @@ lazy_static! {
             }
         };
 
-        log_trace(&format!("Mode {:?} selected.", mode));
+        log_rr!(Info, "Mode {:?} selected.", mode);
         mode
     };
 
     /// Name of record file.
     pub static ref LOG_FILE_NAME: String = {
-        log_trace("Initializing RECORD_FILE lazy static.");
+        log_rr!(Debug, "Initializing RECORD_FILE lazy static.");
 
         let mode = match var(RECORD_FILE_VAR) {
             Ok(value) => {
@@ -119,41 +118,35 @@ lazy_static! {
             }
         };
 
-        log_trace(&format!("Mode {:?} selected.", mode));
+        log_rr!(Info, "Mode {:?} selected.", mode);
         mode
     };
 }
 
-fn log_trace(msg: &str) {
-    let thread = std::thread::current();
-    let event_name = if in_forwarding() {
-        "ROUTER".to_string()
-    } else {
-        format!("{:?}", (get_det_id(), get_event_id()))
-    };
+#[macro_export]
+/// Log messages with added information. Specifically:
+/// thread name, event_name, envent_id, correct name resolution when forwading.
+macro_rules! log_rr {
+    ($log_level:expr, $msg:expr, $($arg:expr),*) => {
 
-    trace!(
-        "thread: {:?} | event# {:?} {} | {}",
-        thread.name(),
-        event_name,
-        get_event_id(),
-        msg
-    );
+        let thread = std::thread::current();
+        let formatted_msg = format!($msg, $($arg),*);
+        log::log!($log_level,
+             "thread: {:?} | event# {:?} {} | {}",
+             thread.name(),
+             crate::event_name(),
+             crate::thread::get_event_id(),
+             formatted_msg);
+    };
+    ($log_level:expr, $msg:expr) => {
+        log_rr!($log_level, $msg,);
+    };
 }
 
-fn log_trace_with(msg: &str, id: &DetChannelId) {
-    let thread = std::thread::current();
-    let event_name = if in_forwarding() {
+fn event_name() -> String {
+    if crate::thread::in_forwarding() {
         "ROUTER".to_string()
     } else {
         format!("{:?}", (get_det_id(), get_event_id()))
-    };
-
-    trace!(
-        "thread: {:?} | event# {:?} | {} | chan: {:?}",
-        thread.name(),
-        event_name,
-        msg,
-        id
-    );
+    }
 }

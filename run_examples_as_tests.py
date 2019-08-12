@@ -14,7 +14,7 @@ def cargo_run_record(example):
 def cargo_run_replay(example):
     env = os.environ.copy()
     env["RR_CHANNEL"] = "replay"
-    env["RR_DESYNC_MODE"] = "keep_going"
+    env["RR_DESYNC_MODE"] = "panic"
     env["RR_RECORD_FILE"] = "record.log"
     return subprocess.check_output("cargo run --example " + example,
                                    env=env, shell=True, stderr=subprocess.DEVNULL)
