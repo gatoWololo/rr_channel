@@ -166,10 +166,6 @@ impl<'a> Select<'a> {
         }
         match self.mode {
             RecordReplayMode::Record => {
-                // Log the fact that we started a possibly blocking operation!
-                let record = Recorded::BlockingOpStart(BlockingOp::Select);
-                record_replay::log(record, FlavorMarker::Select,
-                                   "crossbeam_channel::Select", &DetChannelId::fake());
                 // We don't know the thread_id of sender until the select is complete
                 // when user call recv() on SelectedOperation. So do nothing here.
                 // Index will be recorded there.
@@ -177,19 +173,6 @@ impl<'a> Select<'a> {
             }
             RecordReplayMode::Replay => {
                 let det_id = get_det_id_desync()?;
-
-                // We expect to see a start message first.
-                let (event, _, _) = get_log_entry_ret(det_id.clone(), get_event_id())?;
-                match event {
-                    // Ensure event is a BlockingOpStart
-                    Recorded::BlockingOpStart(_ /*TODO*/) => { }
-                    event => {
-                        let dummy = Recorded::BlockingOpStart(BlockingOp::Recv);
-                        let e = DesyncError::EventMismatch(dummy, event.clone());
-                        return Err(e);
-                    }
-                }
-                inc_event_id();
 
                 // Query our log to see what index was selected!() during the replay phase.
                 // Flavor type not check on Select::select() but on Select::recv()

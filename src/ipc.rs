@@ -454,11 +454,6 @@ impl IpcReceiverSet {
         }
         match self.mode {
             RecordReplayMode::Record => {
-                // Log the fact that we started a possibly blocking operation!
-                let record = Recorded::BlockingOpStart(BlockingOp::IpcSelect);
-                record_replay::log(record, FlavorMarker::IpcSelect,
-                                   "ipc_channel::IpcReceiverSet", &DetChannelId::fake());
-
                 // Events will be moved by our loop. So we put them back here.
                 let mut moved_events: Vec<IpcSelectionResult> = Vec::new();
                 let mut recorded_events = Vec::new();
@@ -500,19 +495,6 @@ impl IpcReceiverSet {
                     return Err((DesyncError::Desynchronized, vec![]));
                 }
                 let det_id = get_det_id_desync().map_err(|e| (e, vec![]))?;
-
-                // We expect to see a start message first.
-                match get_log_entry(det_id.clone(), get_event_id())
-                    .map_err(|e| (e, vec![]))? {
-                    // Ensure event is a BlockingOpStart
-                    Recorded::BlockingOpStart(_ /*TODO*/) => { }
-                    event => {
-                        let dummy = Recorded::BlockingOpStart(BlockingOp::Recv);
-                        let e = DesyncError::EventMismatch(dummy, event.clone());
-                        return Err((e, vec![]));
-                    }
-                }
-                inc_event_id();
 
                 // Here we put this thread to sleep if the entry is missing.
                 // On record, the thread never returned from blocking...

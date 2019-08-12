@@ -138,10 +138,6 @@ pub enum BlockingOp {
 /// that our logger supports.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum Recorded {
-    /// Blocking operations may never return.
-    /// We use this event to tell when a blocking operation
-    /// was called but never returned.
-    BlockingOpStart(BlockingOp),
     // Crossbeam select.
     SelectReady {
         select_index: usize,
@@ -417,12 +413,7 @@ pub trait RecordReplayRecv<T, E: Error> {
         log_rr!(Debug, "Receiver<{:?}>::{}", metadata.id, function_name);
 
         match metadata.mode {
-            RecordReplayMode::Record => {
-                // Log the fact that we started a possibly blocking operation!
-                // TODO We don't need this for all variants e.g. try_recv.
-                let record = Recorded::BlockingOpStart(BlockingOp::Recv);
-                record_replay::log(record, metadata.flavor,
-                                   &metadata.type_name, &metadata.id);
+            RecordReplayMode::Record => {;
                 let (result, recorded) = self.to_recorded_event(recv());
                 record_replay::log(recorded, metadata.flavor,
                                    &metadata.type_name, &metadata.id);
@@ -439,20 +430,6 @@ pub trait RecordReplayRecv<T, E: Error> {
                         Ok(recv().map(|v| v.1))
                     }
                     Some(det_id) => {
-                        // We expect to see a start
-                        let event = get_log_entry_with(det_id.clone(),
-                                                       get_event_id(),
-                                                       &metadata.flavor,
-                                                       &metadata.id)?;
-                        match event {
-                            Recorded::BlockingOpStart(_ /*TODO*/) => { }
-                            event => {
-                                let dummy = Recorded::BlockingOpStart(BlockingOp::Recv);
-                                let e = DesyncError::EventMismatch(dummy, event.clone());
-                                return Err(e);
-                            }
-                        }
-                        inc_event_id();
                         let entry = get_log_entry_with(det_id,
                                                        get_event_id(),
                                                        &metadata.flavor,
