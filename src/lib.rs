@@ -1,7 +1,3 @@
-#![feature(bind_by_move_pattern_guards)]
-#![feature(core_intrinsics)]
-#![feature(specialization)]
-
 use env_logger;
 use lazy_static::lazy_static;
 use log::{debug, trace, warn};
@@ -149,4 +145,10 @@ fn event_name() -> String {
     } else {
         format!("{:?}", (get_det_id(), get_event_id()))
     }
+}
+
+fn get_generic_name<T>() -> &'static str {
+    "nightly-only"
+    // Nightly only TODO: Set as optional Cargo.toml attribute?
+    // unsafe { std::intrinsics::type_name::<T>() };
 }

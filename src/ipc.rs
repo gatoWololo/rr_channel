@@ -1,10 +1,10 @@
-use crate::record_replay::mark_program_as_desynced;
-use crate::record_replay::program_desyned;
+use crate::get_generic_name;
 use crate::record_replay::{self, Blocking, FlavorMarker, IpcDummyError,
                            RecordReplayRecv, Recorded, RecordMetadata,
                            get_log_entry, DetChannelId, IpcSelectEvent,
                            RecordReplaySend, get_log_entry_with, DesyncError,
-                           get_forward_id, BlockingOp };
+                           get_forward_id, BlockingOp, sleep_until_desync,
+                           mark_program_as_desynced, program_desyned };
 use crate::thread::{get_and_inc_channel_id, get_det_id, DetThreadId,
                     get_event_id, inc_event_id, get_det_id_desync};
 use crate::{RecordReplayMode, ENV_LOGGER, RECORD_MODE,
@@ -32,6 +32,8 @@ use std::collections::HashSet;
 use std::thread;
 use ipc_channel::ipc::OpaqueIpcSender;
 
+type OsIpcReceiverResults = (Vec<u8>, Vec<OsOpaqueIpcChannel>, Vec<OsIpcSharedMemory>);
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct IpcReceiver<T> {
     pub(crate) receiver: ipc::IpcReceiver<(Option<DetThreadId>, T)>,
@@ -48,7 +50,7 @@ impl<T> IpcReceiver<T> {
             receiver,
             buffer: RefCell::new(HashMap::new()),
             metadata: RecordMetadata {
-                type_name: unsafe { std::intrinsics::type_name::<T>().to_string() },
+                type_name: get_generic_name::<T>().to_string(),
                 flavor: FlavorMarker::Ipc,
                 mode: *RECORD_MODE,
                 id,
@@ -236,7 +238,7 @@ where
     pub fn connect(name: String) -> Result<IpcSender<T>, std::io::Error> {
         let id = DetChannelId::new();
 
-        let type_name = unsafe { std::intrinsics::type_name::<T>() };
+        let type_name = get_generic_name::<T>();
         log_rr!(Info, "Sender connected created: {:?} {:?}", id, type_name);
 
         let metadata = RecordMetadata {
@@ -258,7 +260,7 @@ where
 
     let (sender, receiver) = ipc::channel()?;
     let id = DetChannelId::new();
-    let type_name = unsafe { std::intrinsics::type_name::<T>() };
+    let type_name = get_generic_name::<T>();
     log_rr!(Info, "IPC channel created: {:?} {:?}", id, type_name);
 
     let metadata = RecordMetadata {
@@ -501,7 +503,9 @@ impl IpcReceiverSet {
                 let entry = get_log_entry(det_id, get_event_id());
                 if let Err(e@DesyncError::NoEntryInLog(_, _)) = entry {
                     log_rr!(Info, "Saw {:?}. Putting thread to sleep.", e);
-                    loop { thread::park() }
+                    sleep_until_desync();
+                    // Thread woke back up... desynced!
+                    return Err((DesyncError::DesynchronizedWakeup, vec![]));
                 }
 
                 match entry.map_err(|e| (e, vec![]))? {
@@ -510,9 +514,11 @@ impl IpcReceiverSet {
 
                         for event in select_events {
                             match self.replay_select_event(event) {
-                                Err((e, entry)) => {
-                                    events.push(entry);
-                                    return Err((e, events));
+                                Err((error, entry)) => {
+                                    if let Some(e) = entry {
+                                        events.push(e);
+                                    }
+                                    return Err((error, events));
                                 }
                                 Ok(entry) => events.push(entry),
                             }
@@ -534,7 +540,8 @@ impl IpcReceiverSet {
     /// From a IpcSelectEvent, fetch the correct IpcSelectionResult.
     /// On error return the event that caused Desync.
     fn replay_select_event(&mut self, event: &IpcSelectEvent)
-                           -> Result<IpcSelectionResult, (DesyncError, IpcSelectionResult)> {
+                           -> Result<IpcSelectionResult,
+                                     (DesyncError, Option<IpcSelectionResult>)> {
         log_rr!(Trace, "replay_select_event for {:?}", event);
         match event {
             IpcSelectEvent::MessageReceived(index, expected_sender) => {
@@ -581,11 +588,28 @@ impl IpcReceiverSet {
                         // Expected a channel closed, saw a real message...
                         log_rr!(Trace, "Expected channel closed! Saw success: {:?}", index);
                         Err((DesyncError::ChannelClosedExpected,
-                             IpcReceiverSet::convert(*index, val.0, val.1, val.2)))
+                             Some(IpcReceiverSet::convert(*index, val.0, val.1, val.2))))
                     }
                 }
             }
         }
+    }
+
+    fn rr_recv(opaque_receiver: &mut OpaqueIpcReceiver)
+               -> Result<OsIpcReceiverResults, RecvErrorRR> {
+        let receiver = &mut opaque_receiver.opaque_receiver.os_receiver;
+        for i in 0..10 {
+            match receiver.try_recv() {
+                Ok(v) => return Ok(v),
+                Err(e) if e.channel_is_closed() => {
+                    return Err(RecvErrorRR::Disconnected)
+                }
+                Err(_) =>{
+                    thread::sleep(Duration::from_millis(100))
+                }
+            }
+        }
+        Err(RecvErrorRR::Timeout)
     }
 
     /// TODO: There is borrowing issues if I mut borrow the receiver, and
@@ -601,7 +625,7 @@ impl IpcReceiverSet {
         index: u64,
         expected_sender: &Option<DetThreadId>,
         receiver: &mut OpaqueIpcReceiver,
-    ) -> Result<IpcSelectionResult, (DesyncError, IpcSelectionResult)> {
+    ) -> Result<IpcSelectionResult, (DesyncError, Option<IpcSelectionResult>)> {
         log_rr!(Debug, "do_replay_recv_for_entry");
 
         if let Some(entry) = buffer.
@@ -614,17 +638,19 @@ impl IpcReceiverSet {
 
         loop {
             let (data, channels, shared_memory_regions) =
-                match receiver.opaque_receiver.os_receiver.recv() {
+                // TODO timeout here!
+                match IpcReceiverSet::rr_recv(receiver) {
                     Ok(v) => v,
-                    Err(e) if e.channel_is_closed() => {
+                    Err(RecvErrorRR::Disconnected) => {
                         log_rr!(Trace, "Expected message, saw channel closed.");
                         // remember that this receiver closed!
                         receiver.closed = true;
                         return Err((DesyncError::ChannelClosedUnexpected(index),
-                                   IpcSelectionResult::ChannelClosed(index)));
+                                   Some(IpcSelectionResult::ChannelClosed(index))));
                     }
-                    Err(e) => panic!("do_replay_recv_for_entry: \
-                                      Unknown reason for error: {:?}", e),
+                    Err(RecvErrorRR::Timeout) => {
+                        return Err((DesyncError::Timedout, None));
+                    }
             };
 
             let msg = OpaqueIpcMessage::new(data, channels, shared_memory_regions);
@@ -645,6 +671,8 @@ impl IpcReceiverSet {
             }
         }
     }
+
+
 
     /// Call actual select for real IpcReceiverSet and convert their
     /// ipc_channel::ipc::IpcSelectionResult into our IpcSelectionResult.

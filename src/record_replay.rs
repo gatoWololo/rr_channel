@@ -4,7 +4,7 @@ use crate::RECORD_MODE;
 use lazy_static::lazy_static;
 use std::fs::remove_file;
 use std::fs::File;
-use std::sync::Mutex;
+use std::sync::{Mutex, Condvar, Arc};
 use std::thread;
 
 use crate::{DESYNC_MODE, DesyncMode, LOG_FILE_NAME};
@@ -56,6 +56,11 @@ pub enum DesyncError {
     ChannelClosedUnexpected(u64),
     /// Waited too long and no message ever came.
     Timedout,
+    /// Thread woke up after assuming it had ran of the end of the log.
+    /// While `NoEntryInLog` may mean that this thread simply blocked forever
+    /// or "didn't make it this far", DesynchronizedWakeup means we put that
+    /// thread to sleep and it was woken up by a desync somewhere.
+    DesynchronizedWakeup,
 }
 
 /// Record representing a sucessful select from a channel. Used in replay mode.
@@ -197,11 +202,41 @@ pub(crate) fn program_desyned() -> bool {
 pub(crate) fn mark_program_as_desynced() {
     if ! DESYNC.load(Ordering::SeqCst) {
         log_rr!(Warn, "Program marked as desynced!");
+        DESYNC.store(true, Ordering::SeqCst);
+        wake_up_threads();
     }
-    DESYNC.store(true, Ordering::SeqCst)
+}
+
+pub(crate) fn sleep_until_desync() {
+    log_rr!(Debug, "Thread being put to sleep.");
+    let (lock, condvar) = &*PARK_THREADS;
+    let mut started = lock.lock().expect("Unable to lock mutex.");
+    while !*started {
+        started = condvar.wait(started).expect("Unable to wait on condvar.");
+    }
+    log_rr!(Debug, "Thread woke up from eternal slumber!");
+}
+
+pub(crate) fn wake_up_threads() {
+    log_rr!(Debug, "Waking up threads!");
+    let (lock, condvar) = &*PARK_THREADS;
+    let mut started = lock.lock().expect("Unable to lock mutex.");
+    *started = true;
+    condvar.notify_all();
 }
 
 lazy_static! {
+    /// When we run off the end of the log,
+    /// if we're not DESYN, we assume that thread blocked forever during record
+    /// if any other thread ever DESYNCs we let the thread continue running
+    /// to avoid deadlocks. This condvar implements that logic.
+    pub static ref PARK_THREADS: (Mutex<bool>, Condvar) = {
+        (Mutex::new(false), Condvar::new())
+    };
+
+    /// Global bool keeping track if any thread has desynced.
+    /// TODO: This may be too heavy handed. If we remove this bool, we get
+    /// per event desync checks, which may be better than a global concept?
     pub static ref DESYNC: AtomicBool = {
         AtomicBool::new(false)
     };
@@ -438,7 +473,9 @@ pub trait RecordReplayRecv<T, E: Error> {
                         // Special case for NoEntryInLog. Hang this thread forever.
                         if let Err(e@DesyncError::NoEntryInLog(_, _)) = entry {
                             log_rr!(Info, "Saw {:?}. Putting thread to sleep.", e);
-                            loop { thread::park() }
+                            sleep_until_desync();
+                            // Thread woke back up... desynced!
+                            return Err(DesyncError::DesynchronizedWakeup);
                         }
 
                         Ok(self.expected_recorded_events(entry?.clone())?)
@@ -530,7 +567,9 @@ pub(crate) trait RecordReplaySend<T, E> {
                         // Special case for NoEntryInLog. Hang this thread forever.
                         Err(e@DesyncError::NoEntryInLog(_, _)) => {
                             log_rr!(Info, "Saw {:?}. Putting thread to sleep.", e);
-                            loop { thread::park() }
+                            sleep_until_desync();
+                            // Thread woke back up... desynced!
+                            return Err((DesyncError::DesynchronizedWakeup, msg));
                         }
                         Err(e) => return Err((e, msg)),
                         Ok(event) => {
@@ -588,15 +627,16 @@ pub fn recv_from_sender<T>(
     loop {
         match rr_try_recv() {
             // Value matches return it!
-            Ok((msg_sender, msg)) if msg_sender == *expected_sender => {
-                log_rr!(Debug, "Recv message found through recv()");
-                return Ok(msg);
-            }
-            // Value did no match. Buffer it. Handles both `none_buffer` and
-            // regular `buffer` case.
-            Ok((msg_sender, msg)) => {
-                log_rr!(Debug, "Wrong value found. Queing it for: {:?}", id);
-                buffer.entry(msg_sender).or_insert(VecDeque::new()).push_back(msg);
+            Ok((msg_sender, msg))=> {
+                if msg_sender == *expected_sender {
+                    log_rr!(Debug, "Recv message found through recv()");
+                    return Ok(msg);
+                } else {
+                    // Value did no match. Buffer it. Handles both `none_buffer` and
+                    // regular `buffer` case.
+                    log_rr!(Debug, "Wrong value found. Queing it for: {:?}", id);
+                    buffer.entry(msg_sender).or_insert(VecDeque::new()).push_back(msg);
+                }
             }
             Err(RecvErrorRR::Disconnected) => {
                 // Got a disconnected message. keep going...
@@ -608,4 +648,25 @@ pub fn recv_from_sender<T>(
             }
         }
     }
+}
+
+#[test]
+fn condvar_test() {
+    let mut handles = vec![];
+    for i in 1..10 {
+        let h = thread::spawn(move || {
+            println!("Putting thread {} to sleep.", i);
+            sleep_until_desync();
+            println!("Thread {} woke up!", i);
+        });
+        handles.push(h);
+    }
+
+    thread::sleep_ms(1000);
+    println!("Main thread waking everyone up...");
+    wake_up_threads();
+    for h in handles {
+        h.join().unwrap();
+    }
+    assert!(true);
 }

@@ -1,3 +1,4 @@
+use crate::get_generic_name;
 use crate::record_replay::recv_from_sender;
 use crate::record_replay::{self, Blocking, FlavorMarker, Recorded,
                            RecordMetadata, RecordReplayRecv, RecordReplaySend,
@@ -24,7 +25,7 @@ pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
     let (sender, receiver) = crossbeam_channel::unbounded();
     let mode = *RECORD_MODE;
     let channel_type = FlavorMarker::Unbounded;
-    let type_name = unsafe { std::intrinsics::type_name::<T>() };
+    let type_name = get_generic_name::<T>();
     let id = DetChannelId::new();
 
     log_rr!(Info, "Unbounded channel created: {:?} {:?}", id, type_name);
@@ -249,7 +250,7 @@ impl<T> Receiver<T> {
             buffer: RefCell::new(HashMap::new()),
             receiver: real_receiver,
             metadata: RecordMetadata {
-                type_name: unsafe { std::intrinsics::type_name::<T>().to_string() },
+                type_name: get_generic_name::<T>().to_string(),
                 flavor,
                 mode: *RECORD_MODE,
                 id,
@@ -376,7 +377,7 @@ pub fn bounded<T>(cap: usize) -> (Sender<T>, Receiver<T>) {
 
     let (sender, receiver) = crossbeam_channel::bounded(cap);
     let id = DetChannelId::new();
-    let type_name = unsafe { std::intrinsics::type_name::<T>() };
+    let type_name = get_generic_name::<T>();
 
     log_rr!(Info, "Bounded channel created: {:?} {:?}", id, type_name);
     (
@@ -393,7 +394,7 @@ pub fn bounded<T>(cap: usize) -> (Sender<T>, Receiver<T>) {
 
 pub fn never<T>() -> Receiver<T> {
     *ENV_LOGGER;
-    let type_name = unsafe { std::intrinsics::type_name::<T>().to_string() };
+    let type_name = get_generic_name::<T>().to_string();
     let id = DetChannelId::new();
 
     Receiver {

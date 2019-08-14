@@ -4,7 +4,7 @@ use crate::record_replay::program_desyned;
 use crate::channel::Flavor;
 use crate::record_replay::{self, get_log_entry, FlavorMarker, Recorded,
                            SelectEvent, get_log_entry_ret, DesyncError,
-                           DetChannelId, BlockingOp};
+                           DetChannelId, BlockingOp, sleep_until_desync};
 use crate::thread::{get_det_id, get_det_id_desync,
                     get_event_id, inc_event_id, DetThreadId};
 use crate::{Receiver, RecordReplayMode, Sender, RECORD_MODE, DESYNC_MODE,
@@ -182,7 +182,9 @@ impl<'a> Select<'a> {
                 // On record, the thread never returned from blocking...
                 if let Err(e@DesyncError::NoEntryInLog(_, _)) = entry {
                     log_rr!(Info, "Saw {:?}. Putting thread to sleep.", e);
-                    loop { thread::park() }
+                    sleep_until_desync();
+                    // Thread woke back up... desynced!
+                    return Err(DesyncError::DesynchronizedWakeup);
                 }
 
                 let (event, flavor, chan_id) = entry?;
