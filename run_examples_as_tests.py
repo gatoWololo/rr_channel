@@ -3,6 +3,8 @@ import subprocess
 
 import sys
 
+trials = 30
+
 def cargo_run_record(example):
     env = os.environ.copy()
     env["RR_CHANNEL"] = "record"
@@ -56,7 +58,7 @@ for example in examples:
     print("Running example: {}".format(example))
 
     # Run multiple times to be sure...
-    for _ in range(10):
+    for _ in range(trials):
         record = cargo_run_record(example)
 
         try:
@@ -71,5 +73,7 @@ for example in examples:
 
         if record != replay:
             print("ERROR: Outputs between record and replay differ!")
+            print("Record ", record)
+            print("Replay ", replay)
             sys.exit(1)
-    print("[10/10] OK!")
+    print("[{}/{}] OK!".format(trials, trials))

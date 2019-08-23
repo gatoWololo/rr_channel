@@ -14,7 +14,7 @@ fn main() -> Result<(), std::io::Error> {
         sender.send(i);
     }
 
-    // Needed, otherwise program might exit before router prints all messages.
-    std::thread::sleep(Duration::from_millis(50));
+    // If you see router_add_route randomly failing, increase this number
+    std::thread::sleep(Duration::from_millis(200));
     Ok(())
 }

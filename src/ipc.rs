@@ -118,6 +118,9 @@ where T: for<'de> Deserialize<'de> + Serialize {
             match self.receiver.try_recv() {
                 Ok(v) => return Ok(v),
                 Err(_) =>{
+                    // TODO FIX!!!!
+                    // Divide timeout by power of two 1 million
+                    // power of two.
                     thread::sleep(Duration::from_millis(100))
                 }
             }
@@ -573,16 +576,16 @@ impl IpcReceiverSet {
                 // expect here represents a bug on the internal assumptions of our code.
                     expect("Unable to fetch correct receiver from map.");
 
-                match receiver.opaque_receiver.os_receiver.recv() {
-                    Err(e) if e.channel_is_closed() => {
+                match IpcReceiverSet::rr_recv(receiver) {
+                    Err(RecvErrorRR::Disconnected) => {
                         log_rr!(Trace,
                                 "replay_select_event(): Saw channel closed for {:?}", index);
                         // remember that this receiver closed!
                         receiver.closed = true;
                         Ok(IpcSelectionResult::ChannelClosed(*index))
                     }
-                    Err(e) => {
-                        panic!("Unknown reason for error: {:?}", e);
+                    Err(RecvErrorRR::Timeout) => {
+                        return Err((DesyncError::Timedout, None));
                     }
                     Ok(val) => {
                         // Expected a channel closed, saw a real message...

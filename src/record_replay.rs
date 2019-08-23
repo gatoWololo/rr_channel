@@ -30,6 +30,15 @@ pub enum RecvErrorRR {
     Disconnected,
 }
 
+impl From<RecvErrorRR> for DesyncError {
+    fn from(e: RecvErrorRR) -> DesyncError {
+        match e {
+            RecvErrorRR::Disconnected => DesyncError::Disconnected,
+            RecvErrorRR::Timeout => DesyncError::Timedout,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum DesyncError {
     /// Missing entry for specified (DetThreadId, EventIt) pair.
@@ -52,6 +61,8 @@ pub enum DesyncError {
     Desynchronized,
     /// Expected a channel close message, but saw actual value.
     ChannelClosedExpected,
+    /// Receiver disconnected...
+    Disconnected,
     /// Expected a message, but channel returned closed.
     ChannelClosedUnexpected(u64),
     /// Waited too long and no message ever came.
@@ -610,7 +621,7 @@ pub fn get_forward_id() -> Option<DetThreadId> {
 /// and buffer wrong entries.
 pub fn recv_from_sender<T>(
     expected_sender: &Option<DetThreadId>,
-    rr_try_recv: impl Fn() -> Result<(Option<DetThreadId>, T), RecvErrorRR>,
+    rr_timeout_recv: impl Fn() -> Result<(Option<DetThreadId>, T), RecvErrorRR>,
     buffer: &mut RefMut<HashMap<Option<DetThreadId>, VecDeque<T>>>,
     id: &DetChannelId,
 ) -> Result<T, DesyncError> {
@@ -625,27 +636,15 @@ pub fn recv_from_sender<T>(
     // Loop until we get the message we're waiting for. All "wrong" messages are
     // buffered into self.buffer.
     loop {
-        match rr_try_recv() {
-            // Value matches return it!
-            Ok((msg_sender, msg))=> {
-                if msg_sender == *expected_sender {
-                    log_rr!(Debug, "Recv message found through recv()");
-                    return Ok(msg);
-                } else {
-                    // Value did no match. Buffer it. Handles both `none_buffer` and
-                    // regular `buffer` case.
-                    log_rr!(Debug, "Wrong value found. Queing it for: {:?}", id);
-                    buffer.entry(msg_sender).or_insert(VecDeque::new()).push_back(msg);
-                }
-            }
-            Err(RecvErrorRR::Disconnected) => {
-                // Got a disconnected message. keep going...
-                log_rr!(Trace, "Saw Discoonected, trying again.");
-                continue
-            }
-            Err(RecvErrorRR::Timeout) => {
-                return Err(DesyncError::Timedout);
-            }
+        let (msg_sender, msg) = rr_timeout_recv()?;
+        if msg_sender == *expected_sender {
+            log_rr!(Debug, "Recv message found through recv()");
+            return Ok(msg);
+        } else {
+            // Value did no match. Buffer it. Handles both `none_buffer` and
+            // regular `buffer` case.
+            log_rr!(Debug, "Wrong value found. Queing it for: {:?}", id);
+            buffer.entry(msg_sender).or_insert(VecDeque::new()).push_back(msg);
         }
     }
 }

@@ -148,7 +148,8 @@ fn event_name() -> String {
 }
 
 fn get_generic_name<T>() -> &'static str {
-    "nightly-only"
+    ""
+    // "nightly-only"
     // Nightly only TODO: Set as optional Cargo.toml attribute?
     // unsafe { std::intrinsics::type_name::<T>() };
 }
