@@ -1,4 +1,4 @@
-t# RR Channels
+# RR Channels
 Experiment in bringing more determinism to message passing channels.
 
 See http://arxiv.org/abs/1909.03111 for the full writeup. This is still very much WIP. There is currently a terrible performance bug for IPC Channels.
