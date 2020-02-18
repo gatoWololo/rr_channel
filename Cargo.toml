@@ -11,14 +11,10 @@ log = "0.4"
 env_logger = "0.6"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-# ipc-channel = { git = "https://github.com/servo/ipc-channel", rev = "ee3ccbad71be7d99927d391a032fbe7faea76784" }
-# ipc-channel = { path = "../../../ipc-channel" }
-ipc-channel = { path = "../ipc-channel" }
+ipc-channel = { git = "https://github.com/gatoWololo/ipc-channel", rev = "426df57767d822867cfec5034715274b806b8aa0" }
 rand = "0.6.5"
 bincode = "1"
 
 [dev-dependencies]
-# ipc-channel = { git = "https://github.com/servo/ipc-channel", rev = "ee3ccbad71be7d99927d391a032fbe7faea76784" }
-# ipc-channel = { path = "../../../ipc-channel" }
-ipc-channel = { path = "../ipc-channel" }
+ipc-channel = { git = "https://github.com/gatoWololo/ipc-channel", rev = "426df57767d822867cfec5034715274b806b8aa0" }
 crossbeam-channel = "0.3"
