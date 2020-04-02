@@ -1,0 +1,3 @@
+{"current_thread":{"thread_id":[]},"event_id":0,"event":"Sender","channel":"Unbounded","chan_id":{"det_thread_id":{"thread_id":[]},"channel_id":0},"type_name":""}
+{"current_thread":{"thread_id":[0]},"event_id":0,"event":{"Select":{"Success":{"sender_thread":{"thread_id":[]},"selected_index":0}}},"channel":"Unbounded","chan_id":{"det_thread_id":{"thread_id":[]},"channel_id":0},"type_name":""}
+{"current_thread":{"thread_id":[0]},"event_id":1,"event":{"Select":{"RecvError":{"selected_index":0}}},"channel":"Unbounded","chan_id":{"det_thread_id":{"thread_id":[]},"channel_id":0},"type_name":""}
