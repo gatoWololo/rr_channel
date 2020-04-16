@@ -1,3 +1,7 @@
+//The test first creates a channel. It prints out "received {msg}" if the channel
+//succussfully receives message, and print "time out" if the run is timed out. Because the channel wil
+//not receive anything, the test always times out. 
+
 use rr_channel::{after, unbounded};
 /// Stolen from crossbeam_channel::after example!
 use std::time::Duration;

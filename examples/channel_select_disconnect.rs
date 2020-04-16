@@ -1,3 +1,6 @@
+//The test creates two channels that send messages with the possibility to disconnect
+//because they are not cloned.
+
 use rr_channel::thread;
 
 /// Send messages with the possibility to disconnect.
