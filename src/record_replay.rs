@@ -15,6 +15,7 @@ use crate::thread::get_event_id;
 use crate::thread::get_temp_det_id;
 use crate::thread::{inc_event_id , get_and_inc_channel_id, in_forwarding};
 use crossbeam_channel::{RecvError, RecvTimeoutError, TryRecvError};
+use std::sync::mpsc;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::BufRead;
@@ -94,6 +95,8 @@ pub enum SelectEvent {
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Copy, Clone)]
 pub enum FlavorMarker {
+    MpscBounded,
+    MpscUnbounded,
     Unbounded,
     After,
     Bounded,
@@ -128,6 +131,13 @@ pub enum RecvTimeoutErrorDef {
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(remote = "mpsc::RecvTimeoutError")]
+pub enum MpscRecvTimeoutErrorDef {
+    Timeout,
+    Disconnected,
+}
+
+#[derive(Serialize, Deserialize)]
 #[serde(remote = "TryRecvError")]
 pub enum TryRecvErrorDef {
     Empty,
@@ -135,8 +145,19 @@ pub enum TryRecvErrorDef {
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(remote = "mpsc::TryRecvError")]
+pub enum MpscTryRecvErrorDef {
+    Empty,
+    Disconnected,
+}
+
+#[derive(Serialize, Deserialize)]
 #[serde(remote = "RecvError")]
 pub struct RecvErrorDef {}
+
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "mpsc::RecvError")]
+pub struct MpscRecvErrorDef {}
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct IpcDummyError;
@@ -167,6 +188,13 @@ pub enum Recorded {
     #[serde(with = "RecvErrorDef")]
     RecvErr(RecvError),
 
+    // MPSC recv.
+    MpscRecvSucc {
+        sender_thread: Option<DetThreadId>,
+    },
+    #[serde(with = "MpscRecvErrorDef")]
+    MpscRecvErr(mpsc::RecvError),
+
     // Crossbeam try_recv
     TryRecvSucc {
         sender_thread: Option<DetThreadId>,
@@ -174,12 +202,26 @@ pub enum Recorded {
     #[serde(with = "TryRecvErrorDef")]
     TryRecvErr(TryRecvError),
 
+    // MPSC try_recv
+    MpscTryRecvSucc {
+        sender_thread: Option<DetThreadId>,
+    },
+    #[serde(with = "MpscTryRecvErrorDef")]
+    MpscTryRecvErr(mpsc::TryRecvError),
+
     // Crossbeam recv_timeout
     RecvTimeoutSucc {
         sender_thread: Option<DetThreadId>,
     },
     #[serde(with = "RecvTimeoutErrorDef")]
     RecvTimeoutErr(RecvTimeoutError),
+
+    // MPSC recv_timeout
+    MpscRecvTimeoutSucc {
+        sender_thread: Option<DetThreadId>,
+    },
+    #[serde(with = "MpscRecvTimeoutErrorDef")]
+    MpscRecvTimeoutErr(mpsc::RecvTimeoutError),
 
     // IPC recv
     IpcRecvSucc {
@@ -189,6 +231,8 @@ pub enum Recorded {
 
     // Crossbeam send.
     Sender,
+    // MPSC (standard library) send
+    MpscSender,
     // Ipc send.
     IpcSender,
 
