@@ -312,7 +312,7 @@ impl<T> RecordReplaySend<T, mpsc::SendError<T>> for Sender<T> {
     }
 
     fn as_recorded_event(&self) -> Recorded {
-        Recorded::Sender
+        Recorded::MpscSender
     }
 }
 
