@@ -1,7 +1,8 @@
 use rr_channel::mpsc;
+use rr_channel::thread;
 
 fn main() {
-    let (tx, rx) = mpsc::channel().unwrap();
+    let (tx, rx) = mpsc::channel();
 
     rr_channel::thread::spawn(move || {
         for i in 0..30 {

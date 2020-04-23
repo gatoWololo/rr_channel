@@ -3,6 +3,7 @@ use lazy_static::lazy_static;
 use log::{debug, trace, warn};
 use serde::{Deserialize, Serialize};
 mod channel;
+pub mod mpsc;
 mod crossbeam_select;
 pub mod ipc;
 mod record_replay;
