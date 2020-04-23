@@ -22,22 +22,22 @@ use crate::log_rr;
 
 
 #[derive(Debug)]
-pub struct MpscReceiver<T> {
+pub struct Receiver<T> {
     pub(crate) receiver: ReceiverFlavor<T>,
     pub(crate) metadata: RecordMetadata,
     pub(crate) buffer: RefCell<HashMap<Option<DetThreadId>, VecDeque<T>>>,
 }
 
 #[derive(Debug)]
-pub struct MpscSender<T> {
+pub struct Sender<T> {
     pub(crate) sender: SenderFlavor<T>,
     pub(crate) metadata: RecordMetadata,
 }
 
 #[derive(Debug)]
 pub enum ReceiverFlavor<T> {
-    Bounded(mpsc::Receiver<(Option<DetThreadId>, T)>,),
-    Unbounded(mpsc::Receiver<(Option<DetThreadId>, T)>,),
+    Bounded(mpsc::Receiver<(Option<DetThreadId>, T)>),
+    Unbounded(mpsc::Receiver<(Option<DetThreadId>, T)>),
 }
 
 #[derive(Debug, Clone)]
@@ -48,7 +48,7 @@ pub enum SenderFlavor<T> {
 
 macro_rules! impl_RecordReplay {
     ($err_type:ty, $succ: ident, $err:ident) => {
-        impl<T> RecordReplayRecv<T, $err_type> for MpscReceiver<T> {
+        impl<T> RecordReplayRecv<T, $err_type> for Receiver<T> {
             fn to_recorded_event(
                 &self,
                 event: Result<(Option<DetThreadId>, T), $err_type>,
@@ -96,10 +96,10 @@ impl_RecordReplay!(mpsc::RecvError, MpscRecvSucc, MpscRecvErr);
 impl_RecordReplay!(mpsc::TryRecvError, MpscTryRecvSucc, MpscTryRecvErr);
 impl_RecordReplay!(mpsc::RecvTimeoutError, MpscRecvTimeoutSucc, MpscRecvTimeoutErr);
 
-impl<T> MpscReceiver<T> {
-    pub fn new(real_receiver: ReceiverFlavor<T>, id: DetChannelId) -> MpscReceiver<T> {
-        let flavor = MpscReceiver::get_marker(&real_receiver);
-        MpscReceiver {
+impl<T> Receiver<T> {
+    pub fn new(real_receiver: ReceiverFlavor<T>, id: DetChannelId) -> Receiver<T> {
+        let flavor = Receiver::get_marker(&real_receiver);
+        Receiver {
             buffer: RefCell::new(HashMap::new()),
             receiver: real_receiver,
             metadata: RecordMetadata {
@@ -236,20 +236,19 @@ impl<T> ReceiverFlavor<T> {
         &self,
         duration: Duration,
     ) -> Result<(Option<DetThreadId>, T), mpsc::RecvTimeoutError> {
-        // TODO
+        // TODO(edumenyo)
         match self {
             ReceiverFlavor::Bounded(receiver) |
             ReceiverFlavor::Unbounded(receiver) => match receiver.recv_timeout(duration) {
                 Ok(msg) => Ok(msg),
                 e => e,
-            },
-            _ => unreachable!(),
+            }
         }
     }
 }
 
-// TODO
-impl<T> MpscSender<T> {
+// TODO(edumenyo)
+impl<T> Sender<T> {
     /// Send our det thread id along with the actual message for both
     /// record and replay.
     pub fn send(&self, msg: T) -> Result<(), mpsc::SendError<T>> {
@@ -259,7 +258,7 @@ impl<T> MpscSender<T> {
             &self.metadata.id,
             &self.metadata.type_name,
             &self.metadata.flavor,
-            "MpscSender",
+            "Sender",
         ) {
             Ok(v) => v,
             // send() should never hang. No need to check if NoEntryLog.
@@ -284,7 +283,7 @@ impl<T> MpscSender<T> {
     }
 }
 
-impl<T> Clone for MpscSender<T> where T: Clone {
+impl<T> Clone for Sender<T> where T: Clone {
     fn clone(&self) -> Self {
         // following implementation for crossbeam, we do not support MPSC for bounded channels as the blocking semantics are
         // more complicated to implement.
@@ -293,18 +292,18 @@ impl<T> Clone for MpscSender<T> where T: Clone {
                     "MPSC for bounded channels not supported. Blocking semantics \
                      of bounded channels will not be preseved!");
         }
-        MpscSender {
+        Sender {
             sender: self.sender.clone(),
             metadata: self.metadata.clone(),
         }
     }
 }
 
-impl<T> RecordReplaySend<T, mpsc::SendError<T>> for MpscSender<T> {
+impl<T> RecordReplaySend<T, mpsc::SendError<T>> for Sender<T> {
     fn check_log_entry(&self, entry: Recorded) -> Result<(), DesyncError> {
         match entry {
-            Recorded::MpscSender => Ok(()),
-            log_event => Err(DesyncError::EventMismatch(log_event, Recorded::MpscSender)),
+            Recorded::Sender => Ok(()),
+            log_event => Err(DesyncError::EventMismatch(log_event, Recorded::Sender)),
         }
     }
 
@@ -313,7 +312,7 @@ impl<T> RecordReplaySend<T, mpsc::SendError<T>> for MpscSender<T> {
     }
 
     fn as_recorded_event(&self) -> Recorded {
-        Recorded::MpscSender
+        Recorded::Sender
     }
 }
 
@@ -330,17 +329,24 @@ macro_rules! generate_try_send {
 impl<T> SenderFlavor<T> {
     generate_try_send!();
 
+    // TODO(edumenyo)
     pub fn send(&self, t: (Option<DetThreadId>, T)) -> Result<(), mpsc::SendError<T>> {
-        unimplemented!();
+        // unimplemented!();
 
-        // match self {
-        //     Self::Bounded(sender) => {
-        //         sender.send(t).map_err(|e| mpsc::SendError(t.1))
-        //     },
-        //     Self::Unbounded(sender) => {
-        //         sender.send(t).map_err(|e| mpsc::SendError(t.1))
-        //     }
-        // }
+        match self {
+            Self::Bounded(sender) => {
+                sender.send(t).map_err(|e| {
+                    let msg : (Option<DetThreadId>, T) = e.0;
+                    mpsc::SendError(msg.1)
+                })
+            },
+            Self::Unbounded(sender) => {
+                sender.send(t).map_err(|e| {
+                    let msg : (Option<DetThreadId>, T) = e.0;
+                    mpsc::SendError(msg.1)
+                })
+            }
+        }
     }
 }
 
@@ -353,14 +359,14 @@ impl<T> SenderFlavor<T> {
 //                     "MPSC for bounded channels not supported. Blocking semantics \
 //                      of bounded channels will not be preseved!");
 //         }
-//         MpscSender {
+//         Sender {
 //             sender: self.sender.clone(),
 //             metadata: self.metadata.clone(),
 //         }
 //     }
 // }
 
-pub fn sync_channel<T>(bound: usize) -> (MpscSender<T>, MpscReceiver<T>) {
+pub fn sync_channel<T>(bound: usize) -> (Sender<T>, Receiver<T>) {
     *ENV_LOGGER;
 
     let (sender, receiver) = mpsc::sync_channel(bound);
@@ -378,16 +384,16 @@ pub fn sync_channel<T>(bound: usize) -> (MpscSender<T>, MpscReceiver<T>) {
     };
     (
 
-        MpscSender {
+        Sender {
             sender: SenderFlavor::Bounded(sender),
-            metadata: metadata.clone()
+            metadata
         },
 
-        MpscReceiver::new(ReceiverFlavor::Bounded(receiver), id)
+        Receiver::new(ReceiverFlavor::Bounded(receiver), id)
     )
 }
 
-pub fn channel<T>() -> (MpscSender<T>, MpscReceiver<T>) {
+pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
     *ENV_LOGGER;
 
     let (sender, receiver) = mpsc::channel();
@@ -406,11 +412,11 @@ pub fn channel<T>() -> (MpscSender<T>, MpscReceiver<T>) {
     (
         
 
-        MpscSender {
+        Sender {
             sender: SenderFlavor::Unbounded(sender),
-            metadata: metadata.clone()
+            metadata
         },
 
-        MpscReceiver::new(ReceiverFlavor::Unbounded(receiver), id)
+        Receiver::new(ReceiverFlavor::Unbounded(receiver), id)
     )
 }
