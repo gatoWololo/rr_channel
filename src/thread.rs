@@ -241,7 +241,7 @@ impl Builder {
 mod tests {
     #[test]
     /// TODO Add random delays to increase amount of nondeterminism.
-    fn determinitic_ids() {
+    fn deterministic_ids() {
         use super::{get_det_id, spawn, DetThreadId};
         use std::thread::JoinHandle;
 
@@ -250,13 +250,13 @@ mod tests {
         for i in 0..4 {
             let h1 = spawn(move || {
                 let a = [i];
-                assert_eq!(DetThreadId::from(&a[..]), get_det_id());
+                assert_eq!(DetThreadId::from(&a[..]), get_det_id().unwrap());
 
                 let mut v2 = vec![];
                 for j in 0..4 {
                     let h2 = spawn(move || {
                         let a = [i, j];
-                        assert_eq!(DetThreadId::from(&a[..]), get_det_id());
+                        assert_eq!(DetThreadId::from(&a[..]), get_det_id().unwrap());
                     });
                     v2.push(h2);
                 }

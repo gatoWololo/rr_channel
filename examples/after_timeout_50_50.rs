@@ -1,3 +1,6 @@
+//The test first creates a channel. Then, there is 50/50 chance that the channel
+//sleeps, which will cause the test to time out at the end.
+
 use rand::thread_rng;
 use rand::Rng;
 use rr_channel::{after, thread, unbounded};

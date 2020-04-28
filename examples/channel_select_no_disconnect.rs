@@ -1,3 +1,5 @@
+//The channels will not disconnect because they are cloned.
+
 use rr_channel::thread;
 
 fn main() {
