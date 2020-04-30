@@ -1,19 +1,18 @@
-use std::time::Duration;
+use crate::channel::ChannelVariant;
+use crate::log_rr;
 use crate::rr::mark_program_as_desynced;
 use crate::rr::program_desyned;
-use crate::channel::ChannelVariant;
-use crate::rr::{self, get_log_entry, ChannelLabel, RecordedEvent,
-                           SelectEvent, get_log_entry_ret, DesyncError,
-                           DetChannelId, sleep_until_desync};
-use crate::thread::{get_det_id, get_det_id_desync,
-                    get_event_id, inc_event_id, DetThreadId};
-use crate::{Receiver, RRMode, Sender, RECORD_MODE, DESYNC_MODE,
-            DesyncMode};
+use crate::rr::{
+    self, get_log_entry, get_log_entry_ret, sleep_until_desync, ChannelLabel, DesyncError,
+    DetChannelId, RecordedEvent, SelectEvent,
+};
+use crate::thread::{get_det_id, get_det_id_desync, get_event_id, inc_event_id, DetThreadId};
+use crate::{DesyncMode, RRMode, Receiver, Sender, DESYNC_MODE, RECORD_MODE};
 use crossbeam_channel::{RecvError, SendError};
+use log::Level::*;
 use std::collections::HashMap;
 use std::thread;
-use crate::log_rr;
-use log::Level::*;
+use std::time::Duration;
 
 /// Our Select wrapper type must hold different types of Receivet<T>. We use this trait
 /// so we can hold different T's via a dynamic trait object.
@@ -29,7 +28,7 @@ impl<T> BufferedReceiver for Receiver<T> {
     fn buffered_value(&self) -> bool {
         let hashmap = self.buffer.borrow();
         for queue in hashmap.values() {
-            if ! queue.is_empty() {
+            if !queue.is_empty() {
                 return true;
             }
         }
@@ -57,7 +56,7 @@ impl<'a> Select<'a> {
         Select {
             mode,
             selector: crossbeam_channel::Select::new(),
-            receivers: HashMap::new()
+            receivers: HashMap::new(),
         }
     }
 
@@ -82,7 +81,10 @@ impl<'a> Select<'a> {
             ChannelVariant::Never(r) => self.selector.recv(&r),
         };
         if let Some(v) = self.receivers.insert(index, r) {
-            panic!("Entry already exists at {:?} This should be impossible.", index);
+            panic!(
+                "Entry already exists at {:?} This should be impossible.",
+                index
+            );
         }
         index
     }
@@ -138,11 +140,13 @@ impl<'a> Select<'a> {
         match self.mode {
             RRMode::Record => {
                 let select_index = self.selector.ready();
-                rr::log(RecordedEvent::SelectReady { select_index },
-                                   ChannelLabel::None,
-                                   "ready",
-                                   // Ehh, we fake it here. We never check this value anyways.
-                                   &DetChannelId::fake());
+                rr::log(
+                    RecordedEvent::SelectReady { select_index },
+                    ChannelLabel::None,
+                    "ready",
+                    // Ehh, we fake it here. We never check this value anyways.
+                    &DetChannelId::fake(),
+                );
                 Ok(select_index)
             }
             RRMode::Replay => {
@@ -153,7 +157,7 @@ impl<'a> Select<'a> {
                 match event {
                     RecordedEvent::SelectReady { select_index } => Ok(*select_index),
                     event => {
-                        let dummy = RecordedEvent::SelectReady{ select_index: 0 };
+                        let dummy = RecordedEvent::SelectReady { select_index: 0 };
                         Err(DesyncError::EventMismatch(event.clone(), dummy))
                     }
                 }
@@ -182,7 +186,7 @@ impl<'a> Select<'a> {
 
                 // Here we put this thread to sleep if the entry is missing.
                 // On record, the thread never returned from blocking...
-                if let Err(e@DesyncError::NoEntryInLog(_, _)) = entry {
+                if let Err(e @ DesyncError::NoEntryInLog(_, _)) = entry {
                     log_rr!(Info, "Saw {:?}. Putting thread to sleep.", e);
                     sleep_until_desync();
                     // Thread woke back up... desynced!
@@ -195,11 +199,18 @@ impl<'a> Select<'a> {
                         // Verify the receiver has the entry. We check now, since
                         // once we return the SelectedOperation it is too late if it turns
                         // out the message is not there => "unrecoverable error".
-                        if let SelectEvent::Success { selected_index, sender_thread } = event {
-                            log_rr!(Debug, "Polling select receiver to see if message is there...");
+                        if let SelectEvent::Success {
+                            selected_index,
+                            sender_thread,
+                        } = event
+                        {
+                            log_rr!(
+                                Debug,
+                                "Polling select receiver to see if message is there..."
+                            );
                             match self.receivers.get(selected_index) {
                                 Some(receiver) => {
-                                    if !receiver.poll(sender_thread, Duration::from_secs(1)){
+                                    if !receiver.poll(sender_thread, Duration::from_secs(1)) {
                                         log_rr!(Debug, "No such message found via polling.");
                                         // We failed to find the message we were expecting
                                         // this is a desynchonization.
@@ -218,15 +229,18 @@ impl<'a> Select<'a> {
                         Ok(SelectedOperation::Replay(event, *flavor, chan_id.clone()))
                     }
                     e => {
-                        let dummy = SelectEvent::Success { sender_thread: None,
-                                                           selected_index: (0 - 1) as usize};
-                        Err(DesyncError::EventMismatch(e.clone(), RecordedEvent::Select(dummy)))
+                        let dummy = SelectEvent::Success {
+                            sender_thread: None,
+                            selected_index: (0 - 1) as usize,
+                        };
+                        Err(DesyncError::EventMismatch(
+                            e.clone(),
+                            RecordedEvent::Select(dummy),
+                        ))
                     }
                 }
             }
-            RRMode::NoRR => {
-                Ok(SelectedOperation::NoRR(self.selector.select()))
-            }
+            RRMode::NoRR => Ok(SelectedOperation::NoRR(self.selector.select())),
         }
     }
 }
@@ -264,11 +278,9 @@ impl<'a> SelectedOperation<'a> {
             | SelectedOperation::Replay(SelectEvent::RecvError { selected_index, .. }, _, _) => {
                 *selected_index
             }
-            SelectedOperation::Record(selected) |
-            SelectedOperation::NoRR(selected)   |
-            SelectedOperation::Desync(selected) => {
-                selected.index()
-            }
+            SelectedOperation::Record(selected)
+            | SelectedOperation::NoRR(selected)
+            | SelectedOperation::Desync(selected) => selected.index(),
         }
     }
 
@@ -305,15 +317,20 @@ impl<'a> SelectedOperation<'a> {
                 // event. We cannot do this event preemptively as crossbeam will panic!()
                 // if we do select() but do not finish it by doing recv() on the selected
                 // operation. This should not really happen. So I think we're okay.
-                log_rr!(Error, "SelectedOperation: Unrecoverable desynchonization: {:?}",
-                        error);
-                panic!("SelectedOperation: Unrecoverable desynchonization: {:?}", error);
+                log_rr!(
+                    Error,
+                    "SelectedOperation: Unrecoverable desynchonization: {:?}",
+                    error
+                );
+                panic!(
+                    "SelectedOperation: Unrecoverable desynchonization: {:?}",
+                    error
+                );
             }
         }
     }
 
-    pub fn rr_select_recv<T>(self, r: &Receiver<T>)
-                                        -> Result<Result<T, RecvError>, DesyncError> {
+    pub fn rr_select_recv<T>(self, r: &Receiver<T>) -> Result<Result<T, RecvError>, DesyncError> {
         // Do not add check for program_desynced() here! This type of desync
         // is fatal. It is better to make sure it just doesn't happen.
         // See recv() above for more information.
@@ -323,8 +340,9 @@ impl<'a> SelectedOperation<'a> {
             SelectedOperation::DesyncBufferEntry(index) => {
                 log_rr!(Debug, "SelectedOperation::DesyncBufferEntry");
                 inc_event_id();
-                Ok(Ok(r.get_buffered_value().
-                    expect("Expected buffer value to be there. This is a bug.")))
+                Ok(Ok(r.get_buffered_value().expect(
+                    "Expected buffer value to be there. This is a bug.",
+                )))
             }
             SelectedOperation::Desync(selected) => {
                 log_rr!(Debug, "SelectedOperation::Desync");
@@ -337,18 +355,22 @@ impl<'a> SelectedOperation<'a> {
 
                 let (msg, select_event) = match SelectedOperation::do_recv(selected, r) {
                     // Read value, log information needed for replay later.
-                    Ok((sender_thread, msg)) => {
-                        (Ok(msg), SelectEvent::Success { sender_thread, selected_index })
-                    }
+                    Ok((sender_thread, msg)) => (
+                        Ok(msg),
+                        SelectEvent::Success {
+                            sender_thread,
+                            selected_index,
+                        },
+                    ),
                     // Err(e) on the RHS is not the same type as Err(e) LHS.
-                    Err(e) => {
-                        (Err(e), SelectEvent::RecvError { selected_index })
-                    }
+                    Err(e) => (Err(e), SelectEvent::RecvError { selected_index }),
                 };
-                rr::log(RecordedEvent::Select(select_event),
-                                   r.flavor(),
-                                   &r.metadata.type_name,
-                                   &r.metadata.id);
+                rr::log(
+                    RecordedEvent::Select(select_event),
+                    r.flavor(),
+                    &r.metadata.type_name,
+                    &r.metadata.id,
+                );
                 Ok(msg)
             }
             // We do not use the select API at all on replays. Wait for correct
@@ -386,16 +408,17 @@ impl<'a> SelectedOperation<'a> {
     }
 
     // Our channel flavors return slightly different values. Consolidate that here.
-    fn do_recv<T>(selected: crossbeam_channel::SelectedOperation<'a>,
-                  r: &Receiver<T>)
-                  -> Result<(Option<DetThreadId>, T), RecvError>{
+    fn do_recv<T>(
+        selected: crossbeam_channel::SelectedOperation<'a>,
+        r: &Receiver<T>,
+    ) -> Result<(Option<DetThreadId>, T), RecvError> {
         match &r.receiver {
             ChannelVariant::After(receiver) => {
                 selected.recv(receiver).map(|msg| (get_det_id(), msg))
             }
             ChannelVariant::Bounded(receiver)
-                | ChannelVariant::Unbounded(receiver)
-                | ChannelVariant::Never(receiver) => selected.recv(receiver)
+            | ChannelVariant::Unbounded(receiver)
+            | ChannelVariant::Never(receiver) => selected.recv(receiver),
         }
     }
 }

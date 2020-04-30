@@ -1,4 +1,4 @@
-use rr_channel::{thread, mpsc};
+use rr_channel::{mpsc, thread};
 
 /// Send messages with the possibility to disconnect.
 fn main() {
@@ -21,10 +21,10 @@ fn main() {
     });
 
     for _ in 0..60 {
-        if let Ok(res) = r1.recv() { 
+        if let Ok(res) = r1.recv() {
             println!("Received message s1 -> r1: {:?}", res);
         }
-        if let Ok(res) = r2.recv() { 
+        if let Ok(res) = r2.recv() {
             println!("Received message s2 -> r2: {:?}", res);
         }
     }

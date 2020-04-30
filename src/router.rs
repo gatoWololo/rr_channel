@@ -6,15 +6,15 @@
 // <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
-use log::Level::*;
+use crate::log_rr;
 use crate::thread::get_det_id;
 use crate::thread::set_det_id;
-use crate::thread::DetThreadId;
-use std::collections::HashMap;
-use std::sync::Mutex;
-use crate::log_rr;
 use crate::thread::start_forwading_id;
 use crate::thread::stop_forwarding_id;
+use crate::thread::DetThreadId;
+use log::Level::*;
+use std::collections::HashMap;
+use std::sync::Mutex;
 
 use crate::ipc::{
     self, IpcReceiver, IpcReceiverSet, IpcSelectionResult, IpcSender, OpaqueIpcMessage,
@@ -89,8 +89,12 @@ impl RouterProxy {
     ) where
         T: for<'de> Deserialize<'de> + Serialize + Send + 'static,
     {
-        log_rr!(Info, "Routing IpcReceiver<{:?}> to crossbeam_sender: {:?}",
-                ipc_receiver.metadata.id, crossbeam_sender.channel_id);
+        log_rr!(
+            Info,
+            "Routing IpcReceiver<{:?}> to crossbeam_sender: {:?}",
+            ipc_receiver.metadata.id,
+            crossbeam_sender.channel_id
+        );
         self.add_route(
             ipc_receiver,
             Box::new(move |message| drop(crossbeam_sender.send(message.unwrap()))),
@@ -109,7 +113,11 @@ impl RouterProxy {
         log_rr!(Info, "Routing IpcReceiver<{:?}>", ipc_receiver.metadata.id);
 
         let (crossbeam_sender, crossbeam_receiver) = crate::unbounded();
-        log_rr!(Info, "Created Channels<{:?} for routing.", crossbeam_receiver.metadata.id);
+        log_rr!(
+            Info,
+            "Created Channels<{:?} for routing.",
+            crossbeam_receiver.metadata.id
+        );
 
         self.route_ipc_receiver_to_crossbeam_sender(ipc_receiver, crossbeam_sender);
         crossbeam_receiver
@@ -151,12 +159,17 @@ impl Router {
             for result in results.into_iter() {
                 match result {
                     IpcSelectionResult::MessageReceived(id, _) if id == self.msg_wakeup_id => {
-                        match self.msg_receiver.recv().expect("rr_channel:: RouterProxy::run(): Unable to receive message.") {
+                        match self
+                            .msg_receiver
+                            .recv()
+                            .expect("rr_channel:: RouterProxy::run(): Unable to receive message.")
+                        {
                             RouterMsg::AddRoute(receiver, handler) => {
                                 let id = receiver.metadata.id.clone();
                                 let new_receiver_id =
-                                    self.ipc_receiver_set.add_opaque(receiver).
-                                    expect("rr_channel:: RouterProxy::run(): Could not add_opaque");
+                                    self.ipc_receiver_set.add_opaque(receiver).expect(
+                                        "rr_channel:: RouterProxy::run(): Could not add_opaque",
+                                    );
                                 self.handlers.insert(new_receiver_id, handler);
                                 // println!("Added receiver {:?} at {:?} for handler", id, new_receiver_id);
                             }

@@ -3,21 +3,22 @@ use lazy_static::lazy_static;
 use log::{debug, trace, warn};
 use serde::{Deserialize, Serialize};
 mod channel;
-pub mod mpsc;
 mod crossbeam_select;
 pub mod ipc;
-mod rr;
+pub mod mpsc;
 pub mod router;
+mod rr;
 mod select;
 pub mod thread;
 // Rexports.
 pub use channel::{after, bounded, never, unbounded, Receiver, Sender};
 pub use crossbeam_channel::{RecvError, RecvTimeoutError, TryRecvError};
-pub use rr::{LogEntry, RECORDED_INDICES, WRITE_LOG_FILE, DetChannelId};
+pub use rr::{DetChannelId, LogEntry, RECORDED_INDICES, WRITE_LOG_FILE};
 pub use select::{Select, SelectedOperation};
-pub use thread::{current, panicking, park, park_timeout, sleep, yield_now,
-                 get_det_id, get_event_id, inc_event_id, DetIdSpawner, DetThreadId,
-                 in_forwarding};
+pub use thread::{
+    current, get_det_id, get_event_id, in_forwarding, inc_event_id, panicking, park, park_timeout,
+    sleep, yield_now, DetIdSpawner, DetThreadId,
+};
 
 use log::Level::*;
 use std::env::var;

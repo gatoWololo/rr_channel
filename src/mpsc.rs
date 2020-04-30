@@ -1,24 +1,23 @@
 use std::sync::mpsc;
 // use std::sync::mpsc::{RecvError, SendError, RecvTimeoutError, TryRecvError};
 use crate::get_generic_name;
-use crate::rr::{self,  ChannelLabel, RecordedEvent,
-                           RecordMetadata, RecvRR, SendRR,
-                           DetChannelId, DesyncError, get_forward_id,
-                           RecvErrorRR};
+use crate::log_rr;
+use crate::rr::mark_program_as_desynced;
+use crate::rr::{
+    self, get_forward_id, ChannelLabel, DesyncError, DetChannelId, RecordMetadata, RecordedEvent,
+    RecvErrorRR, RecvRR, SendRR,
+};
 use crate::thread::get_and_inc_channel_id;
 use crate::thread::*;
-use crate::{RRMode, ENV_LOGGER, RECORD_MODE, DesyncMode, DESYNC_MODE};
+use crate::{DesyncMode, RRMode, DESYNC_MODE, ENV_LOGGER, RECORD_MODE};
 use log::Level::*;
-use crate::rr::mark_program_as_desynced;
 use std::cell::RefCell;
+use std::cell::RefMut;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::error::Error;
 use std::time::Duration;
 use std::time::Instant;
-use std::cell::RefMut;
-use crate::log_rr;
-
 
 #[derive(Debug)]
 pub struct Sender<T> {
@@ -47,17 +46,15 @@ macro_rules! impl_RR {
                 event: Result<(Option<DetThreadId>, T), $err_type>,
             ) -> (Result<T, $err_type>, RecordedEvent) {
                 match event {
-                    Ok((sender_thread, msg)) => {
-                        (Ok(msg), RecordedEvent::$succ { sender_thread })
-                    }
-                    Err(e) => {
-                        (Err(e), RecordedEvent::$err(e))
-                    }
+                    Ok((sender_thread, msg)) => (Ok(msg), RecordedEvent::$succ { sender_thread }),
+                    Err(e) => (Err(e), RecordedEvent::$err(e)),
                 }
             }
 
-            fn expected_recorded_events(&self, event: RecordedEvent)
-                                        -> Result<Result<T, $err_type>, DesyncError> {
+            fn expected_recorded_events(
+                &self,
+                event: RecordedEvent,
+            ) -> Result<Result<T, $err_type>, DesyncError> {
                 match event {
                     RecordedEvent::$succ { sender_thread } => {
                         let retval = self.replay_recv(&sender_thread)?;
@@ -66,13 +63,19 @@ macro_rules! impl_RR {
                         Ok(Ok(retval))
                     }
                     RecordedEvent::$err(e) => {
-                        log_rr!(Trace, "Creating error event for: {:?}", RecordedEvent::$err(e));
+                        log_rr!(
+                            Trace,
+                            "Creating error event for: {:?}",
+                            RecordedEvent::$err(e)
+                        );
                         // Here is where we explictly increment our event_id!
                         inc_event_id();
                         Ok(Err(e))
                     }
                     e => {
-                        let mock_event = RecordedEvent::$succ { sender_thread: None };
+                        let mock_event = RecordedEvent::$succ {
+                            sender_thread: None,
+                        };
                         Err(DesyncError::EventMismatch(e, mock_event))
                     }
                 }
@@ -87,7 +90,11 @@ macro_rules! impl_RR {
 
 impl_RR!(mpsc::RecvError, MpscRecvSucc, MpscRecvErr);
 impl_RR!(mpsc::TryRecvError, MpscTryRecvSucc, MpscTryRecvErr);
-impl_RR!(mpsc::RecvTimeoutError, MpscRecvTimeoutSucc, MpscRecvTimeoutErr);
+impl_RR!(
+    mpsc::RecvTimeoutError,
+    MpscRecvTimeoutSucc,
+    MpscRecvTimeoutErr
+);
 
 #[derive(Debug)]
 pub struct Receiver<T> {
@@ -114,11 +121,10 @@ impl<T> Receiver<T> {
     pub(crate) fn replay_recv(&self, sender: &Option<DetThreadId>) -> Result<T, DesyncError> {
         let timeout = Duration::from_secs(1);
         let rr_recv_timeout = || {
-            self.receiver.recv_timeout(timeout).
-                map_err(|e| match e {
-                    mpsc::RecvTimeoutError::Timeout => RecvErrorRR::Timeout,
-                    mpsc::RecvTimeoutError::Disconnected => RecvErrorRR::Disconnected,
-                })
+            self.receiver.recv_timeout(timeout).map_err(|e| match e {
+                mpsc::RecvTimeoutError::Timeout => RecvErrorRR::Timeout,
+                mpsc::RecvTimeoutError::Disconnected => RecvErrorRR::Disconnected,
+            })
         };
 
         rr::recv_from_sender(
@@ -130,22 +136,20 @@ impl<T> Receiver<T> {
     }
 
     pub fn recv(&self) -> Result<T, mpsc::RecvError> {
-        self.rr_recv(self.metadata(),
-                     || self.receiver.recv(),
-                     "channel::recv()").
-            unwrap_or_else(|e| self.handle_desync(e, true, || self.receiver.recv()))
+        self.rr_recv(self.metadata(), || self.receiver.recv(), "channel::recv()")
+            .unwrap_or_else(|e| self.handle_desync(e, true, || self.receiver.recv()))
     }
 
     pub fn try_recv(&self) -> Result<T, mpsc::TryRecvError> {
         let f = || self.receiver.try_recv();
-        self.rr_recv(self.metadata(), f, "channel::try_recv()").
-            unwrap_or_else(|e| self.handle_desync(e, false, f))
+        self.rr_recv(self.metadata(), f, "channel::try_recv()")
+            .unwrap_or_else(|e| self.handle_desync(e, false, f))
     }
 
     pub fn recv_timeout(&self, timeout: Duration) -> Result<T, mpsc::RecvTimeoutError> {
         let f = || self.receiver.recv_timeout(timeout);
-        self.rr_recv(self.metadata(), f, "channel::recv_timeout()").
-            unwrap_or_else(|e| self.handle_desync(e, false, f))
+        self.rr_recv(self.metadata(), f, "channel::recv_timeout()")
+            .unwrap_or_else(|e| self.handle_desync(e, false, f))
     }
 
     pub fn metadata(&self) -> &RecordMetadata {
@@ -170,7 +174,7 @@ macro_rules! generate_receiver_method {
                 }
             }
         }
-    }
+    };
 }
 
 impl<T> ReceiverFlavor<T> {
@@ -183,10 +187,11 @@ impl<T> ReceiverFlavor<T> {
     ) -> Result<(Option<DetThreadId>, T), mpsc::RecvTimeoutError> {
         // TODO(edumenyo)
         match self {
-            ReceiverFlavor::Bounded(receiver) |
-            ReceiverFlavor::Unbounded(receiver) => match receiver.recv_timeout(duration) {
-                Ok(msg) => Ok(msg),
-                e => e,
+            ReceiverFlavor::Bounded(receiver) | ReceiverFlavor::Unbounded(receiver) => {
+                match receiver.recv_timeout(duration) {
+                    Ok(msg) => Ok(msg),
+                    e => e,
+                }
             }
         }
     }
@@ -210,8 +215,7 @@ impl<T> Sender<T> {
             Err((error, msg)) => {
                 log_rr!(Warn, "Desynchronization detected: {:?}", error);
                 match *DESYNC_MODE {
-                    DesyncMode::Panic =>
-                        panic!("Send::Desynchronization detected: {:?}", error),
+                    DesyncMode::Panic => panic!("Send::Desynchronization detected: {:?}", error),
                     // TODO: One day we may want to record this alternate execution.
                     DesyncMode::KeepGoing => {
                         mark_program_as_desynced();
@@ -228,14 +232,19 @@ impl<T> Sender<T> {
     }
 }
 
-impl<T> Clone for Sender<T> where T: Clone {
+impl<T> Clone for Sender<T>
+where
+    T: Clone,
+{
     fn clone(&self) -> Self {
         // following implementation for crossbeam, we do not support MPSC for bounded channels as the blocking semantics are
         // more complicated to implement.
         if self.metadata.flavor == ChannelLabel::MpscBounded {
-            log_rr!(Warn,
-                    "MPSC for bounded channels not supported. Blocking semantics \
-                     of bounded channels will not be preseved!");
+            log_rr!(
+                Warn,
+                "MPSC for bounded channels not supported. Blocking semantics \
+                     of bounded channels will not be preseved!"
+            );
         }
         Sender {
             sender: self.sender.clone(),
@@ -266,7 +275,7 @@ macro_rules! generate_try_send {
         //         sender.try_send(t);
         //     }
         // }
-    }
+    };
 }
 
 impl<T> SenderFlavor<T> {
@@ -277,18 +286,14 @@ impl<T> SenderFlavor<T> {
         // unimplemented!();
 
         match self {
-            Self::Bounded(sender) => {
-                sender.send(t).map_err(|e| {
-                    let msg : (Option<DetThreadId>, T) = e.0;
-                    mpsc::SendError(msg.1)
-                })
-            },
-            Self::Unbounded(sender) => {
-                sender.send(t).map_err(|e| {
-                    let msg : (Option<DetThreadId>, T) = e.0;
-                    mpsc::SendError(msg.1)
-                })
-            }
+            Self::Bounded(sender) => sender.send(t).map_err(|e| {
+                let msg: (Option<DetThreadId>, T) = e.0;
+                mpsc::SendError(msg.1)
+            }),
+            Self::Unbounded(sender) => sender.send(t).map_err(|e| {
+                let msg: (Option<DetThreadId>, T) = e.0;
+                mpsc::SendError(msg.1)
+            }),
         }
     }
 }
@@ -318,7 +323,12 @@ pub fn sync_channel<T>(bound: usize) -> (Sender<T>, Receiver<T>) {
     let type_name = get_generic_name::<T>();
     let id = DetChannelId::new();
 
-    log_rr!(Info, "Bounded mpsc channel created: {:?} {:?}", id, type_name);
+    log_rr!(
+        Info,
+        "Bounded mpsc channel created: {:?} {:?}",
+        id,
+        type_name
+    );
     let metadata = RecordMetadata {
         type_name: type_name.to_string(),
         flavor: channel_type,
@@ -326,13 +336,11 @@ pub fn sync_channel<T>(bound: usize) -> (Sender<T>, Receiver<T>) {
         id: id.clone(),
     };
     (
-
         Sender {
             sender: SenderFlavor::Bounded(sender),
-            metadata
+            metadata,
         },
-
-        Receiver::new(ReceiverFlavor::Bounded(receiver), id)
+        Receiver::new(ReceiverFlavor::Bounded(receiver), id),
     )
 }
 
@@ -345,7 +353,12 @@ pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
     let type_name = get_generic_name::<T>();
     let id = DetChannelId::new();
 
-    log_rr!(Info, "Unbounded mpsc channel created: {:?} {:?}", id, type_name);
+    log_rr!(
+        Info,
+        "Unbounded mpsc channel created: {:?} {:?}",
+        id,
+        type_name
+    );
     let metadata = RecordMetadata {
         type_name: type_name.to_string(),
         flavor: channel_type,
@@ -353,13 +366,10 @@ pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
         id: id.clone(),
     };
     (
-
-
         Sender {
             sender: SenderFlavor::Unbounded(sender),
-            metadata
+            metadata,
         },
-
-        Receiver::new(ReceiverFlavor::Unbounded(receiver), id)
+        Receiver::new(ReceiverFlavor::Unbounded(receiver), id),
     )
 }

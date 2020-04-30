@@ -1,5 +1,5 @@
 //The test creates two channels. The first channel is bounded with sieze 1. Channel 1 will continously return
-//Thread 1 because its capacity is full. Channel 2 will not return anything because it has unbounded 
+//Thread 1 because its capacity is full. Channel 2 will not return anything because it has unbounded
 //capacity.
 
 use rr_channel::thread;

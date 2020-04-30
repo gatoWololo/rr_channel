@@ -1,4 +1,4 @@
-//The test creates two channels. The first and the second rr channels are both waiting 
+//The test creates two channels. The first and the second rr channels are both waiting
 //for the first event to occur, thus they are blocking the thread.
 
 use rr_channel;

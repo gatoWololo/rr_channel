@@ -6,21 +6,21 @@ use crate::RECORD_MODE;
 use lazy_static::lazy_static;
 use std::fs::remove_file;
 use std::fs::File;
-use std::sync::{Mutex, Condvar, Arc};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 
-use crate::{DESYNC_MODE, DesyncMode, LOG_FILE_NAME};
 use crate::log_rr;
-use log::Level::*;
 use crate::thread::get_det_id;
 use crate::thread::get_event_id;
 use crate::thread::get_temp_det_id;
-use crate::thread::{inc_event_id , get_and_inc_channel_id, in_forwarding};
+use crate::thread::{get_and_inc_channel_id, in_forwarding, inc_event_id};
+use crate::{DesyncMode, DESYNC_MODE, LOG_FILE_NAME};
 use crossbeam_channel::{RecvError, RecvTimeoutError, TryRecvError};
-use std::sync::mpsc;
+use log::Level::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::BufRead;
+use std::sync::mpsc;
 
 use std::cell::RefMut;
 use std::collections::VecDeque;
@@ -224,7 +224,7 @@ pub(crate) fn program_desyned() -> bool {
 }
 
 pub(crate) fn mark_program_as_desynced() {
-    if ! DESYNC.load(Ordering::SeqCst) {
+    if !DESYNC.load(Ordering::SeqCst) {
         log_rr!(Warn, "Program marked as desynced!");
         DESYNC.store(true, Ordering::SeqCst);
         wake_up_threads();
@@ -348,7 +348,12 @@ pub fn log(event: RecordedEvent, channel: ChannelLabel, type_name: &str, chan_id
         .write_fmt(format_args!("{}\n", serialized))
         .expect("Unable to write to log file.");
 
-    log_rr!(Info, "{:?} Logged entry: {:?}", entry, (get_det_id(), event_id));
+    log_rr!(
+        Info,
+        "{:?} Logged entry: {:?}",
+        entry,
+        (get_det_id(), event_id)
+    );
     inc_event_id();
 }
 
@@ -358,23 +363,32 @@ fn get_log_entry_do<'a>(
     our_thread: DetThreadId,
     event_id: EventId,
     curr_flavor: Option<&ChannelLabel>,
-    curr_id: Option<&DetChannelId>)
-    -> Result<(&'a RecordedEvent, &'a ChannelLabel, &'a DetChannelId), DesyncError> {
-
+    curr_id: Option<&DetChannelId>,
+) -> Result<(&'a RecordedEvent, &'a ChannelLabel, &'a DetChannelId), DesyncError> {
     let key = (our_thread, event_id);
     match RECORDED_INDICES.get(&key) {
         Some((recorded, log_flavor, log_id)) => {
-            log_rr!(Debug, "Event fetched: {:?} for keys: {:?}",
-                    (recorded, log_flavor, log_id), key);
+            log_rr!(
+                Debug,
+                "Event fetched: {:?} for keys: {:?}",
+                (recorded, log_flavor, log_id),
+                key
+            );
 
             if let Some(curr_flavor) = curr_flavor {
                 if log_flavor != curr_flavor {
-                    return Err(DesyncError::ChannelVariantMismatch(*log_flavor, *curr_flavor));
+                    return Err(DesyncError::ChannelVariantMismatch(
+                        *log_flavor,
+                        *curr_flavor,
+                    ));
                 }
             }
             if let Some(curr_id) = curr_id {
                 if log_id != curr_id {
-                    return Err(DesyncError::ChannelMismatch(log_id.clone(), curr_id.clone()));
+                    return Err(DesyncError::ChannelMismatch(
+                        log_id.clone(),
+                        curr_id.clone(),
+                    ));
                 }
             }
             Ok((recorded, log_flavor, log_id))
@@ -385,27 +399,30 @@ fn get_log_entry_do<'a>(
 
 /// Get log entry and compare `curr_flavor` and `curr_id` with the values
 /// on the record.
-pub fn get_log_entry_with<'a>(our_thread: DetThreadId,
-                              event_id: EventId,
-                              curr_flavor: &ChannelLabel,
-                              curr_id: &DetChannelId)
-                              -> Result<&'a RecordedEvent, DesyncError> {
-    get_log_entry_do(our_thread, event_id, Some(curr_flavor), Some(curr_id)).
-        map(|(r, _, _)| r)
+pub fn get_log_entry_with<'a>(
+    our_thread: DetThreadId,
+    event_id: EventId,
+    curr_flavor: &ChannelLabel,
+    curr_id: &DetChannelId,
+) -> Result<&'a RecordedEvent, DesyncError> {
+    get_log_entry_do(our_thread, event_id, Some(curr_flavor), Some(curr_id)).map(|(r, _, _)| r)
 }
 
 /// Get log entry with no comparison.
-pub fn get_log_entry<'a>(our_thread: DetThreadId,
-                         event_id: EventId) -> Result<&'a RecordedEvent, DesyncError> {
+pub fn get_log_entry<'a>(
+    our_thread: DetThreadId,
+    event_id: EventId,
+) -> Result<&'a RecordedEvent, DesyncError> {
     get_log_entry_do(our_thread, event_id, None, None).map(|(r, _, _)| r)
 }
 
 /// Get log entry returning the record, flavor, and channel id if needed.
-pub fn get_log_entry_ret<'a>(our_thread: DetThreadId, event_id: EventId)
-                             -> Result<(&'a RecordedEvent, &'a ChannelLabel, &'a DetChannelId),
-                                       DesyncError> {
-                                 get_log_entry_do(our_thread, event_id, None, None)
-                             }
+pub fn get_log_entry_ret<'a>(
+    our_thread: DetThreadId,
+    event_id: EventId,
+) -> Result<(&'a RecordedEvent, &'a ChannelLabel, &'a DetChannelId), DesyncError> {
+    get_log_entry_do(our_thread, event_id, None, None)
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub struct DetChannelId {
@@ -464,30 +481,34 @@ pub trait RecvRR<T, E: Error> {
         log_rr!(Debug, "Receiver<{:?}>::{}", metadata.id, function_name);
 
         match metadata.mode {
-            RRMode::Record => {;
-                               let (result, recorded) = self.to_recorded_event(recv());
-                               rr::log(recorded, metadata.flavor,
-                                       &metadata.type_name, &metadata.id);
-                               Ok(result)
+            RRMode::Record => {
+                let (result, recorded) = self.to_recorded_event(recv());
+                rr::log(recorded, metadata.flavor, &metadata.type_name, &metadata.id);
+                Ok(result)
             }
             RRMode::Replay => {
                 match get_det_id() {
                     None => {
-                        log_rr!(Warn, "DetThreadId was None. \
-                                       This execution may not be deterministic.");
+                        log_rr!(
+                            Warn,
+                            "DetThreadId was None. \
+                                       This execution may not be deterministic."
+                        );
                         inc_event_id();
                         // TODO: This seems wrong. I think we should be doing
                         // a replay_recv() here even if the det_id is none.
                         Ok(recv().map(|v| v.1))
                     }
                     Some(det_id) => {
-                        let entry = get_log_entry_with(det_id,
-                                                       get_event_id(),
-                                                       &metadata.flavor,
-                                                       &metadata.id);
+                        let entry = get_log_entry_with(
+                            det_id,
+                            get_event_id(),
+                            &metadata.flavor,
+                            &metadata.id,
+                        );
 
                         // Special case for NoEntryInLog. Hang this thread forever.
-                        if let Err(e@DesyncError::NoEntryInLog(_, _)) = entry {
+                        if let Err(e @ DesyncError::NoEntryInLog(_, _)) = entry {
                             log_rr!(Info, "Saw {:?}. Putting thread to sleep.", e);
                             sleep_until_desync();
                             // Thread woke back up... desynced!
@@ -503,11 +524,12 @@ pub trait RecvRR<T, E: Error> {
     }
 
     /// Handles desynchronization events based on global DESYNC_MODE.
-    fn handle_desync(&self,
-                     desync: DesyncError,
-                     can_block: bool,
-                     do_recv: impl Fn() -> Result<(Option<DetThreadId>, T), E>)
-                     -> Result<T, E> {
+    fn handle_desync(
+        &self,
+        desync: DesyncError,
+        can_block: bool,
+        do_recv: impl Fn() -> Result<(Option<DetThreadId>, T), E>,
+    ) -> Result<T, E> {
         log_rr!(Warn, "Desynchonization found: {:?}", desync);
 
         match *DESYNC_MODE {
@@ -522,9 +544,10 @@ pub trait RecvRR<T, E: Error> {
         }
     }
 
-    fn desync_get_next_entry(&self,
-                             do_recv: &impl Fn() -> Result<(Option<DetThreadId>, T), E>)
-                             -> Result<T, E> {
+    fn desync_get_next_entry(
+        &self,
+        do_recv: &impl Fn() -> Result<(Option<DetThreadId>, T), E>,
+    ) -> Result<T, E> {
         // Try using entry from buffer before recv()-ing directly from
         // receiver. We don't care who the expected sender was. Any
         // value will do.
@@ -539,8 +562,10 @@ pub trait RecvRR<T, E: Error> {
 
     fn get_buffer(&self) -> RefMut<HashMap<Option<DetThreadId>, VecDeque<T>>>;
 
-    fn to_recorded_event(&self, event: Result<(Option<DetThreadId>, T), E>)
-                         -> (Result<T, E>, RecordedEvent);
+    fn to_recorded_event(
+        &self,
+        event: Result<(Option<DetThreadId>, T), E>,
+    ) -> (Result<T, E>, RecordedEvent);
 
     fn expected_recorded_events(&self, event: RecordedEvent) -> Result<Result<T, E>, DesyncError>;
 }
@@ -567,7 +592,6 @@ pub(crate) trait SendRR<T, E> {
         flavor: &ChannelLabel,
         sender_name: &str,
     ) -> Result<Result<(), E>, (DesyncError, T)> {
-
         if program_desyned() {
             return Err((DesyncError::Desynchronized, msg));
         }
@@ -576,8 +600,14 @@ pub(crate) trait SendRR<T, E> {
         // thread's DetThreadId. Otherwise we will have "repeated" entries in the log
         // which look like they're coming from the same thread.
         let forwading_id = get_forward_id();
-        log_rr!(Info, "{}<{:?}>::send(({:?}, {:?}))",
-                sender_name, id, forwading_id, type_name);
+        log_rr!(
+            Info,
+            "{}<{:?}>::send(({:?}, {:?}))",
+            sender_name,
+            id,
+            forwading_id,
+            type_name
+        );
 
         match mode {
             RRMode::Record => {
@@ -594,7 +624,7 @@ pub(crate) trait SendRR<T, E> {
                     // crossbeam_channel::send() does pretty much the same thing.
                     match rr::get_log_entry_with(det_id, get_event_id(), flavor, id) {
                         // Special case for NoEntryInLog. Hang this thread forever.
-                        Err(e@DesyncError::NoEntryInLog(_, _)) => {
+                        Err(e @ DesyncError::NoEntryInLog(_, _)) => {
                             log_rr!(Info, "Saw {:?}. Putting thread to sleep.", e);
                             sleep_until_desync();
                             // Thread woke back up... desynced!
@@ -609,16 +639,17 @@ pub(crate) trait SendRR<T, E> {
                         }
                     }
                 } else {
-                    log_rr!(Warn, "det_id is None. This execution may be nondeterministic");
+                    log_rr!(
+                        Warn,
+                        "det_id is None. This execution may be nondeterministic"
+                    );
                 }
 
                 let result = SendRR::send(self, forwading_id, msg);
                 inc_event_id();
                 Ok(result)
             }
-            RRMode::NoRR => {
-                Ok(self.send(get_det_id(), msg))
-            }
+            RRMode::NoRR => Ok(self.send(get_det_id(), msg)),
         }
     }
 
@@ -638,12 +669,20 @@ pub(crate) fn recv_from_sender<T>(
     buffer: &mut RefMut<HashMap<Option<DetThreadId>, VecDeque<T>>>,
     id: &DetChannelId,
 ) -> Result<T, DesyncError> {
-
-    log_rr!(Debug, "recv_from_sender(sender: {:?}, id: {:?}) ...", expected_sender, id);
+    log_rr!(
+        Debug,
+        "recv_from_sender(sender: {:?}, id: {:?}) ...",
+        expected_sender,
+        id
+    );
 
     // Check our buffer to see if this value is already here.
     if let Some(val) = buffer.get_mut(expected_sender).and_then(|e| e.pop_front()) {
-        log_rr!(Debug, "replay_recv(): Recv message found in buffer. Channel id: {:?}", id);
+        log_rr!(
+            Debug,
+            "replay_recv(): Recv message found in buffer. Channel id: {:?}",
+            id
+        );
         return Ok(val);
     }
 
@@ -658,7 +697,10 @@ pub(crate) fn recv_from_sender<T>(
             // Value did no match. Buffer it. Handles both `none_buffer` and
             // regular `buffer` case.
             log_rr!(Debug, "Wrong value found. Queing it for: {:?}", id);
-            buffer.entry(msg_sender).or_insert(VecDeque::new()).push_back(msg);
+            buffer
+                .entry(msg_sender)
+                .or_insert(VecDeque::new())
+                .push_back(msg);
         }
     }
 }
@@ -666,9 +708,12 @@ pub(crate) fn recv_from_sender<T>(
 /// Because of the router, we want to "forward" the original sender's DetThreadId
 /// sometimes.
 pub fn get_forward_id() -> Option<DetThreadId> {
-    if in_forwarding() { get_temp_det_id() } else { get_det_id() }
+    if in_forwarding() {
+        get_temp_det_id()
+    } else {
+        get_det_id()
+    }
 }
-
 
 #[test]
 fn condvar_test() {
