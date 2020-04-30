@@ -6,7 +6,7 @@ use crate::log_rr;
 use log::Level::*;
 pub use std::thread::{current, panicking, park, park_timeout, sleep, yield_now};
 // use backtrace::Backtrace;
-use crate::record_replay::{EventId, DesyncError};
+use crate::rr::{EventId, DesyncError};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 pub fn get_det_id() -> Option<DetThreadId> {

@@ -6,14 +6,14 @@ mod channel;
 pub mod mpsc;
 mod crossbeam_select;
 pub mod ipc;
-mod record_replay;
+mod rr;
 pub mod router;
 mod select;
 pub mod thread;
 // Rexports.
 pub use channel::{after, bounded, never, unbounded, Receiver, Sender};
 pub use crossbeam_channel::{RecvError, RecvTimeoutError, TryRecvError};
-pub use record_replay::{LogEntry, RECORDED_INDICES, WRITE_LOG_FILE, DetChannelId};
+pub use rr::{LogEntry, RECORDED_INDICES, WRITE_LOG_FILE, DetChannelId};
 pub use select::{Select, SelectedOperation};
 pub use thread::{current, panicking, park, park_timeout, sleep, yield_now,
                  get_det_id, get_event_id, inc_event_id, DetIdSpawner, DetThreadId,
@@ -24,7 +24,7 @@ use std::env::var;
 use std::env::VarError;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub enum RecordReplayMode {
+pub enum RRMode {
     Record,
     Replay,
     NoRR,
@@ -47,25 +47,25 @@ lazy_static! {
     };
 
     /// Record type. Initialized from environment variable RR_CHANNEL.
-    pub static ref RECORD_MODE: RecordReplayMode = {
+    pub static ref RECORD_MODE: RRMode = {
         log_rr!(Debug, "Initializing RECORD_MODE lazy static.");
 
         let mode = match var(RECORD_MODE_VAR) {
             Ok(value) => {
                 match value.as_str() {
-                    "record" => RecordReplayMode::Record,
-                    "replay" => RecordReplayMode::Replay,
-                    "noRR"   => RecordReplayMode::NoRR,
+                    "record" => RRMode::Record,
+                    "replay" => RRMode::Replay,
+                    "noRR"   => RRMode::NoRR,
                     e        => {
                         warn!("Unkown record and replay mode: {}. Assuming noRR.", e);
-                        RecordReplayMode::NoRR
+                        RRMode::NoRR
                     }
                 }
             }
-            Err(VarError::NotPresent) => RecordReplayMode::NoRR,
+            Err(VarError::NotPresent) => RRMode::NoRR,
             Err(e @ VarError::NotUnicode(_)) => {
                 warn!("RR_CHANNEL value is not valid unicode: {}, assuming noRR.", e);
-                RecordReplayMode::NoRR
+                RRMode::NoRR
             }
         };
 

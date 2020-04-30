@@ -1,13 +1,13 @@
 use std::time::Duration;
-use crate::record_replay::mark_program_as_desynced;
-use crate::record_replay::program_desyned;
-use crate::channel::Flavor;
-use crate::record_replay::{self, get_log_entry, FlavorMarker, Recorded,
+use crate::rr::mark_program_as_desynced;
+use crate::rr::program_desyned;
+use crate::channel::ChannelVariant;
+use crate::rr::{self, get_log_entry, ChannelLabel, RecordedEvent,
                            SelectEvent, get_log_entry_ret, DesyncError,
-                           DetChannelId, BlockingOp, sleep_until_desync};
+                           DetChannelId, sleep_until_desync};
 use crate::thread::{get_det_id, get_det_id_desync,
                     get_event_id, inc_event_id, DetThreadId};
-use crate::{Receiver, RecordReplayMode, Sender, RECORD_MODE, DESYNC_MODE,
+use crate::{Receiver, RRMode, Sender, RECORD_MODE, DESYNC_MODE,
             DesyncMode};
 use crossbeam_channel::{RecvError, SendError};
 use std::collections::HashMap;
@@ -15,6 +15,8 @@ use std::thread;
 use crate::log_rr;
 use log::Level::*;
 
+/// Our Select wrapper type must hold different types of Receivet<T>. We use this trait
+/// so we can hold different T's via a dynamic trait object.
 trait BufferedReceiver {
     /// Returns true if there is any buffered values in this receiver.
     fn buffered_value(&self) -> bool;
@@ -42,9 +44,9 @@ impl<T> BufferedReceiver for Receiver<T> {
 /// Wrapper type around crossbeam's Select.
 pub struct Select<'a> {
     selector: crossbeam_channel::Select<'a>,
-    mode: RecordReplayMode,
-    // Use existential to abstract over the `T` which may vary
-    // per receiver. We only care if it has entries anyways.
+    mode: RRMode,
+    // Use existential to abstract over the `T` which may vary per receiver. We only care
+    // if it has entries anyways, not the T contained within.
     receivers: HashMap<usize, &'a dyn BufferedReceiver>,
 }
 
@@ -75,9 +77,9 @@ impl<'a> Select<'a> {
         // We still register all receivers with selector, even on replay. As on
         // desynchonization we will have to select on the real selector.
         let index = match &r.receiver {
-            Flavor::After(r) => self.selector.recv(&r),
-            Flavor::Bounded(r) | Flavor::Unbounded(r) => self.selector.recv(&r),
-            Flavor::Never(r) => self.selector.recv(&r),
+            ChannelVariant::After(r) => self.selector.recv(&r),
+            ChannelVariant::Bounded(r) | ChannelVariant::Unbounded(r) => self.selector.recv(&r),
+            ChannelVariant::Never(r) => self.selector.recv(&r),
         };
         if let Some(v) = self.receivers.insert(index, r) {
             panic!("Entry already exists at {:?} This should be impossible.", index);
@@ -87,7 +89,7 @@ impl<'a> Select<'a> {
 
     pub fn select(&mut self) -> SelectedOperation<'a> {
         log_rr!(Info, "Select::select()");
-        self.record_replay_select().unwrap_or_else(|error| {
+        self.rr_select().unwrap_or_else(|error| {
             log_rr!(Warn, "Select: Desynchronization detected! {:?}", error);
 
             match *DESYNC_MODE {
@@ -116,7 +118,7 @@ impl<'a> Select<'a> {
 
     pub fn ready(&mut self) -> usize {
         log_rr!(Info, "Select::ready()");
-        self.record_replay_ready().unwrap_or_else(|error| {
+        self.rr_ready().unwrap_or_else(|error| {
             log_rr!(Warn, "Ready::Desynchronization found: {:?}", error);
             match *DESYNC_MODE {
                 DesyncMode::Panic => panic!("Desynchronization detected: {:?}", error),
@@ -129,53 +131,53 @@ impl<'a> Select<'a> {
         })
     }
 
-    fn record_replay_ready(&mut self) -> Result<usize, DesyncError> {
+    fn rr_ready(&mut self) -> Result<usize, DesyncError> {
         if program_desyned() {
             return Err(DesyncError::Desynchronized);
         }
         match self.mode {
-            RecordReplayMode::Record => {
+            RRMode::Record => {
                 let select_index = self.selector.ready();
-                record_replay::log(Recorded::SelectReady { select_index },
-                                   FlavorMarker::None,
+                rr::log(RecordedEvent::SelectReady { select_index },
+                                   ChannelLabel::None,
                                    "ready",
                                    // Ehh, we fake it here. We never check this value anyways.
                                    &DetChannelId::fake());
                 Ok(select_index)
             }
-            RecordReplayMode::Replay => {
+            RRMode::Replay => {
                 let det_id = get_det_id_desync()?;
                 let event = get_log_entry(det_id, get_event_id())?;
                 inc_event_id();
 
                 match event {
-                    Recorded::SelectReady { select_index } => Ok(*select_index),
+                    RecordedEvent::SelectReady { select_index } => Ok(*select_index),
                     event => {
-                        let dummy = Recorded::SelectReady{ select_index: 0 };
+                        let dummy = RecordedEvent::SelectReady{ select_index: 0 };
                         Err(DesyncError::EventMismatch(event.clone(), dummy))
                     }
                 }
             }
-            RecordReplayMode::NoRR => Ok(self.selector.ready()),
+            RRMode::NoRR => Ok(self.selector.ready()),
         }
     }
 
-    fn record_replay_select(&mut self) -> Result<SelectedOperation<'a>, DesyncError> {
+    fn rr_select(&mut self) -> Result<SelectedOperation<'a>, DesyncError> {
         if program_desyned() {
             return Err(DesyncError::Desynchronized);
         }
         match self.mode {
-            RecordReplayMode::Record => {
+            RRMode::Record => {
                 // We don't know the thread_id of sender until the select is complete
                 // when user call recv() on SelectedOperation. So do nothing here.
                 // Index will be recorded there.
                 Ok(SelectedOperation::Record(self.selector.select()))
             }
-            RecordReplayMode::Replay => {
+            RRMode::Replay => {
                 let det_id = get_det_id_desync()?;
 
                 // Query our log to see what index was selected!() during the replay phase.
-                // Flavor type not check on Select::select() but on Select::recv()
+                // ChannelVariant type not check on Select::select() but on Select::recv()
                 let entry = get_log_entry_ret(det_id, get_event_id());
 
                 // Here we put this thread to sleep if the entry is missing.
@@ -189,7 +191,7 @@ impl<'a> Select<'a> {
 
                 let (event, flavor, chan_id) = entry?;
                 match event {
-                    Recorded::Select(event) => {
+                    RecordedEvent::Select(event) => {
                         // Verify the receiver has the entry. We check now, since
                         // once we return the SelectedOperation it is too late if it turns
                         // out the message is not there => "unrecoverable error".
@@ -218,11 +220,11 @@ impl<'a> Select<'a> {
                     e => {
                         let dummy = SelectEvent::Success { sender_thread: None,
                                                            selected_index: (0 - 1) as usize};
-                        Err(DesyncError::EventMismatch(e.clone(), Recorded::Select(dummy)))
+                        Err(DesyncError::EventMismatch(e.clone(), RecordedEvent::Select(dummy)))
                     }
                 }
             }
-            RecordReplayMode::NoRR => {
+            RRMode::NoRR => {
                 Ok(SelectedOperation::NoRR(self.selector.select()))
             }
         }
@@ -230,7 +232,7 @@ impl<'a> Select<'a> {
 }
 
 pub enum SelectedOperation<'a> {
-    Replay(&'a SelectEvent, FlavorMarker, DetChannelId),
+    Replay(&'a SelectEvent, ChannelLabel, DetChannelId),
     /// Desynchonization happened and receiver still has buffered entries. Index
     /// of receiver has been returned to user.
     DesyncBufferEntry(usize),
@@ -293,7 +295,7 @@ impl<'a> SelectedOperation<'a> {
     pub fn recv<T>(self, r: &Receiver<T>) -> Result<T, RecvError> {
         log_rr!(Info, "SelectedOperation<{:?}>::recv()", r.metadata().id);
 
-        match self.record_replay_select_recv(r) {
+        match self.rr_select_recv(r) {
             Ok(v) => v,
             Err(error) => {
                 // This type of desynchronization cannot be recovered from.
@@ -310,10 +312,10 @@ impl<'a> SelectedOperation<'a> {
         }
     }
 
-    pub fn record_replay_select_recv<T>(self, r: &Receiver<T>)
+    pub fn rr_select_recv<T>(self, r: &Receiver<T>)
                                         -> Result<Result<T, RecvError>, DesyncError> {
         // Do not add check for program_desynced() here! This type of desync
-        // is fatal. It is better to make sure it just dones't happen.
+        // is fatal. It is better to make sure it just doesn't happen.
         // See recv() above for more information.
 
         let selected_index = self.index();
@@ -343,7 +345,7 @@ impl<'a> SelectedOperation<'a> {
                         (Err(e), SelectEvent::RecvError { selected_index })
                     }
                 };
-                record_replay::log(Recorded::Select(select_event),
+                rr::log(RecordedEvent::Select(select_event),
                                    r.flavor(),
                                    &r.metadata.type_name,
                                    &r.metadata.id);
@@ -356,7 +358,7 @@ impl<'a> SelectedOperation<'a> {
                 // We cannot check these in `Select::select()` since we do not have
                 // the receiver until this function to compare values against.
                 if flavor != r.flavor() {
-                    return Err(DesyncError::FlavorMismatch(flavor, r.flavor()));
+                    return Err(DesyncError::ChannelVariantMismatch(flavor, r.flavor()));
                 }
                 if chan_id != r.metadata.id {
                     return Err(DesyncError::ChannelMismatch(chan_id, r.metadata.id.clone()));
@@ -388,12 +390,12 @@ impl<'a> SelectedOperation<'a> {
                   r: &Receiver<T>)
                   -> Result<(Option<DetThreadId>, T), RecvError>{
         match &r.receiver {
-            Flavor::After(receiver) => {
+            ChannelVariant::After(receiver) => {
                 selected.recv(receiver).map(|msg| (get_det_id(), msg))
             }
-            Flavor::Bounded(receiver)
-                | Flavor::Unbounded(receiver)
-                | Flavor::Never(receiver) => selected.recv(receiver)
+            ChannelVariant::Bounded(receiver)
+                | ChannelVariant::Unbounded(receiver)
+                | ChannelVariant::Never(receiver) => selected.recv(receiver)
         }
     }
 }

@@ -1,18 +1,17 @@
 use crate::get_generic_name;
-use crate::record_replay::{self, Blocking, FlavorMarker, IpcDummyError,
-                           RecordReplayRecv, Recorded, RecordMetadata,
+use crate::rr::{self,  ChannelLabel, IpcDummyError,
+                           RecvRR, RecordedEvent, RecordMetadata,
                            get_log_entry, DetChannelId, IpcSelectEvent,
-                           RecordReplaySend, get_log_entry_with, DesyncError,
-                           get_forward_id, BlockingOp, sleep_until_desync,
+                           SendRR, get_log_entry_with, DesyncError,
+                           get_forward_id, sleep_until_desync,
                            mark_program_as_desynced, program_desyned };
 use crate::thread::{get_and_inc_channel_id, get_det_id, DetThreadId,
                     get_event_id, inc_event_id, get_det_id_desync};
-use crate::{RecordReplayMode, ENV_LOGGER, RECORD_MODE,
+use crate::{RRMode, ENV_LOGGER, RECORD_MODE,
             DESYNC_MODE, DesyncMode};
-use crate::record_replay::recv_from_sender;
 use std::thread::sleep;
 use std::time::Duration;
-use crate::record_replay::RecvErrorRR;
+use crate::rr::RecvErrorRR;
 use std::cell::RefMut;
 use log::Level::*;
 use ipc_channel::ipc::{self};
@@ -51,7 +50,7 @@ impl<T> IpcReceiver<T> {
             buffer: RefCell::new(HashMap::new()),
             metadata: RecordMetadata {
                 type_name: get_generic_name::<T>().to_string(),
-                flavor: FlavorMarker::Ipc,
+                flavor: ChannelLabel::Ipc,
                 mode: *RECORD_MODE,
                 id,
             },
@@ -59,30 +58,30 @@ impl<T> IpcReceiver<T> {
     }
 }
 
-impl<T> RecordReplayRecv<T, ipc_channel::Error> for IpcReceiver<T>
+impl<T> RecvRR<T, ipc_channel::Error> for IpcReceiver<T>
 where
     T: for<'de> Deserialize<'de> + Serialize,
 {
     fn to_recorded_event(
         &self,
         event: Result<(Option<DetThreadId>, T), ipc_channel::Error>,
-    ) -> (Result<T, ipc_channel::Error>, Recorded) {
+    ) -> (Result<T, ipc_channel::Error>, RecordedEvent) {
         match event {
-            Ok((sender_thread, msg)) => (Ok(msg), Recorded::IpcRecvSucc { sender_thread }),
-            Err(e) => (Err(e), Recorded::IpcRecvErr(IpcDummyError)),
+            Ok((sender_thread, msg)) => (Ok(msg), RecordedEvent::IpcRecvSucc { sender_thread }),
+            Err(e) => (Err(e), RecordedEvent::IpcRecvErr(IpcDummyError)),
         }
     }
 
-    fn expected_recorded_events(&self, event: Recorded)
+    fn expected_recorded_events(&self, event: RecordedEvent)
                                 -> Result<Result<T, ipc_channel::Error>, DesyncError> {
         match event {
-            Recorded::IpcRecvSucc { sender_thread } => {
+            RecordedEvent::IpcRecvSucc { sender_thread } => {
                 let retval = self.replay_recv(&sender_thread)?;
                 // Here is where we explictly increment our event_id!
                 inc_event_id();
                 Ok(Ok(retval))
             }
-            Recorded::IpcRecvErr(e) => {
+            RecordedEvent::IpcRecvErr(e) => {
                 // TODO
                 let err = "ErrorKing::Custom TODO".to_string();
                 // Here is where we explictly increment our event_id!
@@ -90,7 +89,7 @@ where
                 Ok(Err(Box::new(ipc_channel::ErrorKind::Custom(err))))
             }
             e => {
-                let mock_event = Recorded::IpcRecvSucc{ sender_thread: None };
+                let mock_event = RecordedEvent::IpcRecvSucc{ sender_thread: None };
                 Err(DesyncError::EventMismatch(e, mock_event))
             }
         }
@@ -130,13 +129,13 @@ where T: for<'de> Deserialize<'de> + Serialize {
 
     pub fn recv(&self) -> Result<T, ipc_channel::Error> {
         let f = || self.receiver.recv();
-        self.record_replay_recv(&self.metadata, f, "ipc_recv::recv()")
+        self.rr_recv(&self.metadata, f, "ipc_recv::recv()")
             .unwrap_or_else(|e| self.handle_desync(e, true, f))
     }
 
     pub fn try_recv(&self) -> Result<T, ipc_channel::Error> {
         let f = || self.receiver.try_recv();
-        self.record_replay_recv(&self.metadata, f, "ipc_recv::try_recv()")
+        self.rr_recv(&self.metadata, f, "ipc_recv::try_recv()")
             .unwrap_or_else(|e| self.handle_desync(e, true, f))
     }
 
@@ -153,7 +152,7 @@ where T: for<'de> Deserialize<'de> + Serialize {
     /// All other entries are buffer is `self.buffer`. Buffer is always
     /// checked before entries.
     fn replay_recv(&self, sender: &Option<DetThreadId>) -> Result<T, DesyncError> {
-        recv_from_sender(
+        rr::recv_from_sender(
             sender,
             || self.rr_try_recv(),
             &mut self.buffer.borrow_mut(),
@@ -180,23 +179,21 @@ where
     }
 }
 
-impl<T> RecordReplaySend<T, Error> for IpcSender<T>
+impl<T> SendRR<T, Error> for IpcSender<T>
 where
     T: Serialize,
 {
-    fn check_log_entry(&self, entry: Recorded) -> Result<(), DesyncError> {
+    const EVENT_VARIANT: RecordedEvent = RecordedEvent::IpcSender;
+
+    fn check_log_entry(&self, entry: RecordedEvent) -> Result<(), DesyncError> {
         match entry {
-            Recorded::IpcSender => Ok(()),
-            event_entry => Err(DesyncError::EventMismatch(event_entry, Recorded::IpcSender)),
+            RecordedEvent::IpcSender => Ok(()),
+            event_entry => Err(DesyncError::EventMismatch(event_entry, RecordedEvent::IpcSender)),
         }
     }
 
     fn send(&self, thread_id: Option<DetThreadId>, msg: T) -> Result<(), Error> {
         self.sender.send((thread_id, msg))
-    }
-
-    fn as_recorded_event(&self) -> Recorded {
-        Recorded::IpcSender
     }
 }
 
@@ -207,7 +204,7 @@ where
     /// Send our det thread id along with the actual message for both
     /// record and replay.
     pub fn send(&self, data: T) -> Result<(), ipc_channel::Error> {
-        match self.record_replay_send(
+        match self.rr_send(
             data,
             &self.metadata.mode,
             &self.metadata.id,
@@ -222,7 +219,7 @@ where
                     // TODO: One day we may want to record this alternate execution.
                     DesyncMode::KeepGoing => {
                         mark_program_as_desynced();
-                        let res = RecordReplaySend::send(self, get_forward_id(), msg);
+                        let res = SendRR::send(self, get_forward_id(), msg);
                         // TODO Ugh, right now we have to carefully increase the event_id
                         // in the "right places" or nothing will work correctly.
                         // How can we make this a lot less error prone?
@@ -246,7 +243,7 @@ where
 
         let metadata = RecordMetadata {
             type_name: type_name.to_string(),
-            flavor: FlavorMarker::Ipc,
+            flavor: ChannelLabel::Ipc,
             mode: *RECORD_MODE,
             id,
         };
@@ -268,7 +265,7 @@ where
 
     let metadata = RecordMetadata {
         type_name: type_name.to_string(),
-        flavor: FlavorMarker::Ipc,
+        flavor: ChannelLabel::Ipc,
         mode: *RECORD_MODE,
         id: id.clone(),
     };
@@ -346,7 +343,7 @@ impl OpaqueIpcMessage {
 /// panic!()/warn!()
 pub struct IpcReceiverSet {
     receiver_set: ipc_channel::ipc::IpcReceiverSet,
-    mode: RecordReplayMode,
+    mode: RRMode,
     /// On replay, we don't actually register receivers with the real IpcReceiverSet.
     /// Instead, we store them and assign them unique indices. This variable keeps
     /// tracks of the next idex to assing. It can be used to access the receivers
@@ -401,7 +398,7 @@ impl IpcReceiverSet {
     }
 
     fn do_add(&mut self, receiver: OpaqueIpcReceiver) -> Result<u64, std::io::Error> {
-        self.record_replay_add(receiver).unwrap_or_else(|(e, receiver)| {
+        self.rr_add(receiver).unwrap_or_else(|(e, receiver)| {
             log_rr!(Warn, "IpcReceiver::add::Desynchonization detected: {:?}", e);
             match *DESYNC_MODE {
                 DesyncMode::Panic => panic!("IpcReceiver::add::Desynchronization detected: {:?}", e),
@@ -417,7 +414,7 @@ impl IpcReceiverSet {
 
     pub fn select(&mut self) -> Result<Vec<IpcSelectionResult>, std::io::Error> {
         log_rr!(Info, "IpcSelect::select()");
-        self.record_replay_select().unwrap_or_else(|(e, entries)| {
+        self.rr_select().unwrap_or_else(|(e, entries)| {
             log_rr!(Warn, "IpcSelect::Desynchonization detected: {:?}", e);
 
             match *DESYNC_MODE {
@@ -453,12 +450,12 @@ impl IpcReceiverSet {
     /// seen in the record. If not all receivers are present, it is a DesyncError.
     /// On DesyncError, we may be "halfway" through replaying a select, we return
     /// the entries we already have to avoid losing them.
-    fn record_replay_select(&mut self) -> Result<Result<Vec<IpcSelectionResult>, std::io::Error>, (DesyncError, Vec<IpcSelectionResult>)> {
+    fn rr_select(&mut self) -> Result<Result<Vec<IpcSelectionResult>, std::io::Error>, (DesyncError, Vec<IpcSelectionResult>)> {
         if program_desyned() {
             return Err((DesyncError::Desynchronized, vec![]));
         }
         match self.mode {
-            RecordReplayMode::Record => {
+            RRMode::Record => {
                 // Events will be moved by our loop. So we put them back here.
                 let mut moved_events: Vec<IpcSelectionResult> = Vec::new();
                 let mut recorded_events = Vec::new();
@@ -486,16 +483,15 @@ impl IpcReceiverSet {
                     }
                 }
 
-                let event = Recorded::IpcSelect { select_events: recorded_events };
+                let event = RecordedEvent::IpcSelect { select_events: recorded_events };
                 // Ehh, we fake it here. We never check this value anyways.
-                let id = &DetChannelId::fake();
-                record_replay::log(event, FlavorMarker::IpcSelect, "IpcSelect", id);
+                rr::log(event, ChannelLabel::IpcSelect, "IpcSelect", &DetChannelId::fake());
                 Ok(Ok(moved_events))
             }
 
             // Use index to fetch correct receiver and read value directly from
             // receiver.
-            RecordReplayMode::Replay => {
+            RRMode::Replay => {
                 if self.desynced {
                     return Err((DesyncError::Desynchronized, vec![]));
                 }
@@ -512,7 +508,7 @@ impl IpcReceiverSet {
                 }
 
                 match entry.map_err(|e| (e, vec![]))? {
-                    Recorded::IpcSelect { select_events } => {
+                    RecordedEvent::IpcSelect { select_events } => {
                         let mut events: Vec<IpcSelectionResult> = Vec::new();
 
                         for event in select_events {
@@ -531,12 +527,12 @@ impl IpcReceiverSet {
                         Ok(Ok(events))
                     }
                     event => {
-                        let dummy = Recorded::IpcSelect { select_events: vec![] };
+                        let dummy = RecordedEvent::IpcSelect { select_events: vec![] };
                         Err((DesyncError::EventMismatch(event.clone(), dummy), vec![]))
                     }
                 }
             }
-            RecordReplayMode::NoRR => Ok(self.do_select()),
+            RRMode::NoRR => Ok(self.do_select()),
         }
     }
 
@@ -698,7 +694,7 @@ impl IpcReceiverSet {
     }
 
     /// On error we return the back to the user, otherwise it would be moved forever.
-    fn record_replay_add(&mut self, receiver: OpaqueIpcReceiver)
+    fn rr_add(&mut self, receiver: OpaqueIpcReceiver)
                          -> Result<Result<u64, std::io::Error>, (DesyncError, OpaqueIpcReceiver)> {
         if program_desyned() {
             return Err((DesyncError::Desynchronized, receiver));
@@ -706,7 +702,7 @@ impl IpcReceiverSet {
         let metadata = receiver.metadata.clone();
         let flavor = metadata.flavor;
         let id = metadata.id;
-        log_rr!(Debug, "IpcSelect::record_replay_add<{:?}>()", id);
+        log_rr!(Debug, "IpcSelect::rr_add<{:?}>()", id);
 
         // After the first time we desynchronize, this is set to true and future times
         // we eill be sent here.
@@ -715,20 +711,20 @@ impl IpcReceiverSet {
         }
 
         match self.mode {
-            RecordReplayMode::Record => {
+            RRMode::Record => {
                 let index = match self.receiver_set.add_opaque(receiver.opaque_receiver) {
                     Ok(v) => v,
                     e@Err(_) => return Ok(e),
                 };
 
-                let event = Recorded::IpcSelectAdd(index);
-                record_replay::log(event, flavor, &metadata.type_name, &id);
+                let event = RecordedEvent::IpcSelectAdd(index);
+                rr::log(event, flavor, &metadata.type_name, &id);
                 Ok(Ok(index))
             }
             // Do not add receiver to IpcReceiverSet, instead move the receiver
             // to our own `receivers` hashmap where the index returned here is
             // the key.
-            RecordReplayMode::Replay => {
+            RRMode::Replay => {
                 let det_id = match get_det_id_desync() {
                     Err(e) => return Err((e, receiver)),
                     Ok(v) => v,
@@ -739,7 +735,7 @@ impl IpcReceiverSet {
                 };
                 let index = self.index as u64;
                 match log_entry {
-                    Recorded::IpcSelectAdd(r_index) => {
+                    RecordedEvent::IpcSelectAdd(r_index) => {
                         if *r_index != index {
                             let error = DesyncError::SelectIndexMismatch(*r_index, index);
                             return Err((error, receiver));
@@ -756,12 +752,12 @@ impl IpcReceiverSet {
                         Ok(Ok(index))
                     }
                     event => {
-                        let dummy = Recorded::IpcSelectAdd((0 - 1) as u64);
+                        let dummy = RecordedEvent::IpcSelectAdd((0 - 1) as u64);
                         Err((DesyncError::EventMismatch(event.clone(), dummy), receiver))
                     }
                 }
             }
-            RecordReplayMode::NoRR => {
+            RRMode::NoRR => {
                 Ok(self.receiver_set.add_opaque(receiver.opaque_receiver))
             }
         }

@@ -1,5 +1,7 @@
+//! Different Channel types share the same general method of doing RR through our
+//! per-channel buffers. This module encapsulates that logic via the
 use crate::DetThreadId;
-use crate::RecordReplayMode;
+use crate::RRMode;
 use crate::RECORD_MODE;
 use lazy_static::lazy_static;
 use std::fs::remove_file;
@@ -40,16 +42,18 @@ impl From<RecvErrorRR> for DesyncError {
     }
 }
 
+/// Desynchonizations are common (TODO: make desync less common). This error type
+/// enumerates all reasons why we might desynchronize when executing RR.
 #[derive(Debug)]
 pub enum DesyncError {
     /// Missing entry for specified (DetThreadId, EventIt) pair.
     NoEntryInLog(DetThreadId, EventId),
-    /// Flavors don't match. log flavor, vs current flavor.
-    FlavorMismatch(FlavorMarker, FlavorMarker),
+    /// ChannelVariants don't match. log flavor, vs current flavor.
+    ChannelVariantMismatch(ChannelLabel, ChannelLabel),
     /// Channel ids don't match. log channel, vs current flavor.
     ChannelMismatch(DetChannelId, DetChannelId),
-    /// Recorded log message was different. logged event vs current event.
-    EventMismatch(Recorded, Recorded),
+    /// RecordedEvent log message was different. logged event vs current event.
+    EventMismatch(RecordedEvent, RecordedEvent),
     UnitializedDetThreadId,
     /// Receiver was expected for select operation but entry is missing.
     MissingReceiver(u64),
@@ -93,8 +97,11 @@ pub enum SelectEvent {
     },
 }
 
+/// We tag our record-log entries with the type of channel they represent. This lets us compares
+/// their channel-type to ensure it is what we expect between record and replay. Just one more
+/// sanity check for robustness.
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Copy, Clone)]
-pub enum FlavorMarker {
+pub enum ChannelLabel {
     MpscBounded,
     MpscUnbounded,
     Unbounded,
@@ -107,6 +114,9 @@ pub enum FlavorMarker {
     Select,
 }
 
+/// Represents a single entry in our log. Technically all that is needed is the current_thread_id,
+/// event_id, and event. Everything else is metadata used for checks to ensure we're reading from
+/// the right channel.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct LogEntry {
     /// Thread performing the operation's unique ID.
@@ -115,66 +125,25 @@ pub struct LogEntry {
     /// Unique per-thread identifier given to every select dynamic instance.
     /// (current_thread, event_id) form a unique key per entry in our map and log.
     pub event_id: u32,
-    pub event: Recorded,
-    pub channel: FlavorMarker,
+    /// Actual event and all information needed to replay this event.
+    pub event: RecordedEvent,
+    pub channel: ChannelLabel,
     pub chan_id: DetChannelId,
     // pub real_thread_id: String,
     // pub pid: u32,
     pub type_name: String,
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(remote = "RecvTimeoutError")]
-pub enum RecvTimeoutErrorDef {
-    Timeout,
-    Disconnected,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(remote = "mpsc::RecvTimeoutError")]
-pub enum MpscRecvTimeoutErrorDef {
-    Timeout,
-    Disconnected,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(remote = "TryRecvError")]
-pub enum TryRecvErrorDef {
-    Empty,
-    Disconnected,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(remote = "mpsc::TryRecvError")]
-pub enum MpscTryRecvErrorDef {
-    Empty,
-    Disconnected,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(remote = "RecvError")]
-pub struct RecvErrorDef {}
-
-#[derive(Serialize, Deserialize)]
-#[serde(remote = "mpsc::RecvError")]
-pub struct MpscRecvErrorDef {}
-
+/// Not sure why we use a dummy error here. TODO.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct IpcDummyError;
 
-// Types of operating that may block.
+/// Main enum listing different types of events that our logger supports. These recorded
+/// events contain all information to replay the event. On errors, we can just return
+/// the error that was witnessed during record. On successful read, the variant contains
+/// the index or sender_thread_id where we should expect the message to arrive from.
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub enum BlockingOp {
-    Select,
-    IpcSelect,
-    Recv,
-    IpcRecv,
-}
-
-/// Main enum listing different types of events
-/// that our logger supports.
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub enum Recorded {
+pub enum RecordedEvent {
     // Crossbeam select.
     SelectReady {
         select_index: usize,
@@ -282,7 +251,7 @@ pub(crate) fn wake_up_threads() {
 
 lazy_static! {
     /// When we run off the end of the log,
-    /// if we're not DESYN, we assume that thread blocked forever during record
+    /// if we're not DESYNC, we assume that thread blocked forever during record
     /// if any other thread ever DESYNCs we let the thread continue running
     /// to avoid deadlocks. This condvar implements that logic.
     pub static ref PARK_THREADS: (Mutex<bool>, Condvar) = {
@@ -301,22 +270,22 @@ lazy_static! {
         log_rr!(Debug, "Initializing WRITE_LOG_FILE lazy static.");
 
         match *RECORD_MODE {
-            RecordReplayMode::Record => {
+            RRMode::Record => {
                 // Delete file if it already existed... file may not exist. That's okay.
                 let _ = remove_file(LOG_FILE_NAME.as_str());
                 let error = & format!("Unable to open {} for record logging.", *LOG_FILE_NAME);
                 Mutex::new(File::create(LOG_FILE_NAME.as_str()).expect(error))
             }
-            RecordReplayMode::Replay =>
+            RRMode::Replay =>
                 panic!("Write log file should not be accessed in replay mode."),
-            RecordReplayMode::NoRR =>
+            RRMode::NoRR =>
                 panic!("Write log file should not be accessed in no record-and-replay mode."),
         }
     };
 
     /// Global map holding all indexes from the record phase.
     /// Lazily initialized on replay mode.
-    pub static ref RECORDED_INDICES: HashMap<(DetThreadId, u32), (Recorded, FlavorMarker, DetChannelId)> = {
+    pub static ref RECORDED_INDICES: HashMap<(DetThreadId, u32), (RecordedEvent, ChannelLabel, DetChannelId)> = {
         log_rr!(Debug, "Initializing RECORDED_INDICES lazy static.");
         use std::io::BufReader;
 
@@ -351,8 +320,8 @@ lazy_static! {
     };
 }
 
-pub fn log(event: Recorded, channel: FlavorMarker, type_name: &str, chan_id: &DetChannelId) {
-    log_rr!(Debug, "record_replay::log()");
+pub fn log(event: RecordedEvent, channel: ChannelLabel, type_name: &str, chan_id: &DetChannelId) {
+    log_rr!(Debug, "rr::log()");
     use std::io::Write;
 
     // Write our (DET_ID, EVENT_ID) -> index to our log file
@@ -388,9 +357,9 @@ pub fn log(event: Recorded, channel: FlavorMarker, type_name: &str, chan_id: &De
 fn get_log_entry_do<'a>(
     our_thread: DetThreadId,
     event_id: EventId,
-    curr_flavor: Option<&FlavorMarker>,
+    curr_flavor: Option<&ChannelLabel>,
     curr_id: Option<&DetChannelId>)
-    -> Result<(&'a Recorded, &'a FlavorMarker, &'a DetChannelId), DesyncError> {
+    -> Result<(&'a RecordedEvent, &'a ChannelLabel, &'a DetChannelId), DesyncError> {
 
     let key = (our_thread, event_id);
     match RECORDED_INDICES.get(&key) {
@@ -400,7 +369,7 @@ fn get_log_entry_do<'a>(
 
             if let Some(curr_flavor) = curr_flavor {
                 if log_flavor != curr_flavor {
-                    return Err(DesyncError::FlavorMismatch(*log_flavor, *curr_flavor));
+                    return Err(DesyncError::ChannelVariantMismatch(*log_flavor, *curr_flavor));
                 }
             }
             if let Some(curr_id) = curr_id {
@@ -418,25 +387,25 @@ fn get_log_entry_do<'a>(
 /// on the record.
 pub fn get_log_entry_with<'a>(our_thread: DetThreadId,
                               event_id: EventId,
-                              curr_flavor: &FlavorMarker,
+                              curr_flavor: &ChannelLabel,
                               curr_id: &DetChannelId)
-                              -> Result<&'a Recorded, DesyncError> {
+                              -> Result<&'a RecordedEvent, DesyncError> {
     get_log_entry_do(our_thread, event_id, Some(curr_flavor), Some(curr_id)).
         map(|(r, _, _)| r)
 }
 
 /// Get log entry with no comparison.
 pub fn get_log_entry<'a>(our_thread: DetThreadId,
-                         event_id: EventId) -> Result<&'a Recorded, DesyncError> {
+                         event_id: EventId) -> Result<&'a RecordedEvent, DesyncError> {
     get_log_entry_do(our_thread, event_id, None, None).map(|(r, _, _)| r)
 }
 
 /// Get log entry returning the record, flavor, and channel id if needed.
 pub fn get_log_entry_ret<'a>(our_thread: DetThreadId, event_id: EventId)
-                             -> Result<(&'a Recorded, &'a FlavorMarker, &'a DetChannelId),
+                             -> Result<(&'a RecordedEvent, &'a ChannelLabel, &'a DetChannelId),
                                        DesyncError> {
-    get_log_entry_do(our_thread, event_id, None, None)
-}
+                                 get_log_entry_do(our_thread, event_id, None, None)
+                             }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub struct DetChannelId {
@@ -467,16 +436,14 @@ impl DetChannelId {
 
 pub type EventId = u32;
 
+/// TODO It seems there is repetition in the fields here and on LogEntry?
+/// Do we really need both?
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct RecordMetadata {
-    /// Unique identifier assigned to every channel. Deterministic and unique
-    /// even with racing thread creation. DetThreadId refers to the original
-    /// creator of this thread.
-    /// The partner Receiver and Sender shares the same id.
     /// Owned for EZ serialize, deserialize.
     pub(crate) type_name: String,
-    pub(crate) flavor: FlavorMarker,
-    pub(crate) mode: RecordReplayMode,
+    pub(crate) flavor: ChannelLabel,
+    pub(crate) mode: RRMode,
     /// Unique identifier assigned to every channel. Deterministic and unique
     /// even with racing thread creation. DetThreadId refers to the original
     /// creator of this thread.
@@ -484,17 +451,11 @@ pub struct RecordMetadata {
     pub(crate) id: DetChannelId,
 }
 
-use crate::record_replay;
+use crate::rr;
 use std::error::Error;
 
-#[derive(Debug, Eq, PartialEq)]
-pub enum Blocking {
-    CannotBlock,
-    CanBlock,
-}
-
-pub trait RecordReplayRecv<T, E: Error> {
-    fn record_replay_recv(
+pub trait RecvRR<T, E: Error> {
+    fn rr_recv(
         &self,
         metadata: &RecordMetadata,
         recv: impl FnOnce() -> Result<(Option<DetThreadId>, T), E>,
@@ -503,17 +464,17 @@ pub trait RecordReplayRecv<T, E: Error> {
         log_rr!(Debug, "Receiver<{:?}>::{}", metadata.id, function_name);
 
         match metadata.mode {
-            RecordReplayMode::Record => {;
-                let (result, recorded) = self.to_recorded_event(recv());
-                record_replay::log(recorded, metadata.flavor,
-                                   &metadata.type_name, &metadata.id);
-                Ok(result)
+            RRMode::Record => {;
+                               let (result, recorded) = self.to_recorded_event(recv());
+                               rr::log(recorded, metadata.flavor,
+                                       &metadata.type_name, &metadata.id);
+                               Ok(result)
             }
-            RecordReplayMode::Replay => {
+            RRMode::Replay => {
                 match get_det_id() {
                     None => {
                         log_rr!(Warn, "DetThreadId was None. \
-                               This execution may not be deterministic.");
+                                       This execution may not be deterministic.");
                         inc_event_id();
                         // TODO: This seems wrong. I think we should be doing
                         // a replay_recv() here even if the det_id is none.
@@ -533,19 +494,19 @@ pub trait RecordReplayRecv<T, E: Error> {
                             return Err(DesyncError::DesynchronizedWakeup);
                         }
 
-                        Ok(self.expected_recorded_events(entry?.clone())?)
+                        Ok(Self::expected_recorded_events(self, entry?.clone())?)
                     }
                 }
             }
-            RecordReplayMode::NoRR => Ok(recv().map(|v| v.1)),
+            RRMode::NoRR => Ok(recv().map(|v| v.1)),
         }
     }
 
     /// Handles desynchronization events based on global DESYNC_MODE.
     fn handle_desync(&self,
-                        desync: DesyncError,
-                        can_block: bool,
-                        do_recv: impl Fn() -> Result<(Option<DetThreadId>, T), E>)
+                     desync: DesyncError,
+                     can_block: bool,
+                     do_recv: impl Fn() -> Result<(Option<DetThreadId>, T), E>)
                      -> Result<T, E> {
         log_rr!(Warn, "Desynchonization found: {:?}", desync);
 
@@ -579,24 +540,38 @@ pub trait RecordReplayRecv<T, E: Error> {
     fn get_buffer(&self) -> RefMut<HashMap<Option<DetThreadId>, VecDeque<T>>>;
 
     fn to_recorded_event(&self, event: Result<(Option<DetThreadId>, T), E>)
-                         -> (Result<T, E>, Recorded);
-    fn expected_recorded_events(&self, event: Recorded) -> Result<Result<T, E>, DesyncError>;
+                         -> (Result<T, E>, RecordedEvent);
+
+    fn expected_recorded_events(&self, event: RecordedEvent) -> Result<Result<T, E>, DesyncError>;
 }
 
+/// Abstract over logic to send a message while recording or replaying results.
+pub(crate) trait SendRR<T, E> {
+    /// RecordedEvent variant for this type.
+    const EVENT_VARIANT: RecordedEvent;
 
-pub(crate) trait RecordReplaySend<T, E> {
-    fn record_replay_send(
+    /// Attempts to send message to receiver. Handles forwading the ID for router.
+    /// On Record: Sends message and records result in log.
+    /// On Replay: Checks correct message is sent and handles desynchonization errors.
+    /// Two different things can fail here:
+    /// 1) We could be in a desync state. This is the "outer" result which returns the original
+    ///    `msg: T` value.
+    /// 2) The recursive call the the channel send method for this type of channel. This is the inner
+    ///    result.
+    fn rr_send(
         &self,
         msg: T,
-        mode: &RecordReplayMode,
+        mode: &RRMode,
         id: &DetChannelId,
         type_name: &str,
-        flavor: &FlavorMarker,
+        flavor: &ChannelLabel,
         sender_name: &str,
     ) -> Result<Result<(), E>, (DesyncError, T)> {
+
         if program_desyned() {
             return Err((DesyncError::Desynchronized, msg));
         }
+
         // However, for the record log, we still want to use the original
         // thread's DetThreadId. Otherwise we will have "repeated" entries in the log
         // which look like they're coming from the same thread.
@@ -605,20 +580,19 @@ pub(crate) trait RecordReplaySend<T, E> {
                 sender_name, id, forwading_id, type_name);
 
         match mode {
-            RecordReplayMode::Record => {
-                let event = self.as_recorded_event();
-                // Note: send() must come before record_replay::log() as it internally
+            RRMode::Record => {
+                // Note: send() must come before rr::log() as it internally
                 // increments event_id.
                 let result = self.send(forwading_id, msg);
-                record_replay::log(event, flavor.clone(), type_name, id);
+                rr::log(Self::EVENT_VARIANT, flavor.clone(), type_name, id);
                 Ok(result)
             }
-            RecordReplayMode::Replay => {
+            RRMode::Replay => {
                 if let Some(det_id) = get_det_id() {
                     // Ugh. This is ugly. I need it though. As this function moves the `T`.
                     // If we encounter an error we need to return the `T` back up to the caller.
                     // crossbeam_channel::send() does pretty much the same thing.
-                    match record_replay::get_log_entry_with(det_id, get_event_id(), flavor, id) {
+                    match rr::get_log_entry_with(det_id, get_event_id(), flavor, id) {
                         // Special case for NoEntryInLog. Hang this thread forever.
                         Err(e@DesyncError::NoEntryInLog(_, _)) => {
                             log_rr!(Info, "Saw {:?}. Putting thread to sleep.", e);
@@ -626,11 +600,11 @@ pub(crate) trait RecordReplaySend<T, E> {
                             // Thread woke back up... desynced!
                             return Err((DesyncError::DesynchronizedWakeup, msg));
                         }
+                        // TODO: Hmmm when does this error case happen?
                         Err(e) => return Err((e, msg)),
                         Ok(event) => {
-                            match self.check_log_entry(event.clone()) {
-                                Err(e) => return Err((e, msg)),
-                                Ok(event) => {},
+                            if let Err(e) = SendRR::check_log_entry(self, event.clone()) {
+                                return Err((e, msg));
                             }
                         }
                     }
@@ -638,37 +612,33 @@ pub(crate) trait RecordReplaySend<T, E> {
                     log_rr!(Warn, "det_id is None. This execution may be nondeterministic");
                 }
 
-                let result = self.send(forwading_id, msg);
+                let result = SendRR::send(self, forwading_id, msg);
                 inc_event_id();
                 Ok(result)
             }
-            RecordReplayMode::NoRR => {
+            RRMode::NoRR => {
                 Ok(self.send(get_det_id(), msg))
             }
         }
     }
 
-    fn check_log_entry(&self, entry: Recorded) -> Result<(), DesyncError>;
+    /// Given the current entry in the log checks that the expected `RecordedEvent` variant is
+    /// present.
+    fn check_log_entry(&self, entry: RecordedEvent) -> Result<(), DesyncError>;
 
+    /// Call underlying channel's send function to send this message and thread_id to receiver.
     fn send(&self, thread_id: Option<DetThreadId>, msg: T) -> Result<(), E>;
-
-    fn as_recorded_event(&self) -> Recorded;
-}
-
-/// Because of the router, we want to "forward" the original sender's DetThreadId
-/// sometimes.
-pub fn get_forward_id() -> Option<DetThreadId> {
-    if in_forwarding() { get_temp_det_id() } else { get_det_id() }
 }
 
 /// Generic function to loop on differnt kinds of replays: recv(), try_recv(), etc.
 /// and buffer wrong entries.
-pub fn recv_from_sender<T>(
+pub(crate) fn recv_from_sender<T>(
     expected_sender: &Option<DetThreadId>,
     rr_timeout_recv: impl Fn() -> Result<(Option<DetThreadId>, T), RecvErrorRR>,
     buffer: &mut RefMut<HashMap<Option<DetThreadId>, VecDeque<T>>>,
     id: &DetChannelId,
 ) -> Result<T, DesyncError> {
+
     log_rr!(Debug, "recv_from_sender(sender: {:?}, id: {:?}) ...", expected_sender, id);
 
     // Check our buffer to see if this value is already here.
@@ -693,6 +663,13 @@ pub fn recv_from_sender<T>(
     }
 }
 
+/// Because of the router, we want to "forward" the original sender's DetThreadId
+/// sometimes.
+pub fn get_forward_id() -> Option<DetThreadId> {
+    if in_forwarding() { get_temp_det_id() } else { get_det_id() }
+}
+
+
 #[test]
 fn condvar_test() {
     let mut handles = vec![];
@@ -713,3 +690,41 @@ fn condvar_test() {
     }
     assert!(true);
 }
+
+// We want to Serialize Types defined in other crates. So we copy their definition here.
+// (This is how serde wants us to do it)
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "RecvTimeoutError")]
+pub enum RecvTimeoutErrorDef {
+    Timeout,
+    Disconnected,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "mpsc::RecvTimeoutError")]
+pub enum MpscRecvTimeoutErrorDef {
+    Timeout,
+    Disconnected,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "TryRecvError")]
+pub enum TryRecvErrorDef {
+    Empty,
+    Disconnected,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "mpsc::TryRecvError")]
+pub enum MpscTryRecvErrorDef {
+    Empty,
+    Disconnected,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "RecvError")]
+pub struct RecvErrorDef {}
+
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "mpsc::RecvError")]
+pub struct MpscRecvErrorDef {}
