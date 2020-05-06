@@ -1,10 +1,10 @@
 //! Error Module
 
-use serde::{Deserialize, Serialize};
 use crate::detthread::DetThreadId;
-use crate::recordlog::{EventId, ChannelLabel, RecordedEvent};
+use crate::recordlog::{ChannelLabel, EventId, RecordedEvent};
 use crate::rr::DetChannelId;
-use crossbeam_channel::{RecvTimeoutError, TryRecvError, RecvError};
+use crossbeam_channel::{RecvError, RecvTimeoutError, TryRecvError};
+use serde::{Deserialize, Serialize};
 use std::sync::mpsc;
 
 #[derive(Debug)]
@@ -82,7 +82,6 @@ pub enum TryRecvErrorDef {
 #[derive(Serialize, Deserialize)]
 #[serde(remote = "RecvError")]
 pub struct RecvErrorDef {}
-
 
 #[derive(Serialize, Deserialize)]
 #[serde(remote = "mpsc::TryRecvError")]

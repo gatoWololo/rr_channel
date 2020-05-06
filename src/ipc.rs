@@ -17,17 +17,17 @@ use std::collections::{hash_map::HashMap, VecDeque};
 
 use std::thread;
 
-use crate::{DESYNC_MODE, ENV_LOGGER};
-use crate::recordlog::RecordedEvent;
-use crate::error::{self, DesyncError, RecvErrorRR};
 use crate::desync::DesyncMode;
-use crate::{RRMode, get_generic_name, RECORD_MODE};
-use crate::rr::{self, DetChannelId};
 use crate::detthread::DetThreadId;
+use crate::error::{self, DesyncError, RecvErrorRR};
+use crate::recordlog::RecordedEvent;
 use crate::recordlog::{self, ChannelLabel, IpcSelectEvent};
-use crate::{desync, detthread};
 use crate::rr::RecvRR;
 use crate::rr::SendRR;
+use crate::rr::{self, DetChannelId};
+use crate::{desync, detthread};
+use crate::{get_generic_name, RRMode, RECORD_MODE};
+use crate::{DESYNC_MODE, ENV_LOGGER};
 
 type OsIpcReceiverResults = (Vec<u8>, Vec<OsOpaqueIpcChannel>, Vec<OsIpcSharedMemory>);
 
@@ -768,7 +768,12 @@ impl IpcReceiverSet {
                     Err(e) => return Err((e, receiver)),
                     Ok(v) => v,
                 };
-                let log_entry = match recordlog::get_log_entry_with(det_id, detthread::get_event_id(), &flavor, &id) {
+                let log_entry = match recordlog::get_log_entry_with(
+                    det_id,
+                    detthread::get_event_id(),
+                    &flavor,
+                    &id,
+                ) {
                     Err(e) => return Err((e, receiver)),
                     Ok(v) => v,
                 };

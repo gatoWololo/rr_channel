@@ -2,12 +2,14 @@ use log::Level::*;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+use crate::crossbeam::{Receiver, Sender};
+use crate::detthread::{self, DetThreadId};
+use crate::ipc::{
+    self, IpcReceiver, IpcReceiverSet, IpcSelectionResult, IpcSender, OpaqueIpcMessage,
+    OpaqueIpcReceiver,
+};
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
-use crate::ipc::{self, OpaqueIpcMessage, IpcReceiver, IpcSender, IpcReceiverSet, IpcSelectionResult, OpaqueIpcReceiver};
-use crate::detthread::{self, DetThreadId};
-use crate::crossbeam::{Sender, Receiver};
-
 
 lazy_static! {
     pub static ref ROUTER: RouterProxy = RouterProxy::new();

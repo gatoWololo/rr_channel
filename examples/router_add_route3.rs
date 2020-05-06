@@ -3,10 +3,10 @@
 /// Main thread prints messages. Definetily nondeterministic.
 /// Deterministic thanks to our RR B)
 use rand::Rng;
+use rr_channel::crossbeam::Receiver;
 use rr_channel::ipc;
 use rr_channel::router;
 use rr_channel::router::ROUTER;
-use rr_channel::crossbeam::Receiver;
 use std::time;
 use std::time::Duration;
 fn main() -> Result<(), std::io::Error> {

@@ -1,14 +1,14 @@
 //! Different Channel types share the same general method of doing RR through our
 //! per-channel buffers. This module encapsulates that logic via the
 // use crate::DetThreadId;
-use crate::RRMode;
 use crate::error;
 use crate::rr;
+use crate::RRMode;
 
-use crate::{DesyncMode, DESYNC_MODE};
 use crate::detthread::{self, DetThreadId};
-use crate::{recordlog, desync};
 use crate::error::DesyncError;
+use crate::{desync, recordlog};
+use crate::{DesyncMode, DESYNC_MODE};
 
 use log::Level::*;
 use serde::{Deserialize, Serialize};
@@ -144,7 +144,10 @@ pub trait RecvRR<T, E: Error> {
         event: Result<(Option<DetThreadId>, T), E>,
     ) -> (Result<T, E>, recordlog::RecordedEvent);
 
-    fn expected_recorded_events(&self, event: recordlog::RecordedEvent) -> Result<Result<T, E>, DesyncError>;
+    fn expected_recorded_events(
+        &self,
+        event: recordlog::RecordedEvent,
+    ) -> Result<Result<T, E>, DesyncError>;
 }
 
 /// Abstract over logic to send a message while recording or replaying results.
@@ -199,7 +202,12 @@ pub(crate) trait SendRR<T, E> {
                     // Ugh. This is ugly. I need it though. As this function moves the `T`.
                     // If we encounter an error we need to return the `T` back up to the caller.
                     // crossbeam_channel::send() does pretty much the same thing.
-                    match recordlog::get_log_entry_with(det_id, detthread::get_event_id(), flavor, id) {
+                    match recordlog::get_log_entry_with(
+                        det_id,
+                        detthread::get_event_id(),
+                        flavor,
+                        id,
+                    ) {
                         // Special case for NoEntryInLog. Hang this thread forever.
                         Err(e @ error::DesyncError::NoEntryInLog(_, _)) => {
                             crate::log_rr!(Info, "Saw {:?}. Putting thread to sleep.", e);

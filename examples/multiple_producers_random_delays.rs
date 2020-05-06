@@ -1,10 +1,10 @@
 use rand::Rng;
 use rr_channel::detthread;
+use std::thread;
 /// Two threads write to the same sender.
 /// Channel two is never used.
 /// Random delays to bring out more nondeterminism.
 use std::time;
-use std::thread;
 
 fn main() {
     let (s, r) = rr_channel::crossbeam::unbounded();

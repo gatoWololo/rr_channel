@@ -1,18 +1,18 @@
+use log::Level::*;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::fs::remove_file;
+use std::fs::File;
+use std::io::BufRead;
 use std::sync::mpsc;
 use std::sync::Mutex;
-use std::fs::File;
-use std::fs::remove_file;
-use std::collections::HashMap;
-use std::io::BufRead;
-use log::Level::*;
 
 use crate::detthread;
+use crate::detthread::DetThreadId;
 use crate::error;
-use crate::{RRMode, RECORD_MODE, LOG_FILE_NAME};
-use crate::detthread::{DetThreadId};
-use crate::rr::DetChannelId;
 use crate::error::IpcDummyError;
+use crate::rr::DetChannelId;
+use crate::{RRMode, LOG_FILE_NAME, RECORD_MODE};
 
 /// Record representing a sucessful select from a channel. Used in replay mode.
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -68,7 +68,6 @@ pub struct LogEntry {
     // pub pid: u32,
     pub type_name: String,
 }
-
 
 /// Main enum listing different types of events that our logger supports. These recorded
 /// events contain all information to replay the event. On errors, we can just return

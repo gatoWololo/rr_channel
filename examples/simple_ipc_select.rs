@@ -1,6 +1,6 @@
+use rr_channel::detthread;
 use rr_channel::ipc;
 use rr_channel::ipc::IpcSelectionResult;
-use rr_channel::detthread;
 
 fn main() {
     let (s, r) = ipc::channel::<u32>().unwrap();

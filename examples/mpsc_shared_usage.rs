@@ -1,5 +1,5 @@
-use rr_channel::mpsc;
 use rr_channel::detthread;
+use rr_channel::mpsc;
 
 fn main() {
     // Create a shared channel that can be sent along from many threads

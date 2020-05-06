@@ -1,8 +1,8 @@
+use log::Level::{Debug, Warn};
 use serde::{Deserialize, Serialize};
-use std::sync::{Mutex, Condvar};
 use std::sync::atomic::AtomicBool;
-use log::Level::{Warn, Debug};
 use std::sync::atomic::Ordering;
+use std::sync::{Condvar, Mutex};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum DesyncMode {

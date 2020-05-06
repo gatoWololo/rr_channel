@@ -2,8 +2,8 @@
 //for the first event to occur, thus they are blocking the thread.
 use rr_channel;
 use rr_channel::detthread;
-use std::time::Duration;
 use std::thread;
+use std::time::Duration;
 
 fn main() {
     let (s, r) = rr_channel::crossbeam::unbounded::<i32>();

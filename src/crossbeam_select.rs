@@ -3,14 +3,14 @@ use log::Level::*;
 use std::collections::HashMap;
 use std::time::Duration;
 
-use crate::{RECORD_MODE, DESYNC_MODE};
 use crate::crossbeam::{self, ChannelVariant};
-use crate::{DesyncMode, RRMode};
-use crate::error::DesyncError;
-use crate::rr::{DetChannelId};
-use crate::recordlog::{self, RecordedEvent, ChannelLabel, SelectEvent};
 use crate::detthread::DetThreadId;
+use crate::error::DesyncError;
+use crate::recordlog::{self, ChannelLabel, RecordedEvent, SelectEvent};
+use crate::rr::DetChannelId;
 use crate::{desync, detthread};
+use crate::{DesyncMode, RRMode};
+use crate::{DESYNC_MODE, RECORD_MODE};
 
 /// Our Select wrapper type must hold different types of Receivet<T>. We use this trait
 /// so we can hold different T's via a dynamic trait object.
@@ -328,7 +328,10 @@ impl<'a> SelectedOperation<'a> {
         }
     }
 
-    pub fn rr_select_recv<T>(self, r: &crossbeam::Receiver<T>) -> Result<Result<T, RecvError>, DesyncError> {
+    pub fn rr_select_recv<T>(
+        self,
+        r: &crossbeam::Receiver<T>,
+    ) -> Result<Result<T, RecvError>, DesyncError> {
         // Do not add check for program_desynced() here! This type of desync
         // is fatal. It is better to make sure it just doesn't happen.
         // See recv() above for more information.
@@ -411,9 +414,9 @@ impl<'a> SelectedOperation<'a> {
         r: &crossbeam::Receiver<T>,
     ) -> Result<(Option<DetThreadId>, T), RecvError> {
         match &r.receiver {
-            ChannelVariant::After(receiver) => {
-                selected.recv(receiver).map(|msg| (detthread::get_det_id(), msg))
-            }
+            ChannelVariant::After(receiver) => selected
+                .recv(receiver)
+                .map(|msg| (detthread::get_det_id(), msg)),
             ChannelVariant::Bounded(receiver)
             | ChannelVariant::Unbounded(receiver)
             | ChannelVariant::Never(receiver) => selected.recv(receiver),

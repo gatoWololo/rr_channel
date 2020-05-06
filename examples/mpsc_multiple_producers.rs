@@ -1,4 +1,4 @@
-use rr_channel::{mpsc, detthread};
+use rr_channel::{detthread, mpsc};
 
 /// Send messages with the possibility to disconnect.
 fn main() {

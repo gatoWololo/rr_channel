@@ -1,19 +1,19 @@
 use env_logger;
 use lazy_static::lazy_static;
-use log::{warn};
+use log::warn;
 use serde::{Deserialize, Serialize};
 
 pub mod crossbeam;
 mod crossbeam_select;
 mod crossbeam_select_macro;
 mod desync;
+pub mod detthread;
 mod error;
 pub mod ipc;
 pub mod mpsc;
 mod recordlog;
 pub mod router;
 mod rr;
-pub mod detthread;
 
 // pub use channel::{after, bounded, never, unbounded, Receiver, Sender};
 // pub use crossbeam_channel::{RecvError, RecvTimeoutError, TryRecvError};
@@ -24,10 +24,10 @@ pub mod detthread;
 //     sleep, yield_now, DetIdSpawner, DetThreadId,
 // };
 
+use desync::DesyncMode;
 use log::Level::*;
 use std::env::var;
 use std::env::VarError;
-use desync::DesyncMode;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum RRMode {

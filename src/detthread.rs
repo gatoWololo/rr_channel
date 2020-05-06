@@ -1,9 +1,9 @@
 use log::Level::*;
 use std::cell::RefCell;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread;
 use std::thread::JoinHandle;
 pub use std::thread::{current, panicking, park, park_timeout, sleep, yield_now};
-use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::{error, recordlog};
 

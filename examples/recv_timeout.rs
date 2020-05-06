@@ -1,6 +1,6 @@
 use rand::Rng;
-use rr_channel::detthread;
 use rr_channel::crossbeam::RecvTimeoutError;
+use rr_channel::detthread;
 use std::thread::sleep;
 /// Thread write to the same sender with recv_timeout
 /// Random delays to bring out more nondeterminism.

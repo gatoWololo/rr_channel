@@ -1,20 +1,20 @@
-use std::sync::mpsc;
 use log::Level::*;
 use std::cell::RefCell;
 use std::cell::RefMut;
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::sync::mpsc;
 use std::time::Duration;
 
-use crate::recordlog::{self, RecordedEvent, ChannelLabel};
-use crate::error::{DesyncError, RecvErrorRR};
-use crate::DesyncMode;
-use crate::rr::{self, DetChannelId};
-use crate::detthread::{self, DetThreadId};
-use crate::{get_generic_name, RECORD_MODE, DESYNC_MODE, ENV_LOGGER};
 use crate::desync;
+use crate::detthread::{self, DetThreadId};
+use crate::error::{DesyncError, RecvErrorRR};
+use crate::recordlog::{self, ChannelLabel, RecordedEvent};
 use crate::rr::RecvRR;
 use crate::rr::SendRR;
+use crate::rr::{self, DetChannelId};
+use crate::DesyncMode;
+use crate::{get_generic_name, DESYNC_MODE, ENV_LOGGER, RECORD_MODE};
 
 #[derive(Debug)]
 pub struct Sender<T> {

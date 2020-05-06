@@ -1,5 +1,5 @@
-use rr_channel::mpsc;
 use rr_channel::detthread;
+use rr_channel::mpsc;
 
 fn main() {
     let (tx, rx) = mpsc::channel();

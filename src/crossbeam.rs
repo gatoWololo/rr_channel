@@ -1,20 +1,20 @@
-pub use crossbeam_channel::{self, RecvTimeoutError, SendError, TryRecvError, RecvError};
+pub use crossbeam_channel::{self, RecvError, RecvTimeoutError, SendError, TryRecvError};
 use log::Level::*;
 use std::cell::{RefCell, RefMut};
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use crate::desync::{self, DesyncMode};
-use crate::error::{DesyncError, RecvErrorRR};
-use crate::recordlog::{self, RecordedEvent, ChannelLabel};
-use crate::rr::{self, DetChannelId, SendRR};
-use crate::{RRMode, DESYNC_MODE};
 use crate::detthread::{self, DetThreadId};
-use crate::{get_generic_name, RECORD_MODE, ENV_LOGGER};
+use crate::error::{DesyncError, RecvErrorRR};
+use crate::recordlog::{self, ChannelLabel, RecordedEvent};
+use crate::rr::{self, DetChannelId, SendRR};
+use crate::{get_generic_name, ENV_LOGGER, RECORD_MODE};
+use crate::{RRMode, DESYNC_MODE};
 
+pub use crate::crossbeam_select::{Select, SelectedOperation};
 use crate::rr::RecvRR;
 pub use crate::select;
-pub use crate::crossbeam_select::{Select, SelectedOperation};
 
 /// TODO: Switch all these individual fields and use metadata instead.
 pub struct Sender<T> {
