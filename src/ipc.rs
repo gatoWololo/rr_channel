@@ -1,35 +1,33 @@
-use crate::get_generic_name;
-use crate::log_rr;
-use crate::rr::RecvErrorRR;
-use crate::rr::{
-    self, get_forward_id, get_log_entry, get_log_entry_with, mark_program_as_desynced,
-    program_desyned, sleep_until_desync, ChannelLabel, DesyncError, DetChannelId, IpcDummyError,
-    IpcSelectEvent, RecordMetadata, RecordedEvent, RecvRR, SendRR,
-};
-use crate::thread::{
-    get_and_inc_channel_id, get_det_id, get_det_id_desync, get_event_id, inc_event_id, DetThreadId,
-};
-use crate::{DesyncMode, RRMode, DESYNC_MODE, ENV_LOGGER, RECORD_MODE};
 use bincode;
-use ipc_channel::ipc::{self};
+
 pub use ipc_channel::ipc::{
-    bytes_channel, IpcBytesReceiver, IpcBytesSender, IpcOneShotServer, IpcSharedMemory,
+    self, bytes_channel, IpcBytesReceiver, IpcBytesSender, IpcOneShotServer, IpcSharedMemory,
 };
 use ipc_channel::platform::{OsIpcSharedMemory, OsOpaqueIpcChannel};
 pub use ipc_channel::Error;
+
 use log::Level::*;
-use serde::de::DeserializeOwned;
-use serde::{ser::SerializeStruct, Deserialize, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 use std::cell::RefMut;
-use std::thread::sleep;
 use std::time::Duration;
 
 use ipc_channel::ipc::OpaqueIpcSender;
 use std::cell::RefCell;
-use std::collections::hash_map::HashMap;
-use std::collections::HashSet;
-use std::collections::VecDeque;
+use std::collections::{hash_map::HashMap, VecDeque};
+
 use std::thread;
+
+use crate::{DESYNC_MODE, ENV_LOGGER};
+use crate::recordlog::RecordedEvent;
+use crate::error::{self, DesyncError, RecvErrorRR};
+use crate::desync::DesyncMode;
+use crate::{RRMode, get_generic_name, RECORD_MODE};
+use crate::rr::{self, DetChannelId};
+use crate::detthread::DetThreadId;
+use crate::recordlog::{self, ChannelLabel, IpcSelectEvent};
+use crate::{desync, detthread};
+use crate::rr::RecvRR;
+use crate::rr::SendRR;
 
 type OsIpcReceiverResults = (Vec<u8>, Vec<OsOpaqueIpcChannel>, Vec<OsIpcSharedMemory>);
 
@@ -37,7 +35,7 @@ type OsIpcReceiverResults = (Vec<u8>, Vec<OsOpaqueIpcChannel>, Vec<OsIpcSharedMe
 pub struct IpcReceiver<T> {
     pub(crate) receiver: ipc::IpcReceiver<(Option<DetThreadId>, T)>,
     buffer: RefCell<HashMap<Option<DetThreadId>, VecDeque<T>>>,
-    pub(crate) metadata: RecordMetadata,
+    pub(crate) metadata: recordlog::RecordMetadata,
 }
 
 impl<T> IpcReceiver<T> {
@@ -48,7 +46,7 @@ impl<T> IpcReceiver<T> {
         IpcReceiver {
             receiver,
             buffer: RefCell::new(HashMap::new()),
-            metadata: RecordMetadata {
+            metadata: recordlog::RecordMetadata {
                 type_name: get_generic_name::<T>().to_string(),
                 flavor: ChannelLabel::Ipc,
                 mode: *RECORD_MODE,
@@ -58,7 +56,7 @@ impl<T> IpcReceiver<T> {
     }
 }
 
-impl<T> RecvRR<T, ipc_channel::Error> for IpcReceiver<T>
+impl<T> rr::RecvRR<T, ipc_channel::Error> for IpcReceiver<T>
 where
     T: for<'de> Deserialize<'de> + Serialize,
 {
@@ -68,7 +66,7 @@ where
     ) -> (Result<T, ipc_channel::Error>, RecordedEvent) {
         match event {
             Ok((sender_thread, msg)) => (Ok(msg), RecordedEvent::IpcRecvSucc { sender_thread }),
-            Err(e) => (Err(e), RecordedEvent::IpcRecvErr(IpcDummyError)),
+            Err(e) => (Err(e), RecordedEvent::IpcRecvErr(error::IpcDummyError)),
         }
     }
 
@@ -80,14 +78,14 @@ where
             RecordedEvent::IpcRecvSucc { sender_thread } => {
                 let retval = self.replay_recv(&sender_thread)?;
                 // Here is where we explictly increment our event_id!
-                inc_event_id();
+                detthread::inc_event_id();
                 Ok(Ok(retval))
             }
             RecordedEvent::IpcRecvErr(e) => {
                 // TODO
                 let err = "ErrorKing::Custom TODO".to_string();
                 // Here is where we explictly increment our event_id!
-                inc_event_id();
+                detthread::inc_event_id();
                 Ok(Err(Box::new(ipc_channel::ErrorKind::Custom(err))))
             }
             e => {
@@ -106,7 +104,7 @@ where
 
 pub struct OpaqueIpcReceiver {
     opaque_receiver: ipc_channel::ipc::OpaqueIpcReceiver,
-    pub(crate) metadata: RecordMetadata,
+    pub(crate) metadata: recordlog::RecordMetadata,
     /// For the IpceReceiverSet to work correctly, we keep track of when
     /// a OpaqueIpcReceiver is closed, to avoid adding it to the set
     /// of receivers when we desync. We track this information here.
@@ -170,7 +168,7 @@ where
 #[derive(Debug, Serialize, Deserialize)]
 pub struct IpcSender<T> {
     sender: ipc::IpcSender<(Option<DetThreadId>, T)>,
-    pub(crate) metadata: RecordMetadata,
+    pub(crate) metadata: recordlog::RecordMetadata,
 }
 
 impl<T> Clone for IpcSender<T>
@@ -185,7 +183,7 @@ where
     }
 }
 
-impl<T> SendRR<T, Error> for IpcSender<T>
+impl<T> rr::SendRR<T, Error> for IpcSender<T>
 where
     T: Serialize,
 {
@@ -223,17 +221,17 @@ where
         ) {
             Ok(v) => v,
             Err((error, msg)) => {
-                log_rr!(Warn, "IpcSend::Desynchronization detected: {:?}", error);
+                crate::log_rr!(Warn, "IpcSend::Desynchronization detected: {:?}", error);
                 match *DESYNC_MODE {
                     DesyncMode::Panic => panic!("IpcSend::Desynchronization detected: {:?}", error),
                     // TODO: One day we may want to record this alternate execution.
                     DesyncMode::KeepGoing => {
-                        mark_program_as_desynced();
-                        let res = SendRR::send(self, get_forward_id(), msg);
+                        desync::mark_program_as_desynced();
+                        let res = rr::SendRR::send(self, rr::get_forward_id(), msg);
                         // TODO Ugh, right now we have to carefully increase the event_id
                         // in the "right places" or nothing will work correctly.
                         // How can we make this a lot less error prone?
-                        inc_event_id();
+                        detthread::inc_event_id();
                         res
                     }
                 }
@@ -249,9 +247,9 @@ where
         let id = DetChannelId::new();
 
         let type_name = get_generic_name::<T>();
-        log_rr!(Info, "Sender connected created: {:?} {:?}", id, type_name);
+        crate::log_rr!(Info, "Sender connected created: {:?} {:?}", id, type_name);
 
-        let metadata = RecordMetadata {
+        let metadata = recordlog::RecordMetadata {
             type_name: type_name.to_string(),
             flavor: ChannelLabel::Ipc,
             mode: *RECORD_MODE,
@@ -265,14 +263,16 @@ pub fn channel<T>() -> Result<(IpcSender<T>, IpcReceiver<T>), std::io::Error>
 where
     T: for<'de> Deserialize<'de> + Serialize,
 {
+    // Only way to create channels. This is an entry point. So make sure that ENV_LOGGER
+    // is initialized here.
     *ENV_LOGGER;
 
     let (sender, receiver) = ipc::channel()?;
     let id = DetChannelId::new();
     let type_name = get_generic_name::<T>();
-    log_rr!(Info, "IPC channel created: {:?} {:?}", id, type_name);
+    crate::log_rr!(Info, "IPC channel created: {:?} {:?}", id, type_name);
 
-    let metadata = RecordMetadata {
+    let metadata = recordlog::RecordMetadata {
         type_name: type_name.to_string(),
         flavor: ChannelLabel::Ipc,
         mode: *RECORD_MODE,
@@ -407,15 +407,15 @@ impl IpcReceiverSet {
 
     fn do_add(&mut self, receiver: OpaqueIpcReceiver) -> Result<u64, std::io::Error> {
         self.rr_add(receiver).unwrap_or_else(|(e, receiver)| {
-            log_rr!(Warn, "IpcReceiver::add::Desynchonization detected: {:?}", e);
+            crate::log_rr!(Warn, "IpcReceiver::add::Desynchonization detected: {:?}", e);
             match *DESYNC_MODE {
                 DesyncMode::Panic => {
                     panic!("IpcReceiver::add::Desynchronization detected: {:?}", e)
                 }
                 DesyncMode::KeepGoing => {
-                    mark_program_as_desynced();
+                    desync::mark_program_as_desynced();
                     self.move_receivers_to_set();
-                    inc_event_id();
+                    detthread::inc_event_id();
                     self.receiver_set.add_opaque(receiver.opaque_receiver)
                 }
             }
@@ -423,17 +423,17 @@ impl IpcReceiverSet {
     }
 
     pub fn select(&mut self) -> Result<Vec<IpcSelectionResult>, std::io::Error> {
-        log_rr!(Info, "IpcSelect::select()");
+        crate::log_rr!(Info, "IpcSelect::select()");
         self.rr_select().unwrap_or_else(|(e, entries)| {
-            log_rr!(Warn, "IpcSelect::Desynchonization detected: {:?}", e);
+            crate::log_rr!(Warn, "IpcSelect::Desynchonization detected: {:?}", e);
 
             match *DESYNC_MODE {
                 DesyncMode::Panic => {
                     panic!("IpcSelect::Desynchronization detected: {:?}", e);
                 }
                 DesyncMode::KeepGoing => {
-                    mark_program_as_desynced();
-                    log_rr!(
+                    desync::mark_program_as_desynced();
+                    crate::log_rr!(
                         Trace,
                         "Looking for entries in buffer or call to select()..."
                     );
@@ -443,13 +443,13 @@ impl IpcReceiverSet {
                     // actual wait.
                     match self.get_buffered_entries() {
                         None => {
-                            log_rr!(Debug, "Doing direct do_select()");
-                            inc_event_id();
+                            crate::log_rr!(Debug, "Doing direct do_select()");
+                            detthread::inc_event_id();
                             self.do_select()
                         }
                         Some(be) => {
-                            log_rr!(Debug, "Using buffered entries.");
-                            inc_event_id();
+                            crate::log_rr!(Debug, "Using buffered entries.");
+                            detthread::inc_event_id();
                             Ok(be)
                         }
                     }
@@ -469,7 +469,7 @@ impl IpcReceiverSet {
         Result<Vec<IpcSelectionResult>, std::io::Error>,
         (DesyncError, Vec<IpcSelectionResult>),
     > {
-        if program_desyned() {
+        if desync::program_desyned() {
             return Err((DesyncError::Desynchronized, vec![]));
         }
         match self.mode {
@@ -504,7 +504,7 @@ impl IpcReceiverSet {
                     select_events: recorded_events,
                 };
                 // Ehh, we fake it here. We never check this value anyways.
-                rr::log(
+                recordlog::log(
                     event,
                     ChannelLabel::IpcSelect,
                     "IpcSelect",
@@ -519,14 +519,14 @@ impl IpcReceiverSet {
                 if self.desynced {
                     return Err((DesyncError::Desynchronized, vec![]));
                 }
-                let det_id = get_det_id_desync().map_err(|e| (e, vec![]))?;
+                let det_id = detthread::get_det_id_desync().map_err(|e| (e, vec![]))?;
 
                 // Here we put this thread to sleep if the entry is missing.
                 // On record, the thread never returned from blocking...
-                let entry = get_log_entry(det_id, get_event_id());
+                let entry = recordlog::get_log_entry(det_id, detthread::get_event_id());
                 if let Err(e @ DesyncError::NoEntryInLog(_, _)) = entry {
-                    log_rr!(Info, "Saw {:?}. Putting thread to sleep.", e);
-                    sleep_until_desync();
+                    crate::log_rr!(Info, "Saw {:?}. Putting thread to sleep.", e);
+                    desync::sleep_until_desync();
                     // Thread woke back up... desynced!
                     return Err((DesyncError::DesynchronizedWakeup, vec![]));
                 }
@@ -547,7 +547,7 @@ impl IpcReceiverSet {
                             }
                         }
 
-                        inc_event_id();
+                        detthread::inc_event_id();
                         Ok(Ok(events))
                     }
                     event => {
@@ -568,14 +568,14 @@ impl IpcReceiverSet {
         &mut self,
         event: &IpcSelectEvent,
     ) -> Result<IpcSelectionResult, (DesyncError, Option<IpcSelectionResult>)> {
-        log_rr!(Trace, "replay_select_event for {:?}", event);
+        crate::log_rr!(Trace, "replay_select_event for {:?}", event);
         match event {
             IpcSelectEvent::MessageReceived(index, expected_sender) => {
                 if expected_sender.is_none() {
                     // Since we don't have a expected_sender, it may be the case this
                     // is nondeterminism if there are multiple producers both writing
                     // to this channel as None.
-                    log_rr!(
+                    crate::log_rr!(
                         Warn,
                         "Sender ID is None. \
                                    This execution may be nondeterministic"
@@ -606,7 +606,7 @@ impl IpcReceiverSet {
 
                 match IpcReceiverSet::rr_recv(receiver) {
                     Err(RecvErrorRR::Disconnected) => {
-                        log_rr!(
+                        crate::log_rr!(
                             Trace,
                             "replay_select_event(): Saw channel closed for {:?}",
                             index
@@ -620,7 +620,7 @@ impl IpcReceiverSet {
                     }
                     Ok(val) => {
                         // Expected a channel closed, saw a real message...
-                        log_rr!(Trace, "Expected channel closed! Saw success: {:?}", index);
+                        crate::log_rr!(Trace, "Expected channel closed! Saw success: {:?}", index);
                         Err((
                             DesyncError::ChannelClosedExpected,
                             Some(IpcReceiverSet::convert(*index, val.0, val.1, val.2)),
@@ -659,14 +659,14 @@ impl IpcReceiverSet {
         expected_sender: &Option<DetThreadId>,
         receiver: &mut OpaqueIpcReceiver,
     ) -> Result<IpcSelectionResult, (DesyncError, Option<IpcSelectionResult>)> {
-        log_rr!(Debug, "do_replay_recv_for_entry");
+        crate::log_rr!(Debug, "do_replay_recv_for_entry");
 
         if let Some(entry) = buffer
             .get_mut(&index)
             .and_then(|m| m.get_mut(expected_sender))
             .and_then(|e| e.pop_front())
         {
-            log_rr!(Trace, "IpcSelect(): Recv message found in buffer.");
+            crate::log_rr!(Trace, "IpcSelect(): Recv message found in buffer.");
             return Ok(IpcSelectionResult::MessageReceived(index, entry));
         }
 
@@ -676,7 +676,7 @@ impl IpcReceiverSet {
                 match IpcReceiverSet::rr_recv(receiver) {
                     Ok(v) => v,
                     Err(RecvErrorRR::Disconnected) => {
-                        log_rr!(Trace, "Expected message, saw channel closed.");
+                        crate::log_rr!(Trace, "Expected message, saw channel closed.");
                         // remember that this receiver closed!
                         receiver.closed = true;
                         return Err((DesyncError::ChannelClosedUnexpected(index),
@@ -691,10 +691,10 @@ impl IpcReceiverSet {
             let det_id = IpcReceiverSet::deserialize_id(&msg);
 
             if &det_id == expected_sender {
-                log_rr!(Trace, "do_replay_recv_for_entry: message found via recv()");
+                crate::log_rr!(Trace, "do_replay_recv_for_entry: message found via recv()");
                 return Ok(IpcSelectionResult::MessageReceived(index, msg));
             } else {
-                log_rr!(
+                crate::log_rr!(
                     Trace,
                     "Wrong message received from {:?}, adding it to buffer",
                     det_id
@@ -712,7 +712,7 @@ impl IpcReceiverSet {
     /// Call actual select for real IpcReceiverSet and convert their
     /// ipc_channel::ipc::IpcSelectionResult into our IpcSelectionResult.
     fn do_select(&mut self) -> Result<Vec<IpcSelectionResult>, std::io::Error> {
-        log_rr!(Trace, "IpcReceiverSet::do_select()");
+        crate::log_rr!(Trace, "IpcReceiverSet::do_select()");
 
         let selected = self.receiver_set.select()?;
         let selected: Vec<IpcSelectionResult> = selected
@@ -726,7 +726,7 @@ impl IpcReceiverSet {
                 }
             })
             .collect();
-        log_rr!(Info, "Found {:?} entries.", selected.len());
+        crate::log_rr!(Info, "Found {:?} entries.", selected.len());
         Ok(selected)
     }
 
@@ -735,13 +735,13 @@ impl IpcReceiverSet {
         &mut self,
         receiver: OpaqueIpcReceiver,
     ) -> Result<Result<u64, std::io::Error>, (DesyncError, OpaqueIpcReceiver)> {
-        if program_desyned() {
+        if desync::program_desyned() {
             return Err((DesyncError::Desynchronized, receiver));
         }
         let metadata = receiver.metadata.clone();
         let flavor = metadata.flavor;
         let id = metadata.id;
-        log_rr!(Debug, "IpcSelect::rr_add<{:?}>()", id);
+        crate::log_rr!(Debug, "IpcSelect::rr_add<{:?}>()", id);
 
         // After the first time we desynchronize, this is set to true and future times
         // we eill be sent here.
@@ -757,18 +757,18 @@ impl IpcReceiverSet {
                 };
 
                 let event = RecordedEvent::IpcSelectAdd(index);
-                rr::log(event, flavor, &metadata.type_name, &id);
+                recordlog::log(event, flavor, &metadata.type_name, &id);
                 Ok(Ok(index))
             }
             // Do not add receiver to IpcReceiverSet, instead move the receiver
             // to our own `receivers` hashmap where the index returned here is
             // the key.
             RRMode::Replay => {
-                let det_id = match get_det_id_desync() {
+                let det_id = match detthread::get_det_id_desync() {
                     Err(e) => return Err((e, receiver)),
                     Ok(v) => v,
                 };
-                let log_entry = match get_log_entry_with(det_id, get_event_id(), &flavor, &id) {
+                let log_entry = match recordlog::get_log_entry_with(det_id, detthread::get_event_id(), &flavor, &id) {
                     Err(e) => return Err((e, receiver)),
                     Ok(v) => v,
                 };
@@ -787,7 +787,7 @@ impl IpcReceiverSet {
                         self.receivers.insert(self.index, receiver);
 
                         self.index += 1;
-                        inc_event_id();
+                        detthread::inc_event_id();
                         Ok(Ok(index))
                     }
                     event => {
@@ -803,28 +803,28 @@ impl IpcReceiverSet {
     /// Fetch all buffered entries and treat them as the results of a
     /// select.
     fn get_buffered_entries(&mut self) -> Option<Vec<IpcSelectionResult>> {
-        log_rr!(Trace, "Desynchronized detected. Fetching buffered Entries.");
+        crate::log_rr!(Trace, "Desynchronized detected. Fetching buffered Entries.");
         let mut entries = vec![];
         // Add all events that we have buffered up to this point if any.
         for (index, mut hashmap) in self.buffer.drain() {
             for (_, mut queue) in hashmap.drain() {
                 for entry in queue.drain(..) {
-                    log_rr!(Trace, "Entry found through buffer!");
+                    crate::log_rr!(Trace, "Entry found through buffer!");
                     entries.push(IpcSelectionResult::MessageReceived(index, entry));
                 }
             }
         }
         if entries.len() == 0 {
-            log_rr!(Trace, "No buffered entries.");
+            crate::log_rr!(Trace, "No buffered entries.");
             None
         } else {
             for e in &entries {
                 match e {
                     IpcSelectionResult::MessageReceived(i, _) => {
-                        log_rr!(Trace, "IpcSelectionResult::MessageReceived({:?}, _)", i);
+                        crate::log_rr!(Trace, "IpcSelectionResult::MessageReceived({:?}, _)", i);
                     }
                     IpcSelectionResult::ChannelClosed(i) => {
-                        log_rr!(Trace, "IpcSelectionResult::ChannelClosed({:?}, _)", i);
+                        crate::log_rr!(Trace, "IpcSelectionResult::ChannelClosed({:?}, _)", i);
                     }
                 }
             }
@@ -838,7 +838,7 @@ impl IpcReceiverSet {
     fn move_receivers_to_set(&mut self) {
         // Move all our receivers into the receiver set.
         if !self.desynced {
-            log_rr!(Debug, "Moving all receivers into actual select set.");
+            crate::log_rr!(Debug, "Moving all receivers into actual select set.");
 
             // IMPORTANT: Vec ensures that element are drained in order they were added!
             // This is necessary for the receiver set indices to match.
@@ -860,7 +860,7 @@ impl IpcReceiverSet {
                             "Unable to add dummy receiver while \
                                 handling desynchronization.",
                         );
-                    log_rr!(Trace, "Adding dummy receiver at index {:?}", index);
+                    crate::log_rr!(Trace, "Adding dummy receiver at index {:?}", index);
                 } else {
                     // Add the real receiver.
                     let id = r.metadata.id.clone();
@@ -869,7 +869,7 @@ impl IpcReceiverSet {
                         .add_opaque(r.opaque_receiver)
                         .expect("Unable to add receiver while handling desynchronization.");
 
-                    log_rr!(
+                    crate::log_rr!(
                         Trace,
                         "move_receivers_to_set: Added receiver {:?} with index: {:?}",
                         id,

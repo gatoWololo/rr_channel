@@ -1,11 +1,11 @@
 // Create a simple streaming channel - taken from mpsc example
 
 use rr_channel::mpsc;
-use rr_channel::thread;
+use rr_channel::detthread;
 
 fn main() {
     let (tx, rx) = mpsc::channel();
-    thread::spawn(move || {
+    detthread::spawn(move || {
         tx.send(10).unwrap();
     });
 

@@ -1,4 +1,4 @@
-use rr_channel::thread;
+use rr_channel::detthread;
 
 /// Spawn 10 channels.
 /// We spawn 100 threads which share the sencer end of those 10 threads for a total
@@ -11,7 +11,7 @@ fn main() {
     let mut senders = Vec::new();
 
     for _ in 0..10 {
-        let (s, r) = rr_channel::unbounded();
+        let (s, r) = rr_channel::crossbeam::unbounded();
         receivers.push(r);
         senders.push(s);
     }
@@ -23,7 +23,7 @@ fn main() {
         for _ in 0..10 {
             // Ten threads have the receiver end of this channel.
             let s2 = shared.clone();
-            thread::spawn(move || {
+            detthread::spawn(move || {
                 for j in 0..10 {
                     s2.send(j).unwrap()
                 }

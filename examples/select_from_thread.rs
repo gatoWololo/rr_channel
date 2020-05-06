@@ -1,19 +1,19 @@
-use rr_channel::thread;
+use rr_channel::detthread;
 
 /// Two threads send their message through their own individual channels.
 /// A 3rd thread creates a 4th thread which receives messages.
 fn main() {
-    let (s0, r0) = rr_channel::unbounded();
-    let (s1, r1) = rr_channel::unbounded();
+    let (s0, r0) = rr_channel::crossbeam::unbounded();
+    let (s1, r1) = rr_channel::crossbeam::unbounded();
 
-    let h0 = thread::spawn(move || {
+    let h0 = detthread::spawn(move || {
         for _ in 0..10 {
             if let Err(_) = s0.send(0) {
                 return;
             }
         }
     });
-    let h1 = thread::spawn(move || {
+    let h1 = detthread::spawn(move || {
         for _ in 0..10 {
             if let Err(_) = s1.send(1) {
                 return;
@@ -21,9 +21,9 @@ fn main() {
         }
     });
 
-    let h2 = thread::spawn(move || {
+    let h2 = detthread::spawn(move || {
         // Spawn a secondary thread just for funsies.
-        thread::spawn(move || {
+        detthread::spawn(move || {
             for _ in 0..20 {
                 rr_channel::select! {
                     recv(r0) -> x => println!("receiver 0: {:?}", x),

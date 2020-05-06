@@ -1,19 +1,19 @@
 //The test creates two channels that send messages with the possibility to disconnect
 //because they are not cloned.
 
-use rr_channel::thread;
+use rr_channel::detthread;
 
 /// Send messages with the possibility to disconnect.
 fn main() {
-    let (s1, r1) = rr_channel::unbounded();
-    let (s2, r2) = rr_channel::unbounded();
+    let (s1, r1) = rr_channel::crossbeam::unbounded();
+    let (s2, r2) = rr_channel::crossbeam::unbounded();
 
-    thread::spawn(move || {
+    detthread::spawn(move || {
         for _ in 0..30 {
             s1.send(1).unwrap()
         }
     });
-    thread::spawn(move || {
+    detthread::spawn(move || {
         for _ in 0..30 {
             s2.send(2).unwrap()
         }

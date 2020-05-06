@@ -9,17 +9,17 @@ fn main() {
     let mut set = ipc::IpcReceiverSet::new().unwrap();
     let s3 = s2.clone();
 
-    rr_channel::thread::spawn(move || loop {
+    rr_channel::detthread::spawn(move || loop {
         let delay = rand::thread_rng().gen_range(0, 3);
         std::thread::sleep(time::Duration::from_millis(delay));
         s.send(1);
     });
-    rr_channel::thread::spawn(move || loop {
+    rr_channel::detthread::spawn(move || loop {
         let delay = rand::thread_rng().gen_range(0, 5);
         std::thread::sleep(time::Duration::from_millis(delay));
         s2.send(2);
     });
-    rr_channel::thread::spawn(move || loop {
+    rr_channel::detthread::spawn(move || loop {
         let delay = rand::thread_rng().gen_range(0, 5);
         std::thread::sleep(time::Duration::from_millis(delay));
         s3.send(3);

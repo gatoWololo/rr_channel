@@ -1,22 +1,22 @@
 //The channels will not disconnect because they are cloned.
 
-use rr_channel::thread;
+use rr_channel::detthread;
 
 fn main() {
-    let (s1, r1) = rr_channel::unbounded();
-    let (s2, r2) = rr_channel::unbounded();
+    let (s1, r1) = rr_channel::crossbeam::unbounded();
+    let (s2, r2) = rr_channel::crossbeam::unbounded();
 
     // Keep copies around to avoid disconnecting channel.
     // Else we end up getting spurious RecvError from channel.
     let s1c = s1.clone();
     let s2c = s2.clone();
 
-    thread::spawn(move || {
+    detthread::spawn(move || {
         for _ in 0..30 {
             s1c.send(1).unwrap()
         }
     });
-    thread::spawn(move || {
+    detthread::spawn(move || {
         for _ in 0..30 {
             s2c.send(2).unwrap()
         }

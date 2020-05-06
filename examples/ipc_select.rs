@@ -3,23 +3,25 @@ use rr_channel::ipc;
 use rr_channel::ipc::IpcSelectionResult;
 use std::time;
 
+use rr_channel::detthread;
+
 fn main() {
     let (s, r) = ipc::channel::<u32>().unwrap();
     let (s2, r2) = ipc::channel::<u32>().unwrap();
     let (s3, r3) = ipc::channel::<u32>().unwrap();
     let mut set = ipc::IpcReceiverSet::new().unwrap();
 
-    rr_channel::thread::spawn(move || loop {
+    detthread::spawn(move || loop {
         let delay = rand::thread_rng().gen_range(0, 3);
         std::thread::sleep(time::Duration::from_millis(delay));
         s.send(1);
     });
-    rr_channel::thread::spawn(move || loop {
+    detthread::spawn(move || loop {
         let delay = rand::thread_rng().gen_range(0, 5);
         std::thread::sleep(time::Duration::from_millis(delay));
         s2.send(2);
     });
-    rr_channel::thread::spawn(move || loop {
+    detthread::spawn(move || loop {
         let delay = rand::thread_rng().gen_range(0, 5);
         std::thread::sleep(time::Duration::from_millis(delay));
         s3.send(3);

@@ -14,13 +14,13 @@ fn main() {
     let set2 = set.clone();
     let set3 = set.clone();
 
-    let h1 = rr_channel::thread::spawn(move || {
+    let h1 = rr_channel::detthread::spawn(move || {
         add_receiver(1, set);
     });
-    let h2 = rr_channel::thread::spawn(|| {
+    let h2 = rr_channel::detthread::spawn(|| {
         add_receiver(2, set2);
     });
-    let h3 = rr_channel::thread::spawn(|| {
+    let h3 = rr_channel::detthread::spawn(|| {
         add_receiver(3, set3);
     });
 

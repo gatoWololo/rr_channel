@@ -13,13 +13,13 @@ fn main() {
     // To ensure deterministic router. We require the router to
     // be explicitly initialized at the very beginning!
     lazy_static::initialize(&ROUTER);
-    let h1 = rr_channel::thread::spawn(|| {
+    let h1 = rr_channel::detthread::spawn(|| {
         add_receiver(1);
     });
-    let h2 = rr_channel::thread::spawn(|| {
+    let h2 = rr_channel::detthread::spawn(|| {
         add_receiver(2);
     });
-    let h3 = rr_channel::thread::spawn(|| {
+    let h3 = rr_channel::detthread::spawn(|| {
         add_receiver(3);
     });
 

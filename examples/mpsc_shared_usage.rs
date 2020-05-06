@@ -1,5 +1,5 @@
 use rr_channel::mpsc;
-use rr_channel::thread;
+use rr_channel::detthread;
 
 fn main() {
     // Create a shared channel that can be sent along from many threads
@@ -8,7 +8,7 @@ fn main() {
     let (tx, rx) = mpsc::channel();
     for i in 0..10 {
         let tx = tx.clone();
-        thread::spawn(move || {
+        detthread::spawn(move || {
             tx.send(i).unwrap();
         });
     }

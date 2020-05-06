@@ -1,28 +1,25 @@
 use std::sync::mpsc;
-// use std::sync::mpsc::{RecvError, SendError, RecvTimeoutError, TryRecvError};
-use crate::get_generic_name;
-use crate::log_rr;
-use crate::rr::mark_program_as_desynced;
-use crate::rr::{
-    self, get_forward_id, ChannelLabel, DesyncError, DetChannelId, RecordMetadata, RecordedEvent,
-    RecvErrorRR, RecvRR, SendRR,
-};
-use crate::thread::get_and_inc_channel_id;
-use crate::thread::*;
-use crate::{DesyncMode, RRMode, DESYNC_MODE, ENV_LOGGER, RECORD_MODE};
 use log::Level::*;
 use std::cell::RefCell;
 use std::cell::RefMut;
 use std::collections::HashMap;
 use std::collections::VecDeque;
-use std::error::Error;
 use std::time::Duration;
-use std::time::Instant;
+
+use crate::recordlog::{self, RecordedEvent, ChannelLabel};
+use crate::error::{DesyncError, RecvErrorRR};
+use crate::DesyncMode;
+use crate::rr::{self, DetChannelId};
+use crate::detthread::{self, DetThreadId};
+use crate::{get_generic_name, RECORD_MODE, DESYNC_MODE, ENV_LOGGER};
+use crate::desync;
+use crate::rr::RecvRR;
+use crate::rr::SendRR;
 
 #[derive(Debug)]
 pub struct Sender<T> {
     pub(crate) sender: SenderFlavor<T>,
-    pub(crate) metadata: RecordMetadata,
+    pub(crate) metadata: recordlog::RecordMetadata,
 }
 
 #[derive(Debug)]
@@ -40,7 +37,7 @@ pub enum SenderFlavor<T> {
 /// General template for implementing trait RecvRR for our mpsc::Receiver<T>.
 macro_rules! impl_RR {
     ($err_type:ty, $succ: ident, $err:ident) => {
-        impl<T> RecvRR<T, $err_type> for Receiver<T> {
+        impl<T> rr::RecvRR<T, $err_type> for Receiver<T> {
             fn to_recorded_event(
                 &self,
                 event: Result<(Option<DetThreadId>, T), $err_type>,
@@ -59,17 +56,17 @@ macro_rules! impl_RR {
                     RecordedEvent::$succ { sender_thread } => {
                         let retval = self.replay_recv(&sender_thread)?;
                         // Here is where we explictly increment our event_id!
-                        inc_event_id();
+                        detthread::inc_event_id();
                         Ok(Ok(retval))
                     }
                     RecordedEvent::$err(e) => {
-                        log_rr!(
+                        crate::log_rr!(
                             Trace,
                             "Creating error event for: {:?}",
                             RecordedEvent::$err(e)
                         );
                         // Here is where we explictly increment our event_id!
-                        inc_event_id();
+                        detthread::inc_event_id();
                         Ok(Err(e))
                     }
                     e => {
@@ -99,7 +96,7 @@ impl_RR!(
 #[derive(Debug)]
 pub struct Receiver<T> {
     pub(crate) receiver: ReceiverFlavor<T>,
-    pub(crate) metadata: RecordMetadata,
+    pub(crate) metadata: recordlog::RecordMetadata,
     pub(crate) buffer: RefCell<HashMap<Option<DetThreadId>, VecDeque<T>>>,
 }
 
@@ -109,7 +106,7 @@ impl<T> Receiver<T> {
         Receiver {
             buffer: RefCell::new(HashMap::new()),
             receiver: real_receiver,
-            metadata: RecordMetadata {
+            metadata: recordlog::RecordMetadata {
                 type_name: get_generic_name::<T>().to_string(),
                 flavor,
                 mode: *RECORD_MODE,
@@ -152,7 +149,7 @@ impl<T> Receiver<T> {
             .unwrap_or_else(|e| self.handle_desync(e, false, f))
     }
 
-    pub fn metadata(&self) -> &RecordMetadata {
+    pub fn metadata(&self) -> &recordlog::RecordMetadata {
         &self.metadata
     }
 
@@ -213,17 +210,17 @@ impl<T> Sender<T> {
             Ok(v) => v,
             // send() should never hang. No need to check if NoEntryLog.
             Err((error, msg)) => {
-                log_rr!(Warn, "Desynchronization detected: {:?}", error);
+                crate::log_rr!(Warn, "Desynchronization detected: {:?}", error);
                 match *DESYNC_MODE {
                     DesyncMode::Panic => panic!("Send::Desynchronization detected: {:?}", error),
                     // TODO: One day we may want to record this alternate execution.
                     DesyncMode::KeepGoing => {
-                        mark_program_as_desynced();
-                        let res = SendRR::send(self, get_forward_id(), msg);
+                        desync::mark_program_as_desynced();
+                        let res = rr::SendRR::send(self, rr::get_forward_id(), msg);
                         // TODO Ugh, right now we have to carefully increase the event_id
                         // in the "right places" or nothing will work correctly.
                         // How can we make this a lot less error prone?
-                        inc_event_id();
+                        detthread::inc_event_id();
                         res
                     }
                 }
@@ -240,7 +237,7 @@ where
         // following implementation for crossbeam, we do not support MPSC for bounded channels as the blocking semantics are
         // more complicated to implement.
         if self.metadata.flavor == ChannelLabel::MpscBounded {
-            log_rr!(
+            crate::log_rr!(
                 Warn,
                 "MPSC for bounded channels not supported. Blocking semantics \
                      of bounded channels will not be preseved!"
@@ -253,7 +250,7 @@ where
     }
 }
 
-impl<T> SendRR<T, mpsc::SendError<T>> for Sender<T> {
+impl<T> rr::SendRR<T, mpsc::SendError<T>> for Sender<T> {
     fn check_log_entry(&self, entry: RecordedEvent) -> Result<(), DesyncError> {
         match entry {
             RecordedEvent::Sender => Ok(()),
@@ -303,7 +300,7 @@ impl<T> SenderFlavor<T> {
 //         // following implementation for crossbeam, we do not support MPSC for bounded channels as the blocking semantics are
 //         // more complicated to implement.
 //         if self.metadata.flavor == ChannelLabel::MpscBounded {
-//             log_rr!(Warn,
+//             crate::log_rr!(Warn,
 //                     "MPSC for bounded channels not supported. Blocking semantics \
 //                      of bounded channels will not be preseved!");
 //         }
@@ -323,13 +320,13 @@ pub fn sync_channel<T>(bound: usize) -> (Sender<T>, Receiver<T>) {
     let type_name = get_generic_name::<T>();
     let id = DetChannelId::new();
 
-    log_rr!(
+    crate::log_rr!(
         Info,
         "Bounded mpsc channel created: {:?} {:?}",
         id,
         type_name
     );
-    let metadata = RecordMetadata {
+    let metadata = recordlog::RecordMetadata {
         type_name: type_name.to_string(),
         flavor: channel_type,
         mode,
@@ -353,13 +350,13 @@ pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
     let type_name = get_generic_name::<T>();
     let id = DetChannelId::new();
 
-    log_rr!(
+    crate::log_rr!(
         Info,
         "Unbounded mpsc channel created: {:?} {:?}",
         id,
         type_name
     );
-    let metadata = RecordMetadata {
+    let metadata = recordlog::RecordMetadata {
         type_name: type_name.to_string(),
         flavor: channel_type,
         mode,

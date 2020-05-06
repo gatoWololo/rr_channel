@@ -1,16 +1,18 @@
 use rand::Rng;
-use rr_channel::{thread, RecvTimeoutError};
+use rr_channel::detthread;
+use rr_channel::crossbeam::RecvTimeoutError;
+use std::thread;
 /// Thread write to the same sender with recv_timeout
 /// Random delays to bring out more nondeterminism.
 use std::time;
 
 fn main() {
-    let (s, r) = rr_channel::unbounded();
+    let (s, r) = rr_channel::crossbeam::unbounded();
     let s2 = s.clone();
     // Avoid having channel disconnect.
     let _s = s.clone();
 
-    rr_channel::thread::spawn(move || {
+    detthread::spawn(move || {
         for _ in 0..20 {
             if let Err(_) = s.send("Thread 1") {
                 return;
@@ -20,7 +22,7 @@ fn main() {
         }
     });
 
-    rr_channel::thread::spawn(move || {
+    detthread::spawn(move || {
         for _ in 0..20 {
             if let Err(_) = s2.send("Thread 2") {
                 return;

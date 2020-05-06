@@ -6,7 +6,7 @@ use rand::Rng;
 use rr_channel::ipc;
 use rr_channel::router;
 use rr_channel::router::ROUTER;
-use rr_channel::Receiver;
+use rr_channel::crossbeam::Receiver;
 use std::time;
 use std::time::Duration;
 fn main() -> Result<(), std::io::Error> {
@@ -20,14 +20,14 @@ fn main() -> Result<(), std::io::Error> {
     });
     ROUTER.add_route(receiver, f);
 
-    let h1 = rr_channel::thread::spawn(move || {
+    let h1 = rr_channel::detthread::spawn(move || {
         for i in 0..20 {
             let delay = rand::thread_rng().gen_range(0, 5);
             std::thread::sleep(time::Duration::from_millis(delay));
             thread_sender1.send(1);
         }
     });
-    let h2 = rr_channel::thread::spawn(move || {
+    let h2 = rr_channel::detthread::spawn(move || {
         for i in 0..20 {
             let delay = rand::thread_rng().gen_range(0, 5);
             std::thread::sleep(time::Duration::from_millis(delay));

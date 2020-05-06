@@ -1,40 +1,39 @@
 use env_logger;
 use lazy_static::lazy_static;
-use log::{debug, trace, warn};
+use log::{warn};
 use serde::{Deserialize, Serialize};
-mod channel;
+
+pub mod crossbeam;
 mod crossbeam_select;
+mod crossbeam_select_macro;
+mod desync;
+mod error;
 pub mod ipc;
 pub mod mpsc;
+mod recordlog;
 pub mod router;
 mod rr;
-mod select;
-pub mod thread;
-// Rexports.
-pub use channel::{after, bounded, never, unbounded, Receiver, Sender};
-pub use crossbeam_channel::{RecvError, RecvTimeoutError, TryRecvError};
-pub use rr::{DetChannelId, LogEntry, RECORDED_INDICES, WRITE_LOG_FILE};
-pub use select::{Select, SelectedOperation};
-pub use thread::{
-    current, get_det_id, get_event_id, in_forwarding, inc_event_id, panicking, park, park_timeout,
-    sleep, yield_now, DetIdSpawner, DetThreadId,
-};
+pub mod detthread;
+
+// pub use channel::{after, bounded, never, unbounded, Receiver, Sender};
+// pub use crossbeam_channel::{RecvError, RecvTimeoutError, TryRecvError};
+// pub use rr::{DetChannelId, LogEntry, RECORDED_INDICES, WRITE_LOG_FILE};
+// pub use select::{Select, SelectedOperation};
+// pub use thread::{
+//     current, get_det_id, get_event_id, in_forwarding, inc_event_id, panicking, park, park_timeout,
+//     sleep, yield_now, DetIdSpawner, DetThreadId,
+// };
 
 use log::Level::*;
 use std::env::var;
 use std::env::VarError;
+use desync::DesyncMode;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum RRMode {
     Record,
     Replay,
     NoRR,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub enum DesyncMode {
-    Panic,
-    KeepGoing,
 }
 
 const RECORD_MODE_VAR: &str = "RR_CHANNEL";
@@ -49,7 +48,7 @@ lazy_static! {
 
     /// Record type. Initialized from environment variable RR_CHANNEL.
     pub static ref RECORD_MODE: RRMode = {
-        log_rr!(Debug, "Initializing RECORD_MODE lazy static.");
+        crate::log_rr!(Debug, "Initializing RECORD_MODE lazy static.");
 
         let mode = match var(RECORD_MODE_VAR) {
             Ok(value) => {
@@ -70,13 +69,13 @@ lazy_static! {
             }
         };
 
-        log_rr!(Info, "Mode {:?} selected.", mode);
+        crate::log_rr!(Info, "Mode {:?} selected.", mode);
         mode
     };
 
     /// Record type. Initialized from environment variable RR_CHANNEL.
     pub static ref DESYNC_MODE: DesyncMode = {
-        log_rr!(Debug, "Initializing DESYNC_MODE lazy static.");
+        crate::log_rr!(Debug, "Initializing DESYNC_MODE lazy static.");
 
         let mode = match var(DESYNC_MODE_VAR) {
             Ok(value) => {
@@ -96,13 +95,13 @@ lazy_static! {
             }
         };
 
-        log_rr!(Info, "Mode {:?} selected.", mode);
+        crate::log_rr!(Info, "Mode {:?} selected.", mode);
         mode
     };
 
     /// Name of record file.
     pub static ref LOG_FILE_NAME: String = {
-        log_rr!(Debug, "Initializing RECORD_FILE lazy static.");
+        crate::log_rr!(Debug, "Initializing RECORD_FILE lazy static.");
 
         let mode = match var(RECORD_FILE_VAR) {
             Ok(value) => {
@@ -116,7 +115,7 @@ lazy_static! {
             }
         };
 
-        log_rr!(Info, "Mode {:?} selected.", mode);
+        crate::log_rr!(Info, "Mode {:?} selected.", mode);
         mode
     };
 }
@@ -133,22 +132,25 @@ macro_rules! log_rr {
              "thread: {:?} | event# {:?} {} | {}",
              thread.name(),
              crate::event_name(),
-             crate::thread::get_event_id(),
+             crate::detthread::get_event_id(),
              formatted_msg);
     };
     ($log_level:expr, $msg:expr) => {
-        log_rr!($log_level, $msg,);
+        crate::log_rr!($log_level, $msg,);
     };
 }
 
+/// Helper function to `log_rr` macro. Handles log printing from router
+/// properly.
 fn event_name() -> String {
-    if crate::thread::in_forwarding() {
+    if crate::detthread::in_forwarding() {
         "ROUTER".to_string()
     } else {
-        format!("{:?}", (get_det_id(), get_event_id()))
+        format!("{:?}", (detthread::get_det_id(), detthread::get_event_id()))
     }
 }
 
+/// Prints name of type based on <T> by reaching into compiler intrinsics. NIGHTLY ONLY.
 fn get_generic_name<T>() -> &'static str {
     ""
     // "nightly-only"

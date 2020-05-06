@@ -1,44 +1,20 @@
-use crate::get_generic_name;
-use crate::log_rr;
-use crate::rr::mark_program_as_desynced;
-use crate::rr::{
-    self, get_forward_id, ChannelLabel, DesyncError, DetChannelId, RecordMetadata, RecordedEvent,
-    RecvErrorRR, RecvRR, SendRR,
-};
-use crate::thread::get_and_inc_channel_id;
-use crate::thread::*;
-use crate::{DesyncMode, RRMode, DESYNC_MODE, ENV_LOGGER, RECORD_MODE};
-use crossbeam_channel::{self, RecvError, RecvTimeoutError, SendError, TryRecvError};
+pub use crossbeam_channel::{self, RecvTimeoutError, SendError, TryRecvError, RecvError};
 use log::Level::*;
-use std::cell::RefCell;
-use std::cell::RefMut;
-use std::collections::HashMap;
-use std::collections::VecDeque;
-use std::error::Error;
-use std::time::Duration;
-use std::time::Instant;
+use std::cell::{RefCell, RefMut};
+use std::collections::{HashMap, VecDeque};
+use std::time::{Duration, Instant};
 
-pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
-    *ENV_LOGGER;
+use crate::desync::{self, DesyncMode};
+use crate::error::{DesyncError, RecvErrorRR};
+use crate::recordlog::{self, RecordedEvent, ChannelLabel};
+use crate::rr::{self, DetChannelId, SendRR};
+use crate::{RRMode, DESYNC_MODE};
+use crate::detthread::{self, DetThreadId};
+use crate::{get_generic_name, RECORD_MODE, ENV_LOGGER};
 
-    let (sender, receiver) = crossbeam_channel::unbounded();
-    let mode = *RECORD_MODE;
-    let channel_type = ChannelLabel::Unbounded;
-    let type_name = get_generic_name::<T>();
-    let id = DetChannelId::new();
-
-    log_rr!(Info, "Unbounded channel created: {:?} {:?}", id, type_name);
-    (
-        Sender {
-            sender,
-            mode,
-            channel_type,
-            channel_id: id.clone(),
-            type_name: type_name.to_string(),
-        },
-        Receiver::new(ChannelVariant::Unbounded(receiver), id),
-    )
-}
+use crate::rr::RecvRR;
+pub use crate::select;
+pub use crate::crossbeam_select::{Select, SelectedOperation};
 
 /// TODO: Switch all these individual fields and use metadata instead.
 pub struct Sender<T> {
@@ -62,7 +38,7 @@ impl<T> Clone for Sender<T> {
         // We do not support MPSC for bounded channels as the blocking semantics are
         // more complicated to implement.
         if self.channel_type == ChannelLabel::Bounded {
-            log_rr!(
+            crate::log_rr!(
                 Warn,
                 "MPSC for bounded channels not supported. Blocking semantics \
                      of bounded channels will not be preseved!"
@@ -110,20 +86,20 @@ impl<T> Sender<T> {
             Ok(v) => v,
             // send() should never hang. No need to check if NoEntryLog.
             Err((error, msg)) => {
-                log_rr!(Warn, "Desynchronization detected: {:?}", error);
+                crate::log_rr!(Warn, "Desynchronization detected: {:?}", error);
 
                 match *DESYNC_MODE {
                     DesyncMode::Panic => panic!("Send::Desynchronization detected: {:?}", error),
 
                     // TODO: One day we may want to record this alternate execution.
                     DesyncMode::KeepGoing => {
-                        mark_program_as_desynced();
+                        desync::mark_program_as_desynced();
 
-                        let res = SendRR::send(self, get_forward_id(), msg);
+                        let res = rr::SendRR::send(self, rr::get_forward_id(), msg);
                         // TODO Ugh, right now we have to carefully increase the event_id
                         // in the "right places" or nothing will work correctly.
                         // How can we make this a lot less error prone?
-                        inc_event_id();
+                        detthread::inc_event_id();
                         res
                     }
                 }
@@ -134,7 +110,7 @@ impl<T> Sender<T> {
 
 /// Holds different channels types which may have slightly different types.
 /// This is just the complexity cost of piggybacking off crossbeam_channels
-/// and their API so much.
+/// and their API.
 pub enum ChannelVariant<T> {
     After(crossbeam_channel::Receiver<T>),
     Bounded(crossbeam_channel::Receiver<(Option<DetThreadId>, T)>),
@@ -151,7 +127,7 @@ macro_rules! generate_channel_method {
             match self {
                 ChannelVariant::After(receiver) => {
                     match receiver.$method() {
-                        Ok(msg) => Ok((get_det_id(), msg)),
+                        Ok(msg) => Ok((detthread::get_det_id(), msg)),
                         // TODO: Why is this unreachable?
                         e => e.map(|_| unreachable!()),
                     }
@@ -174,7 +150,7 @@ impl<T> ChannelVariant<T> {
     ) -> Result<(Option<DetThreadId>, T), RecvTimeoutError> {
         match self {
             ChannelVariant::After(receiver) => match receiver.recv_timeout(duration) {
-                Ok(msg) => Ok((get_det_id(), msg)),
+                Ok(msg) => Ok((detthread::get_det_id(), msg)),
                 e => e.map(|_| unreachable!()),
             },
             ChannelVariant::Bounded(receiver)
@@ -190,12 +166,13 @@ pub struct Receiver<T> {
     /// to hide our mutation.
     pub(crate) buffer: RefCell<HashMap<Option<DetThreadId>, VecDeque<T>>>,
     pub(crate) receiver: ChannelVariant<T>,
-    pub(crate) metadata: RecordMetadata,
+    pub(crate) metadata: recordlog::RecordMetadata,
 }
 
-macro_rules! impl_RR {
+/// Captures template for: impl RecvRR<_, _> for Receiver<T>
+macro_rules! impl_recvrr {
     ($err_type:ty, $succ: ident, $err:ident) => {
-        impl<T> RecvRR<T, $err_type> for Receiver<T> {
+        impl<T> rr::RecvRR<T, $err_type> for Receiver<T> {
             fn to_recorded_event(
                 &self,
                 event: Result<(Option<DetThreadId>, T), $err_type>,
@@ -214,17 +191,17 @@ macro_rules! impl_RR {
                     RecordedEvent::$succ { sender_thread } => {
                         let retval = self.replay_recv(&sender_thread)?;
                         // Here is where we explictly increment our event_id!
-                        inc_event_id();
+                        detthread::inc_event_id();
                         Ok(Ok(retval))
                     }
                     RecordedEvent::$err(e) => {
-                        log_rr!(
+                        crate::log_rr!(
                             Trace,
                             "Creating error event for: {:?}",
                             RecordedEvent::$err(e)
                         );
                         // Here is where we explictly increment our event_id!
-                        inc_event_id();
+                        detthread::inc_event_id();
                         Ok(Err(e))
                     }
                     e => {
@@ -243,18 +220,17 @@ macro_rules! impl_RR {
     };
 }
 
-impl_RR!(RecvError, RecvSucc, RecvErr);
-impl_RR!(TryRecvError, TryRecvSucc, TryRecvErr);
-impl_RR!(RecvTimeoutError, RecvTimeoutSucc, RecvTimeoutErr);
+impl_recvrr!(RecvError, RecvSucc, RecvErr);
+impl_recvrr!(TryRecvError, TryRecvSucc, TryRecvErr);
+impl_recvrr!(RecvTimeoutError, RecvTimeoutSucc, RecvTimeoutErr);
 
-/// Implement crossbeam channel API.
 impl<T> Receiver<T> {
-    pub fn new(real_receiver: ChannelVariant<T>, id: DetChannelId) -> Receiver<T> {
+    pub(crate) fn new(real_receiver: ChannelVariant<T>, id: DetChannelId) -> Receiver<T> {
         let flavor = Receiver::get_marker(&real_receiver);
         Receiver {
             buffer: RefCell::new(HashMap::new()),
             receiver: real_receiver,
-            metadata: RecordMetadata {
+            metadata: recordlog::RecordMetadata {
                 type_name: get_generic_name::<T>().to_string(),
                 flavor,
                 mode: *RECORD_MODE,
@@ -263,7 +239,8 @@ impl<T> Receiver<T> {
         }
     }
 
-    /// Fetch buffered value if any.
+    /// Get a message that might have been buffered during replay. Useful for in case of
+    /// desynchronization when message replay no longer matters.
     pub(crate) fn get_buffered_value(&self) -> Option<T> {
         let mut hashmap = self.buffer.borrow_mut();
         for queue in hashmap.values_mut() {
@@ -281,18 +258,18 @@ impl<T> Receiver<T> {
     /// Notice even on `false`, an arbitrary number of messages from _other_ senders may
     /// be buffered.
     pub(crate) fn poll_entry(&self, sender: &Option<DetThreadId>, timeout: Duration) -> bool {
-        log_rr!(Debug, "poll_entry()");
+        crate::log_rr!(Debug, "poll_entry()");
         // There is already an entry in the buffer.
         if let Some(queue) = self.buffer.borrow_mut().get(sender) {
             if !queue.is_empty() {
-                log_rr!(Debug, "Entry found in buffer");
+                crate::log_rr!(Debug, "Entry found in buffer");
                 return true;
             }
         }
 
         match self.replay_recv_timeout(sender, timeout) {
             Ok(msg) => {
-                log_rr!(Debug, "Correct message found while polling and buffered.");
+                crate::log_rr!(Debug, "Correct message found while polling and buffered.");
                 // Save message in buffer for use later.
                 self.buffer
                     .borrow_mut()
@@ -302,9 +279,10 @@ impl<T> Receiver<T> {
                 true
             }
             Err(DesyncError::Timedout) => {
-                log_rr!(Debug, "No entry found while polling...");
+                crate::log_rr!(Debug, "No entry found while polling...");
                 false
             }
+            // TODO document why this is unreachable.
             _ => unreachable!(),
         }
     }
@@ -312,6 +290,7 @@ impl<T> Receiver<T> {
     /// This is the raw function called in a loop by our rr trait.
     /// It should not be called directly by anyone, as there is buffering
     /// that will not be properly taken into account if called directly.
+    // TODO make this a local function?
     fn rr_recv_timeout(&self, timeout: Duration) -> Result<(Option<DetThreadId>, T), RecvErrorRR> {
         self.receiver.recv_timeout(timeout).map_err(|e| match e {
             RecvTimeoutError::Timeout => RecvErrorRR::Timeout,
@@ -356,7 +335,7 @@ impl<T> Receiver<T> {
             .unwrap_or_else(|e| self.handle_desync(e, false, f))
     }
 
-    pub(crate) fn metadata(&self) -> &RecordMetadata {
+    pub(crate) fn metadata(&self) -> &recordlog::RecordMetadata {
         &self.metadata
     }
 
@@ -374,14 +353,40 @@ impl<T> Receiver<T> {
     }
 }
 
+// We need to make sure our ENV_LOGGER is initialized. We do this when the user of this library
+// creates channels. Below are the "entry points" to creating channels.
+
 pub fn after(duration: Duration) -> Receiver<Instant> {
     *ENV_LOGGER;
 
     let id = DetChannelId::new();
-    log_rr!(Info, "After channel receiver created: {:?}", id);
+    crate::log_rr!(Info, "After channel receiver created: {:?}", id);
     Receiver::new(
         ChannelVariant::After(crossbeam_channel::after(duration)),
         id,
+    )
+}
+
+// Chanel constructors provided by crossbeam API:
+pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
+    *ENV_LOGGER;
+
+    let (sender, receiver) = crossbeam_channel::unbounded();
+    let mode = *RECORD_MODE;
+    let channel_type = ChannelLabel::Unbounded;
+    let type_name = get_generic_name::<T>();
+    let id = rr::DetChannelId::new();
+
+    crate::log_rr!(Info, "Unbounded channel created: {:?} {:?}", id, type_name);
+    (
+        Sender {
+            sender,
+            mode,
+            channel_type,
+            channel_id: id.clone(),
+            type_name: type_name.to_string(),
+        },
+        Receiver::new(ChannelVariant::Unbounded(receiver), id),
     )
 }
 
@@ -392,7 +397,7 @@ pub fn bounded<T>(cap: usize) -> (Sender<T>, Receiver<T>) {
     let id = DetChannelId::new();
     let type_name = get_generic_name::<T>();
 
-    log_rr!(Info, "Bounded channel created: {:?} {:?}", id, type_name);
+    crate::log_rr!(Info, "Bounded channel created: {:?} {:?}", id, type_name);
     (
         Sender {
             sender,
@@ -413,7 +418,7 @@ pub fn never<T>() -> Receiver<T> {
     Receiver {
         buffer: RefCell::new(HashMap::new()),
         receiver: ChannelVariant::Never(crossbeam_channel::never()),
-        metadata: RecordMetadata {
+        metadata: recordlog::RecordMetadata {
             type_name,
             flavor: ChannelLabel::Never,
             mode: *RECORD_MODE,

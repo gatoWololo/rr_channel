@@ -3,7 +3,7 @@ use rr_channel::ipc;
 /// each time.
 use rr_channel::router;
 use rr_channel::router::ROUTER;
-use rr_channel::Receiver;
+use rr_channel::crossbeam::Receiver;
 
 fn main() -> Result<(), std::io::Error> {
     for i in 0..20 {

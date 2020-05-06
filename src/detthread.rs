@@ -1,13 +1,11 @@
-use crate::log_rr;
 use log::Level::*;
-use log::{error, info, trace};
 use std::cell::RefCell;
 use std::thread;
 use std::thread::JoinHandle;
 pub use std::thread::{current, panicking, park, park_timeout, sleep, yield_now};
-// use backtrace::Backtrace;
-use crate::rr::{DesyncError, EventId};
 use std::sync::atomic::{AtomicU32, Ordering};
+
+use crate::{error, recordlog};
 
 pub fn get_det_id() -> Option<DetThreadId> {
     DET_ID.with(|di| di.borrow().clone())
@@ -15,10 +13,10 @@ pub fn get_det_id() -> Option<DetThreadId> {
 
 /// Like `get_det_id` but treats missing DetThreadId as a
 /// desynchonization error.
-pub fn get_det_id_desync() -> Result<DetThreadId, DesyncError> {
+pub fn get_det_id_desync() -> Result<DetThreadId, error::DesyncError> {
     match get_det_id() {
         Some(v) => Ok(v),
-        None => Err(DesyncError::UnitializedDetThreadId),
+        None => Err(error::DesyncError::UnitializedDetThreadId),
     }
 }
 
@@ -38,7 +36,7 @@ pub fn set_temp_det_id(new_id: Option<DetThreadId>) {
     });
 }
 
-pub fn get_event_id() -> EventId {
+pub fn get_event_id() -> recordlog::EventId {
     EVENT_ID.with(|id| *id.borrow())
 }
 
@@ -46,7 +44,7 @@ pub fn get_event_id() -> EventId {
 pub fn inc_event_id() {
     EVENT_ID.with(|id| {
         *id.borrow_mut() += 1;
-        log_rr!(Debug, "Incremented TLS event_id: {:?}", *id.borrow());
+        crate::log_rr!(Debug, "Incremented TLS event_id: {:?}", *id.borrow());
     });
 }
 
@@ -100,7 +98,7 @@ where
 {
     let new_id = DET_ID_SPAWNER.with(|spawner| spawner.borrow_mut().new_child_det_id());
     let new_spawner = DetIdSpawner::from(new_id.clone());
-    log_rr!(
+    crate::log_rr!(
         Info,
         "thread::spawn() Assigned determinsitic id {:?} for new thread.",
         new_id
@@ -222,7 +220,7 @@ impl Builder {
         let new_id = DET_ID_SPAWNER.with(|spawner| spawner.borrow_mut().new_child_det_id());
 
         let new_spawner = DetIdSpawner::from(new_id.clone());
-        log_rr!(
+        crate::log_rr!(
             Info,
             "Builder: Assigned determinsitic id {:?} for new thread.",
             new_id

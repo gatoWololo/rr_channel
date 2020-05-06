@@ -3,7 +3,8 @@
 
 use rand::thread_rng;
 use rand::Rng;
-use rr_channel::{after, thread, unbounded};
+use rr_channel::crossbeam::{after, unbounded};
+use rr_channel::detthread;
 use std::thread::sleep;
 /// Times out roughly 50/50%
 use std::time;
@@ -14,7 +15,7 @@ fn main() {
     // Avoid having channel disconnect.
     let _s = s.clone();
 
-    thread::spawn(move || {
+    detthread::spawn(move || {
         // 50/50 chance of sleeping.
         if thread_rng().gen_bool(0.50) {
             sleep(time::Duration::from_millis(150));

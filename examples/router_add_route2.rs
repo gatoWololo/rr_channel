@@ -1,7 +1,7 @@
 use rr_channel::ipc;
 use rr_channel::router;
 use rr_channel::router::ROUTER;
-use rr_channel::Receiver;
+use rr_channel::crossbeam::Receiver;
 /// Send messages to the router and have router send us back our messages
 /// through callback with sender.
 use std::time::Duration;
