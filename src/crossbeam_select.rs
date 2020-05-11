@@ -1,7 +1,6 @@
 use crossbeam_channel::{RecvError, SendError};
 use log::Level::*;
 use std::collections::HashMap;
-use std::time::Duration;
 
 use crate::crossbeam::{self, ChannelVariant};
 use crate::detthread::DetThreadId;
@@ -9,7 +8,7 @@ use crate::error::DesyncError;
 use crate::recordlog::{self, ChannelLabel, RecordedEvent, SelectEvent};
 use crate::rr::DetChannelId;
 use crate::{desync, detthread};
-use crate::{DesyncMode, RRMode};
+use crate::{DesyncMode, RRMode, DetMessage};
 use crate::{DESYNC_MODE, RECORD_MODE};
 
 /// Our Select wrapper type must hold different types of Receivet<T>. We use this trait
@@ -19,7 +18,7 @@ trait BufferedReceiver {
     fn buffered_value(&self) -> bool;
     /// Returns true if there is an entry in this receiver waiting to be read.
     /// Returns false if no entry arrives by `timeout`.
-    fn poll(&self, sender: &Option<DetThreadId>, timeout: Duration) -> bool;
+    fn poll(&self, sender: &Option<DetThreadId>) -> bool;
 }
 
 impl<T> BufferedReceiver for crossbeam::Receiver<T> {
@@ -33,8 +32,8 @@ impl<T> BufferedReceiver for crossbeam::Receiver<T> {
         return false;
     }
 
-    fn poll(&self, sender: &Option<DetThreadId>, timeout: Duration) -> bool {
-        self.poll_entry(sender, timeout)
+    fn poll(&self, sender: &Option<DetThreadId>) -> bool {
+        self.poll_entry(sender)
     }
 }
 
@@ -60,7 +59,7 @@ impl<'a> Select<'a> {
 
     /// Adds a send operation.
     /// Returns the index of the added operation.
-    pub fn send<T>(&mut self, s: &'a crossbeam::Sender<T>) -> usize {
+    pub fn send<T>(&mut self, _s: &'a crossbeam::Sender<T>) -> usize {
         unimplemented!("Send on select not supported?");
         // log_trace("Select::send()");
         // self.selector.send(&s.sender)
@@ -78,7 +77,7 @@ impl<'a> Select<'a> {
             ChannelVariant::Bounded(r) | ChannelVariant::Unbounded(r) => self.selector.recv(&r),
             ChannelVariant::Never(r) => self.selector.recv(&r),
         };
-        if let Some(v) = self.receivers.insert(index, r) {
+        if let Some(_) = self.receivers.insert(index, r) {
             panic!(
                 "Entry already exists at {:?} This should be impossible.",
                 index
@@ -131,19 +130,21 @@ impl<'a> Select<'a> {
         })
     }
 
-    fn rr_ready(&mut self) -> Result<usize, DesyncError> {
+    fn rr_ready(&mut self) -> desync::Result<usize> {
         if desync::program_desyned() {
             return Err(DesyncError::Desynchronized);
         }
         match self.mode {
             RRMode::Record => {
                 let select_index = self.selector.ready();
-                recordlog::log(
+                recordlog::record_entry(
                     RecordedEvent::SelectReady { select_index },
-                    ChannelLabel::None,
-                    "ready",
-                    // Ehh, we fake it here. We never check this value anyways.
-                    &DetChannelId::fake(),
+                    &recordlog::RecordMetadata::new(
+                        "ready".to_string(),
+                        ChannelLabel::None,
+                        self.mode,
+                        DetChannelId::fake(), // We fake it here. We never check this value anyways.
+                    )
                 );
                 Ok(select_index)
             }
@@ -164,7 +165,7 @@ impl<'a> Select<'a> {
         }
     }
 
-    fn rr_select(&mut self) -> Result<SelectedOperation<'a>, DesyncError> {
+    fn rr_select(&mut self) -> desync::Result<SelectedOperation<'a>> {
         if desync::program_desyned() {
             return Err(DesyncError::Desynchronized);
         }
@@ -208,7 +209,7 @@ impl<'a> Select<'a> {
                             );
                             match self.receivers.get(selected_index) {
                                 Some(receiver) => {
-                                    if !receiver.poll(sender_thread, Duration::from_secs(1)) {
+                                    if !receiver.poll(sender_thread) {
                                         crate::log_rr!(Debug, "No such message found via polling.");
                                         // We failed to find the message we were expecting
                                         // this is a desynchonization.
@@ -331,14 +332,14 @@ impl<'a> SelectedOperation<'a> {
     pub fn rr_select_recv<T>(
         self,
         r: &crossbeam::Receiver<T>,
-    ) -> Result<Result<T, RecvError>, DesyncError> {
+    ) -> desync::Result<Result<T, RecvError>> {
         // Do not add check for program_desynced() here! This type of desync
         // is fatal. It is better to make sure it just doesn't happen.
         // See recv() above for more information.
 
         let selected_index = self.index();
         match self {
-            SelectedOperation::DesyncBufferEntry(index) => {
+            SelectedOperation::DesyncBufferEntry(_) => {
                 crate::log_rr!(Debug, "SelectedOperation::DesyncBufferEntry");
                 detthread::inc_event_id();
                 Ok(Ok(r.get_buffered_value().expect(
@@ -366,12 +367,7 @@ impl<'a> SelectedOperation<'a> {
                     // Err(e) on the RHS is not the same type as Err(e) LHS.
                     Err(e) => (Err(e), SelectEvent::RecvError { selected_index }),
                 };
-                recordlog::log(
-                    RecordedEvent::Select(select_event),
-                    r.flavor(),
-                    &r.metadata.type_name,
-                    &r.metadata.id,
-                );
+                recordlog::record_entry(RecordedEvent::Select(select_event), &r.metadata);
                 Ok(msg)
             }
             // We do not use the select API at all on replays. Wait for correct
@@ -380,8 +376,8 @@ impl<'a> SelectedOperation<'a> {
             SelectedOperation::Replay(event, flavor, chan_id) => {
                 // We cannot check these in `Select::select()` since we do not have
                 // the receiver until this function to compare values against.
-                if flavor != r.flavor() {
-                    return Err(DesyncError::ChannelVariantMismatch(flavor, r.flavor()));
+                if flavor != r.metadata.flavor {
+                    return Err(DesyncError::ChannelVariantMismatch(flavor, r.metadata.flavor));
                 }
                 if chan_id != r.metadata.id {
                     return Err(DesyncError::ChannelMismatch(chan_id, r.metadata.id.clone()));
@@ -412,7 +408,7 @@ impl<'a> SelectedOperation<'a> {
     fn do_recv<T>(
         selected: crossbeam_channel::SelectedOperation<'a>,
         r: &crossbeam::Receiver<T>,
-    ) -> Result<(Option<DetThreadId>, T), RecvError> {
+    ) -> Result<DetMessage<T>, RecvError> {
         match &r.receiver {
             ChannelVariant::After(receiver) => selected
                 .recv(receiver)

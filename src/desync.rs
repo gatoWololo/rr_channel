@@ -1,19 +1,40 @@
+//! Desynchronizations are common with RR channels (as of now).
+//! This module handles all desyncing behavior including sleeping threads,
+//! waking up threads.
+//! We detect desyncs by tagging the recordlog event with metadata about the
+//! type of message we expect from the type of channel we expect it. If there
+//! is ever a mismatch between the type of message we expect, and the real message,
+//! we have desynchronized.
 use log::Level::{Debug, Warn};
-use serde::{Deserialize, Serialize};
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::{Condvar, Mutex};
+use crate::error::DesyncError;
+use crate::{detthread, DetMessage};
+use std::cell::RefMut;
+use crate::BufferedValues;
+use crate::DESYNC_MODE;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+/// Wrapper around DesyncError.
+pub(crate) type Result<T> = std::result::Result<T, DesyncError>;
+
+/// Through the envvar RR_DESYNC_MODE users can select what action should
+/// happen when we encounter a desynchronization.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum DesyncMode {
     Panic,
     KeepGoing,
 }
 
+/// Desync can happen from any thread at any time. This global DESYNC knows
+/// if anyone has desynced. So we can dynamically make choices about what to
+/// do if we're desyced.
 pub(crate) fn program_desyned() -> bool {
     DESYNC.load(Ordering::SeqCst)
 }
 
+/// Inform system that we have detected a desynchronization. This wakes up
+/// any currently sleeping threads. See `sleep_until_desync` for more information.
 pub(crate) fn mark_program_as_desynced() {
     if !DESYNC.load(Ordering::SeqCst) {
         crate::log_rr!(Warn, "Program marked as desynced!");
@@ -22,6 +43,9 @@ pub(crate) fn mark_program_as_desynced() {
     }
 }
 
+/// This thread has fallen off the end of the log. We assume this thread "didn't make it
+/// this far" on the record execution. So we put it to sleep. When we desynchronize this thread
+/// will be waken up. This is dones via conditional variables.
 pub(crate) fn sleep_until_desync() {
     crate::log_rr!(Debug, "Thread being put to sleep.");
     let (lock, condvar) = &*PARK_THREADS;
@@ -55,6 +79,35 @@ lazy_static::lazy_static! {
     pub static ref DESYNC: AtomicBool = {
         AtomicBool::new(false)
     };
+}
+
+/// Handles desynchronization events based on global DESYNC_MODE.
+pub(crate) fn handle_desync<T, E>(
+    desync: DesyncError,
+    recv_msg: impl Fn() -> ::std::result::Result<DetMessage<T>, E>,
+    mut buffer: RefMut<BufferedValues<T>>,
+) ->  ::std::result::Result<T, E> {
+    crate::log_rr!(Warn, "Desynchonization found: {:?}", desync);
+
+    match *DESYNC_MODE {
+        DesyncMode::KeepGoing => {
+            mark_program_as_desynced();
+            detthread::inc_event_id();
+
+            // Try using entry from buffer before recv()-ing directly from receiver. We don't
+            // care who the expected sender was. Any value will do.
+            for queue in (*buffer).values_mut() {
+                if let Some(val) = queue.pop_front() {
+                    return Ok(val);
+                }
+            }
+            // No entries in buffer. Read from the wire.
+            recv_msg().map(|t| t.1)
+        }
+        DesyncMode::Panic => {
+            panic!("Desynchonization found: {:?}", desync);
+        }
+    }
 }
 
 #[test]

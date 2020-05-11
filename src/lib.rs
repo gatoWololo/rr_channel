@@ -2,29 +2,22 @@ use env_logger;
 use lazy_static::lazy_static;
 use log::warn;
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, VecDeque};
 
 pub mod crossbeam;
+pub mod detthread;
+pub mod ipc;
+pub mod mpsc;
+pub mod router;
 mod crossbeam_select;
 mod crossbeam_select_macro;
 mod desync;
-pub mod detthread;
 mod error;
-pub mod ipc;
-pub mod mpsc;
 mod recordlog;
-pub mod router;
 mod rr;
 
-// pub use channel::{after, bounded, never, unbounded, Receiver, Sender};
-// pub use crossbeam_channel::{RecvError, RecvTimeoutError, TryRecvError};
-// pub use rr::{DetChannelId, LogEntry, RECORDED_INDICES, WRITE_LOG_FILE};
-// pub use select::{Select, SelectedOperation};
-// pub use thread::{
-//     current, get_det_id, get_event_id, in_forwarding, inc_event_id, panicking, park, park_timeout,
-//     sleep, yield_now, DetIdSpawner, DetThreadId,
-// };
-
 use desync::DesyncMode;
+use detthread::DetThreadId;
 use log::Level::*;
 use std::env::var;
 use std::env::VarError;
@@ -36,9 +29,18 @@ pub enum RRMode {
     NoRR,
 }
 
+/// To deterministically replay messages we pass our determininistic thread ID + the
+/// original message.
+pub type DetMessage<T> = (Option<DetThreadId>, T);
+
+/// Every channel carries a buffer where message that shouldn't have arrived are stored.
+pub type BufferedValues<T> = HashMap<Option<DetThreadId>, VecDeque<T>>;
+
 const RECORD_MODE_VAR: &str = "RR_CHANNEL";
 const DESYNC_MODE_VAR: &str = "RR_DESYNC_MODE";
 const RECORD_FILE_VAR: &str = "RR_RECORD_FILE";
+
+const NO_DETTHREADID: &str = "DetThreadId was None. This execution may not be deterministic.";
 
 lazy_static! {
     /// Singleton environment logger. Must be initialized somewhere, and only once.

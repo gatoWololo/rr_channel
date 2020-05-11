@@ -7,10 +7,21 @@ use crossbeam_channel::{RecvError, RecvTimeoutError, TryRecvError};
 use serde::{Deserialize, Serialize};
 use std::sync::mpsc;
 
+/// Fundamentally just wanna know if it was a Timeout or Disconnected error. This type is
+/// used to abstract over different types of RecvErrors from different channel types.
 #[derive(Debug)]
 pub enum RecvErrorRR {
     Timeout,
     Disconnected,
+}
+
+impl From<RecvTimeoutError> for RecvErrorRR  {
+    fn from(e: RecvTimeoutError) -> RecvErrorRR {
+        match e {
+            RecvTimeoutError::Timeout => RecvErrorRR::Timeout,
+            RecvTimeoutError::Disconnected => RecvErrorRR::Disconnected,
+        }
+    }
 }
 
 impl From<RecvErrorRR> for DesyncError {
@@ -34,6 +45,8 @@ pub enum DesyncError {
     ChannelMismatch(DetChannelId, DetChannelId),
     /// RecordedEvent log message was different. logged event vs current event.
     EventMismatch(RecordedEvent, RecordedEvent),
+    /// This thread did not get its DetThreadId initialized even though it should
+    /// have.
     UnitializedDetThreadId,
     /// Receiver was expected for select operation but entry is missing.
     MissingReceiver(u64),
@@ -59,12 +72,9 @@ pub enum DesyncError {
     DesynchronizedWakeup,
 }
 
-/// Not sure why we use a dummy error here. TODO.
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct IpcDummyError;
-
 // We want to Serialize Types defined in other crates. So we copy their definition here.
 // (This is how serde wants us to do it)
+
 #[derive(Serialize, Deserialize)]
 #[serde(remote = "RecvTimeoutError")]
 pub enum RecvTimeoutErrorDef {

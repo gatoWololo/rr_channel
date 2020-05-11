@@ -5,7 +5,7 @@ use std::thread;
 use std::thread::JoinHandle;
 pub use std::thread::{current, panicking, park, park_timeout, sleep, yield_now};
 
-use crate::{error, recordlog};
+use crate::{error, recordlog, desync};
 
 pub fn get_det_id() -> Option<DetThreadId> {
     DET_ID.with(|di| di.borrow().clone())
@@ -13,7 +13,7 @@ pub fn get_det_id() -> Option<DetThreadId> {
 
 /// Like `get_det_id` but treats missing DetThreadId as a
 /// desynchonization error.
-pub fn get_det_id_desync() -> Result<DetThreadId, error::DesyncError> {
+pub fn get_det_id_desync() -> desync::Result<DetThreadId> {
     match get_det_id() {
         Some(v) => Ok(v),
         None => Err(error::DesyncError::UnitializedDetThreadId),
@@ -163,11 +163,10 @@ impl Debug for DetThreadId {
 }
 
 impl DetThreadId {
+    /// The main thread get initialized here. Every other thread should be assigned a
+    /// DetThreadId through the thread/Builder spawn wrappers. This allows to to tell if a
+    /// thread was spawned through other means (not our API wrapper).
     pub fn new() -> Option<DetThreadId> {
-        // The main thread get initialized here. Every other thread should be
-        // assigned a DetThreadId through the thread/Builder spawn wrappers.
-        // This allows to to tell if a thread was spawned through other means
-        // (not our API wrapper).
         if Some("main") == thread::current().name() {
             Some(DetThreadId { thread_id: vec![] })
         } else {
@@ -239,6 +238,17 @@ impl Builder {
             // EVENT_ID is fine starting at 0.
             f()
         })
+    }
+}
+
+/// Because of the router, we want to "forward" the original sender's DetThreadId
+/// sometimes. We should always use this function when sending our DetThreadId via a
+/// sender channel as it handles the router and non-router cases.
+pub fn get_forwarding_id() -> Option<DetThreadId> {
+    if in_forwarding() {
+        get_temp_det_id()
+    } else {
+        get_det_id()
     }
 }
 

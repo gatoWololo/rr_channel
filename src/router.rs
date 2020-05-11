@@ -3,13 +3,14 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use crate::crossbeam::{Receiver, Sender};
-use crate::detthread::{self, DetThreadId};
+use crate::detthread;
 use crate::ipc::{
     self, IpcReceiver, IpcReceiverSet, IpcSelectionResult, IpcSender, OpaqueIpcMessage,
     OpaqueIpcReceiver,
 };
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
+use crate::DetMessage;
 
 lazy_static! {
     pub static ref ROUTER: RouterProxy = RouterProxy::new();
@@ -46,7 +47,7 @@ impl RouterProxy {
         let callback_wrapper = Box::new(move |msg: OpaqueIpcMessage| {
             // We want to forward the DetThreadId. Access the real opaque channel
             // underneath our wrapper. As our wrapper throws the DetThreadId away.
-            match msg.opaque.to::<(Option<DetThreadId>, T)>() {
+            match msg.opaque.to::<DetMessage<T>>() {
                 Ok((forward_id, msg)) => {
                     // Big Hack: Temporarily set TLS DetThreadId so original sender's
                     // DetThreadId is properly forwarded to receiver.
@@ -80,7 +81,7 @@ impl RouterProxy {
             Info,
             "Routing IpcReceiver<{:?}> to crossbeam_sender: {:?}",
             ipc_receiver.metadata.id,
-            crossbeam_sender.channel_id
+            crossbeam_sender.metadata.id
         );
         self.add_route(
             ipc_receiver,
@@ -152,7 +153,6 @@ impl Router {
                             .expect("rr_channel:: RouterProxy::run(): Unable to receive message.")
                         {
                             RouterMsg::AddRoute(receiver, handler) => {
-                                let id = receiver.metadata.id.clone();
                                 let new_receiver_id =
                                     self.ipc_receiver_set.add_opaque(receiver).expect(
                                         "rr_channel:: RouterProxy::run(): Could not add_opaque",
@@ -168,9 +168,8 @@ impl Router {
                         handler(message)
                     }
                     IpcSelectionResult::ChannelClosed(id) => {
-                        self.handlers.remove(&id).
+                        let _handler = self.handlers.remove(&id).
                             expect(&format!("rr_channel:: RouterProxy::run(): Channel Closed, No such handler: {:?}", id));
-                        // println!("Removed handler for {:?}", id);
                     }
                 }
             }

@@ -7,10 +7,9 @@ use std::io::BufRead;
 use std::sync::mpsc;
 use std::sync::Mutex;
 
-use crate::detthread;
+use crate::{detthread, desync};
 use crate::detthread::DetThreadId;
 use crate::error;
-use crate::error::IpcDummyError;
 use crate::rr::DetChannelId;
 use crate::{RRMode, LOG_FILE_NAME, RECORD_MODE};
 
@@ -30,6 +29,12 @@ pub enum SelectEvent {
         /// to return the real index.
         selected_index: usize,
     },
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum IpcSelectEvent {
+    MessageReceived(/*index:*/ u64, Option<DetThreadId>),
+    ChannelClosed(/*index:*/ u64),
 }
 
 /// We tag our record-log entries with the type of channel they represent. This lets us compares
@@ -62,10 +67,8 @@ pub struct LogEntry {
     pub event_id: u32,
     /// Actual event and all information needed to replay this event.
     pub event: RecordedEvent,
-    pub channel: ChannelLabel,
+    pub channel_flavor: ChannelLabel,
     pub chan_id: DetChannelId,
-    // pub real_thread_id: String,
-    // pub pid: u32,
     pub type_name: String,
 }
 
@@ -85,6 +88,7 @@ pub enum RecordedEvent {
     RecvSucc {
         sender_thread: Option<DetThreadId>,
     },
+
     #[serde(with = "error::RecvErrorDef")]
     RecvErr(crossbeam_channel::RecvError),
 
@@ -127,7 +131,7 @@ pub enum RecordedEvent {
     IpcRecvSucc {
         sender_thread: Option<DetThreadId>,
     },
-    IpcRecvErr(IpcDummyError),
+    IpcRecvErr,
 
     // Crossbeam send.
     Sender,
@@ -141,12 +145,6 @@ pub enum RecordedEvent {
     IpcSelect {
         select_events: Vec<IpcSelectEvent>,
     },
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub enum IpcSelectEvent {
-    MessageReceived(/*index:*/ u64, Option<DetThreadId>),
-    ChannelClosed(/*index:*/ u64),
 }
 
 lazy_static::lazy_static! {
@@ -168,8 +166,8 @@ lazy_static::lazy_static! {
         }
     };
 
-    /// Global map holding all indexes from the record phase.
-    /// Lazily initialized on replay mode.
+    /// Global map holding all indexes from the record phase. Lazily initialized on replay
+    /// mode.
     pub static ref RECORDED_INDICES: HashMap<(DetThreadId, u32), (RecordedEvent, ChannelLabel, DetChannelId)> = {
         crate::log_rr!(Debug, "Initializing RECORDED_INDICES lazy static.");
         use std::io::BufReader;
@@ -189,14 +187,14 @@ lazy_static::lazy_static! {
             }
             let curr_thread = entry.current_thread.clone().unwrap();
             let key = (curr_thread, entry.event_id);
-            let value = (entry.event.clone(), entry.channel, entry.chan_id.clone());
+            let value = (entry.event.clone(), entry.channel_flavor, entry.chan_id.clone());
 
             let prev = recorded_indices.insert(key, value);
             if prev.is_some() {
                 panic!("Corrupted log file. Adding key-value ({:?}, {:?}) but previous value \
                         {:?} already exited. Hashmap entries should be unique.",
                        (entry.current_thread, entry.event_id),
-                       (entry.event, entry.channel, entry.chan_id),
+                       (entry.event, entry.channel_flavor, entry.chan_id),
                        prev);
             }
         }
@@ -205,25 +203,23 @@ lazy_static::lazy_static! {
     };
 }
 
-pub fn log(event: RecordedEvent, channel: ChannelLabel, type_name: &str, chan_id: &DetChannelId) {
+pub(crate) fn record_entry(event: RecordedEvent, metadata: &RecordMetadata) {
     crate::log_rr!(Debug, "rr::log()");
     use std::io::Write;
 
     // Write our (DET_ID, EVENT_ID) -> index to our log file
     let current_thread = detthread::get_det_id();
     let event_id = detthread::get_event_id();
-    let tid = format!("{:?}", ::std::thread::current().id());
-    let pid = std::process::id();
-    let chan_id = chan_id.clone();
+    // let tid = format!("{:?}", ::std::thread::current().id());
+    // let pid = std::process::id();
 
     let entry: LogEntry = LogEntry {
         current_thread,
         event_id,
         event,
-        channel,
-        chan_id,
-        // real_thread_id: tid, pid,
-        type_name: type_name.to_owned(),
+        channel_flavor: metadata.flavor,
+        chan_id: metadata.id.clone(),
+        type_name: metadata.type_name.clone(),
     };
     let serialized = serde_json::to_string(&entry).unwrap();
 
@@ -249,7 +245,7 @@ fn get_log_entry_do<'a>(
     event_id: EventId,
     curr_flavor: Option<&ChannelLabel>,
     curr_id: Option<&DetChannelId>,
-) -> Result<(&'a RecordedEvent, &'a ChannelLabel, &'a DetChannelId), error::DesyncError> {
+) -> desync::Result<(&'a RecordedEvent, &'a ChannelLabel, &'a DetChannelId)> {
     let key = (our_thread, event_id);
     match RECORDED_INDICES.get(&key) {
         Some((recorded, log_flavor, log_id)) => {
@@ -289,7 +285,7 @@ pub fn get_log_entry_with<'a>(
     event_id: EventId,
     curr_flavor: &ChannelLabel,
     curr_id: &DetChannelId,
-) -> Result<&'a RecordedEvent, error::DesyncError> {
+) -> desync::Result<&'a RecordedEvent> {
     get_log_entry_do(our_thread, event_id, Some(curr_flavor), Some(curr_id)).map(|(r, _, _)| r)
 }
 
@@ -297,7 +293,7 @@ pub fn get_log_entry_with<'a>(
 pub fn get_log_entry<'a>(
     our_thread: DetThreadId,
     event_id: EventId,
-) -> Result<&'a RecordedEvent, error::DesyncError> {
+) -> desync::Result<&'a RecordedEvent> {
     get_log_entry_do(our_thread, event_id, None, None).map(|(r, _, _)| r)
 }
 
@@ -305,7 +301,7 @@ pub fn get_log_entry<'a>(
 pub fn get_log_entry_ret<'a>(
     our_thread: DetThreadId,
     event_id: EventId,
-) -> Result<(&'a RecordedEvent, &'a ChannelLabel, &'a DetChannelId), error::DesyncError> {
+) -> desync::Result<(&'a RecordedEvent, &'a ChannelLabel, &'a DetChannelId)> {
     get_log_entry_do(our_thread, event_id, None, None)
 }
 
@@ -314,14 +310,22 @@ pub type EventId = u32;
 /// TODO It seems there is repetition in the fields here and on LogEntry?
 /// Do we really need both?
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct RecordMetadata {
+pub(crate) struct RecordMetadata {
     /// Owned for EZ serialize, deserialize.
     pub(crate) type_name: String,
     pub(crate) flavor: ChannelLabel,
     pub(crate) mode: RRMode,
-    /// Unique identifier assigned to every channel. Deterministic and unique
-    /// even with racing thread creation. DetThreadId refers to the original
-    /// creator of this thread.
+    /// Unique identifier assigned to every channel. Deterministic and unique even with
+    /// racing thread creation. DetThreadId refers to the original creator of this thread.
     /// The partner Receiver and Sender shares the same id.
     pub(crate) id: DetChannelId,
+}
+
+impl RecordMetadata {
+    pub fn new(type_name: String,
+               flavor: ChannelLabel,
+               mode: RRMode,
+               id: DetChannelId) -> RecordMetadata {
+        RecordMetadata { type_name, flavor, mode, id }
+    }
 }
