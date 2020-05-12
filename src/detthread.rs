@@ -1,13 +1,11 @@
-use log::{error, info, trace};
+use log::Level::*;
 use std::cell::RefCell;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread;
 use std::thread::JoinHandle;
-use crate::log_rr;
-use log::Level::*;
 pub use std::thread::{current, panicking, park, park_timeout, sleep, yield_now};
-// use backtrace::Backtrace;
-use crate::record_replay::{EventId, DesyncError};
-use std::sync::atomic::{AtomicU32, Ordering};
+
+use crate::{error, recordlog, desync};
 
 pub fn get_det_id() -> Option<DetThreadId> {
     DET_ID.with(|di| di.borrow().clone())
@@ -15,10 +13,10 @@ pub fn get_det_id() -> Option<DetThreadId> {
 
 /// Like `get_det_id` but treats missing DetThreadId as a
 /// desynchonization error.
-pub fn get_det_id_desync() -> Result<DetThreadId, DesyncError> {
+pub fn get_det_id_desync() -> desync::Result<DetThreadId> {
     match get_det_id() {
         Some(v) => Ok(v),
-        None => Err(DesyncError::UnitializedDetThreadId),
+        None => Err(error::DesyncError::UnitializedDetThreadId),
     }
 }
 
@@ -38,7 +36,7 @@ pub fn set_temp_det_id(new_id: Option<DetThreadId>) {
     });
 }
 
-pub fn get_event_id() -> EventId {
+pub fn get_event_id() -> recordlog::EventId {
     EVENT_ID.with(|id| *id.borrow())
 }
 
@@ -46,7 +44,7 @@ pub fn get_event_id() -> EventId {
 pub fn inc_event_id() {
     EVENT_ID.with(|id| {
         *id.borrow_mut() += 1;
-        log_rr!(Debug, "Incremented TLS event_id: {:?}", *id.borrow());
+        crate::log_rr!(Debug, "Incremented TLS event_id: {:?}", *id.borrow());
     });
 }
 
@@ -100,8 +98,11 @@ where
 {
     let new_id = DET_ID_SPAWNER.with(|spawner| spawner.borrow_mut().new_child_det_id());
     let new_spawner = DetIdSpawner::from(new_id.clone());
-    log_rr!(Info, "thread::spawn() Assigned determinsitic id {:?} for new thread.",
-            new_id);
+    crate::log_rr!(
+        Info,
+        "thread::spawn() Assigned determinsitic id {:?} for new thread.",
+        new_id
+    );
 
     thread::spawn(|| {
         // Initialize TLS for this thread.
@@ -162,11 +163,10 @@ impl Debug for DetThreadId {
 }
 
 impl DetThreadId {
+    /// The main thread get initialized here. Every other thread should be assigned a
+    /// DetThreadId through the thread/Builder spawn wrappers. This allows to to tell if a
+    /// thread was spawned through other means (not our API wrapper).
     pub fn new() -> Option<DetThreadId> {
-        // The main thread get initialized here. Every other thread should be
-        // assigned a DetThreadId through the thread/Builder spawn wrappers.
-        // This allows to to tell if a thread was spawned through other means
-        // (not our API wrapper).
         if Some("main") == thread::current().name() {
             Some(DetThreadId { thread_id: vec![] })
         } else {
@@ -219,8 +219,11 @@ impl Builder {
         let new_id = DET_ID_SPAWNER.with(|spawner| spawner.borrow_mut().new_child_det_id());
 
         let new_spawner = DetIdSpawner::from(new_id.clone());
-        log_rr!(Info, "Builder: Assigned determinsitic id {:?} for new thread.",
-                new_id);
+        crate::log_rr!(
+            Info,
+            "Builder: Assigned determinsitic id {:?} for new thread.",
+            new_id
+        );
 
         self.builder.spawn(|| {
             // Initialize TLS for this thread.
@@ -238,10 +241,21 @@ impl Builder {
     }
 }
 
+/// Because of the router, we want to "forward" the original sender's DetThreadId
+/// sometimes. We should always use this function when sending our DetThreadId via a
+/// sender channel as it handles the router and non-router cases.
+pub fn get_forwarding_id() -> Option<DetThreadId> {
+    if in_forwarding() {
+        get_temp_det_id()
+    } else {
+        get_det_id()
+    }
+}
+
 mod tests {
     #[test]
     /// TODO Add random delays to increase amount of nondeterminism.
-    fn determinitic_ids() {
+    fn deterministic_ids() {
         use super::{get_det_id, spawn, DetThreadId};
         use std::thread::JoinHandle;
 
@@ -250,13 +264,13 @@ mod tests {
         for i in 0..4 {
             let h1 = spawn(move || {
                 let a = [i];
-                assert_eq!(DetThreadId::from(&a[..]), get_det_id());
+                assert_eq!(DetThreadId::from(&a[..]), get_det_id().unwrap());
 
                 let mut v2 = vec![];
                 for j in 0..4 {
                     let h2 = spawn(move || {
                         let a = [i, j];
-                        assert_eq!(DetThreadId::from(&a[..]), get_det_id());
+                        assert_eq!(DetThreadId::from(&a[..]), get_det_id().unwrap());
                     });
                     v2.push(h2);
                 }

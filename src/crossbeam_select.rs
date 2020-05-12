@@ -1,1204 +1,421 @@
-//! Exact copy of the crossbeam `select!` macro.
-//! Copied over so $crate resolves to _our_ crate.
+use crossbeam_channel::{RecvError, SendError};
+use log::Level::*;
+use std::collections::HashMap;
 
-/// A simple wrapper around the standard macros.
-///
-/// This is just an ugly workaround until it becomes possible to import macros with `use`
-/// statements.
-///
-/// TODO(stjepang): Once we bump the minimum required Rust version to 1.30 or newer, we should:
-///
-/// 1. Remove all `#[macro_export(local_inner_macros)]` lines.
-/// 2. Replace `rr_channel_delegate` with direct macro invocations.
-#[doc(hidden)]
-#[macro_export]
-macro_rules! rr_channel_delegate {
-    (concat($($args:tt)*)) => {
-        concat!($($args)*)
-    };
-    (stringify($($args:tt)*)) => {
-        stringify!($($args)*)
-    };
-    (unreachable($($args:tt)*)) => {
-        unreachable!($($args)*)
-    };
-    (compile_error($($args:tt)*)) => {
-        compile_error!($($args)*)
-    };
+use crate::crossbeam::{self, ChannelVariant};
+use crate::detthread::DetThreadId;
+use crate::error::DesyncError;
+use crate::recordlog::{self, ChannelLabel, RecordedEvent, SelectEvent};
+use crate::rr::DetChannelId;
+use crate::{desync, detthread};
+use crate::{DesyncMode, RRMode, DetMessage};
+use crate::{DESYNC_MODE, RECORD_MODE};
+
+/// Our Select wrapper type must hold different types of Receivet<T>. We use this trait
+/// so we can hold different T's via a dynamic trait object.
+trait BufferedReceiver {
+    /// Returns true if there is any buffered values in this receiver.
+    fn buffered_value(&self) -> bool;
+    /// Returns true if there is an entry in this receiver waiting to be read.
+    /// Returns false if no entry arrives by `timeout`.
+    fn poll(&self, sender: &Option<DetThreadId>) -> bool;
 }
 
-/// A helper macro for `select!` to hide the long list of macro patterns from the documentation.
-///
-/// The macro consists of two stages:
-/// 1. Parsing
-/// 2. Code generation
-///
-/// The parsing stage consists of these subparts:
-/// 1. `@list`: Turns a list of tokens into a list of cases.
-/// 2. `@list_errorN`: Diagnoses the syntax error.
-/// 3. `@case`: Parses a single case and verifies its argument list.
-///
-/// The codegen stage consists of these subparts:
-/// 1. `@init`: Attempts to optimize `select!` away and initializes a `Select`.
-/// 2. `@add`: Adds send/receive operations to the `Select` and starts selection.
-/// 3. `@complete`: Completes the selected send/receive operation.
-///
-/// If the parsing stage encounters a syntax error or the codegen stage ends up with too many
-/// cases to process, the macro fails with a compile-time error.
-#[doc(hidden)]
-#[macro_export(local_inner_macros)]
-macro_rules! rr_channel_internal {
-    // The list is empty. Now check the arguments of each processed case.
-    (@list
-        ()
-        ($($head:tt)*)
-    ) => {
-        rr_channel_internal!(
-            @case
-            ($($head)*)
-            ()
-            ()
-        )
-    };
-    // If necessary, insert an empty argument list after `default`.
-    (@list
-        (default => $($tail:tt)*)
-        ($($head:tt)*)
-    ) => {
-        rr_channel_internal!(
-            @list
-            (default() => $($tail)*)
-            ($($head)*)
-        )
-    };
-    // But print an error if `default` is followed by a `->`.
-    (@list
-        (default -> $($tail:tt)*)
-        ($($head:tt)*)
-    ) => {
-        rr_channel_delegate!(compile_error(
-            "expected `=>` after `default` case, found `->`"
-        ))
-    };
-    // Print an error if there's an `->` after the argument list in the default case.
-    (@list
-        (default $args:tt -> $($tail:tt)*)
-        ($($head:tt)*)
-    ) => {
-        rr_channel_delegate!(compile_error(
-            "expected `=>` after `default` case, found `->`"
-        ))
-    };
-    // Print an error if there is a missing result in a recv case.
-    (@list
-        (recv($($args:tt)*) => $($tail:tt)*)
-        ($($head:tt)*)
-    ) => {
-        rr_channel_delegate!(compile_error(
-            "expected `->` after `recv` case, found `=>`"
-        ))
-    };
-    // Print an error if there is a missing result in a send case.
-    (@list
-        (send($($args:tt)*) => $($tail:tt)*)
-        ($($head:tt)*)
-    ) => {
-        rr_channel_delegate!(compile_error(
-            "expected `->` after `send` operation, found `=>`"
-        ))
-    };
-    // Make sure the arrow and the result are not repeated.
-    (@list
-        ($case:ident $args:tt -> $res:tt -> $($tail:tt)*)
-        ($($head:tt)*)
-    ) => {
-        rr_channel_delegate!(compile_error("expected `=>`, found `->`"))
-    };
-    // Print an error if there is a semicolon after the block.
-    (@list
-        ($case:ident $args:tt $(-> $res:pat)* => $body:block; $($tail:tt)*)
-        ($($head:tt)*)
-    ) => {
-        rr_channel_delegate!(compile_error(
-            "did you mean to put a comma instead of the semicolon after `}`?"
-        ))
-    };
-    // The first case is separated by a comma.
-    (@list
-        ($case:ident ($($args:tt)*) $(-> $res:pat)* => $body:expr, $($tail:tt)*)
-        ($($head:tt)*)
-    ) => {
-        rr_channel_internal!(
-            @list
-            ($($tail)*)
-            ($($head)* $case ($($args)*) $(-> $res)* => { $body },)
-        )
-    };
-    // Don't require a comma after the case if it has a proper block.
-    (@list
-        ($case:ident ($($args:tt)*) $(-> $res:pat)* => $body:block $($tail:tt)*)
-        ($($head:tt)*)
-    ) => {
-        rr_channel_internal!(
-            @list
-            ($($tail)*)
-            ($($head)* $case ($($args)*) $(-> $res)* => { $body },)
-        )
-    };
-    // Only one case remains.
-    (@list
-        ($case:ident ($($args:tt)*) $(-> $res:pat)* => $body:expr)
-        ($($head:tt)*)
-    ) => {
-        rr_channel_internal!(
-            @list
-            ()
-            ($($head)* $case ($($args)*) $(-> $res)* => { $body },)
-        )
-    };
-    // Accept a trailing comma at the end of the list.
-    (@list
-        ($case:ident ($($args:tt)*) $(-> $res:pat)* => $body:expr,)
-        ($($head:tt)*)
-    ) => {
-        rr_channel_internal!(
-            @list
-            ()
-            ($($head)* $case ($($args)*) $(-> $res)* => { $body },)
-        )
-    };
-    // Diagnose and print an error.
-    (@list
-        ($($tail:tt)*)
-        ($($head:tt)*)
-    ) => {
-        rr_channel_internal!(@list_error1 $($tail)*)
-    };
-    // Stage 1: check the case type.
-    (@list_error1 recv $($tail:tt)*) => {
-        rr_channel_internal!(@list_error2 recv $($tail)*)
-    };
-    (@list_error1 send $($tail:tt)*) => {
-        rr_channel_internal!(@list_error2 send $($tail)*)
-    };
-    (@list_error1 default $($tail:tt)*) => {
-        rr_channel_internal!(@list_error2 default $($tail)*)
-    };
-    (@list_error1 $t:tt $($tail:tt)*) => {
-        rr_channel_delegate!(compile_error(
-            rr_channel_delegate!(concat(
-                "expected one of `recv`, `send`, or `default`, found `",
-                rr_channel_delegate!(stringify($t)),
-                "`",
-            ))
-        ))
-    };
-    (@list_error1 $($tail:tt)*) => {
-        rr_channel_internal!(@list_error2 $($tail)*);
-    };
-    // Stage 2: check the argument list.
-    (@list_error2 $case:ident) => {
-        rr_channel_delegate!(compile_error(
-            rr_channel_delegate!(concat(
-                "missing argument list after `",
-                rr_channel_delegate!(stringify($case)),
-                "`",
-            ))
-        ))
-    };
-    (@list_error2 $case:ident => $($tail:tt)*) => {
-        rr_channel_delegate!(compile_error(
-            rr_channel_delegate!(concat(
-                "missing argument list after `",
-                rr_channel_delegate!(stringify($case)),
-                "`",
-            ))
-        ))
-    };
-    (@list_error2 $($tail:tt)*) => {
-        rr_channel_internal!(@list_error3 $($tail)*)
-    };
-    // Stage 3: check the `=>` and what comes after it.
-    (@list_error3 $case:ident($($args:tt)*) $(-> $r:pat)*) => {
-        rr_channel_delegate!(compile_error(
-            rr_channel_delegate!(concat(
-                "missing `=>` after `",
-                rr_channel_delegate!(stringify($case)),
-                "` case",
-            ))
-        ))
-    };
-    (@list_error3 $case:ident($($args:tt)*) $(-> $r:pat)* =>) => {
-        rr_channel_delegate!(compile_error(
-            "expected expression after `=>`"
-        ))
-    };
-    (@list_error3 $case:ident($($args:tt)*) $(-> $r:pat)* => $body:expr; $($tail:tt)*) => {
-        rr_channel_delegate!(compile_error(
-            rr_channel_delegate!(concat(
-                "did you mean to put a comma instead of the semicolon after `",
-                rr_channel_delegate!(stringify($body)),
-                "`?",
-            ))
-        ))
-    };
-    (@list_error3 $case:ident($($args:tt)*) $(-> $r:pat)* => recv($($a:tt)*) $($tail:tt)*) => {
-        rr_channel_delegate!(compile_error(
-            "expected an expression after `=>`"
-        ))
-    };
-    (@list_error3 $case:ident($($args:tt)*) $(-> $r:pat)* => send($($a:tt)*) $($tail:tt)*) => {
-        rr_channel_delegate!(compile_error(
-            "expected an expression after `=>`"
-        ))
-    };
-    (@list_error3 $case:ident($($args:tt)*) $(-> $r:pat)* => default($($a:tt)*) $($tail:tt)*) => {
-        rr_channel_delegate!(compile_error(
-            "expected an expression after `=>`"
-        ))
-    };
-    (@list_error3 $case:ident($($args:tt)*) $(-> $r:pat)* => $f:ident($($a:tt)*) $($tail:tt)*) => {
-        rr_channel_delegate!(compile_error(
-            rr_channel_delegate!(concat(
-                "did you mean to put a comma after `",
-                rr_channel_delegate!(stringify($f)),
-                "(",
-                rr_channel_delegate!(stringify($($a)*)),
-                ")`?",
-            ))
-        ))
-    };
-    (@list_error3 $case:ident($($args:tt)*) $(-> $r:pat)* => $f:ident!($($a:tt)*) $($tail:tt)*) => {
-        rr_channel_delegate!(compile_error(
-            rr_channel_delegate!(concat(
-                "did you mean to put a comma after `",
-                rr_channel_delegate!(stringify($f)),
-                "!(",
-                rr_channel_delegate!(stringify($($a)*)),
-                ")`?",
-            ))
-        ))
-    };
-    (@list_error3 $case:ident($($args:tt)*) $(-> $r:pat)* => $f:ident![$($a:tt)*] $($tail:tt)*) => {
-        rr_channel_delegate!(compile_error(
-            rr_channel_delegate!(concat(
-                "did you mean to put a comma after `",
-                rr_channel_delegate!(stringify($f)),
-                "![",
-                rr_channel_delegate!(stringify($($a)*)),
-                "]`?",
-            ))
-        ))
-    };
-    (@list_error3 $case:ident($($args:tt)*) $(-> $r:pat)* => $f:ident!{$($a:tt)*} $($tail:tt)*) => {
-        rr_channel_delegate!(compile_error(
-            rr_channel_delegate!(concat(
-                "did you mean to put a comma after `",
-                rr_channel_delegate!(stringify($f)),
-                "!{",
-                rr_channel_delegate!(stringify($($a)*)),
-                "}`?",
-            ))
-        ))
-    };
-    (@list_error3 $case:ident($($args:tt)*) $(-> $r:pat)* => $body:tt $($tail:tt)*) => {
-        rr_channel_delegate!(compile_error(
-            rr_channel_delegate!(concat(
-                "did you mean to put a comma after `",
-                rr_channel_delegate!(stringify($body)),
-                "`?",
-            ))
-        ))
-    };
-    (@list_error3 $case:ident($($args:tt)*) -> => $($tail:tt)*) => {
-        rr_channel_delegate!(compile_error("missing pattern after `->`"))
-    };
-    (@list_error3 $case:ident($($args:tt)*) $t:tt $(-> $r:pat)* => $($tail:tt)*) => {
-        rr_channel_delegate!(compile_error(
-            rr_channel_delegate!(concat(
-                "expected `->`, found `",
-                rr_channel_delegate!(stringify($t)),
-                "`",
-            ))
-        ))
-    };
-    (@list_error3 $case:ident($($args:tt)*) -> $t:tt $($tail:tt)*) => {
-        rr_channel_delegate!(compile_error(
-            rr_channel_delegate!(concat(
-                "expected a pattern, found `",
-                rr_channel_delegate!(stringify($t)),
-                "`",
-            ))
-        ))
-    };
-    (@list_error3 recv($($args:tt)*) $t:tt $($tail:tt)*) => {
-        rr_channel_delegate!(compile_error(
-            rr_channel_delegate!(concat(
-                "expected `->`, found `",
-                rr_channel_delegate!(stringify($t)),
-                "`",
-            ))
-        ))
-    };
-    (@list_error3 send($($args:tt)*) $t:tt $($tail:tt)*) => {
-        rr_channel_delegate!(compile_error(
-            rr_channel_delegate!(concat(
-                "expected `->`, found `",
-                rr_channel_delegate!(stringify($t)),
-                "`",
-            ))
-        ))
-    };
-    (@list_error3 recv $args:tt $($tail:tt)*) => {
-        rr_channel_delegate!(compile_error(
-            rr_channel_delegate!(concat(
-                "expected an argument list after `recv`, found `",
-                rr_channel_delegate!(stringify($args)),
-                "`",
-            ))
-        ))
-    };
-    (@list_error3 send $args:tt $($tail:tt)*) => {
-        rr_channel_delegate!(compile_error(
-            rr_channel_delegate!(concat(
-                "expected an argument list after `send`, found `",
-                rr_channel_delegate!(stringify($args)),
-                "`",
-            ))
-        ))
-    };
-    (@list_error3 default $args:tt $($tail:tt)*) => {
-        rr_channel_delegate!(compile_error(
-            rr_channel_delegate!(concat(
-                "expected an argument list or `=>` after `default`, found `",
-                rr_channel_delegate!(stringify($args)),
-                "`",
-            ))
-        ))
-    };
-    (@list_error3 $($tail:tt)*) => {
-        rr_channel_internal!(@list_error4 $($tail)*)
-    };
-    // Stage 4: fail with a generic error message.
-    (@list_error4 $($tail:tt)*) => {
-        rr_channel_delegate!(compile_error("invalid syntax"))
-    };
-
-    // Success! All cases were parsed.
-    (@case
-        ()
-        $cases:tt
-        $default:tt
-    ) => {
-        rr_channel_internal!(
-            @init
-            $cases
-            $default
-        )
-    };
-
-    // Check the format of a recv case.
-    (@case
-        (recv($r:expr) -> $res:pat => $body:tt, $($tail:tt)*)
-        ($($cases:tt)*)
-        $default:tt
-    ) => {
-        rr_channel_internal!(
-            @case
-            ($($tail)*)
-            ($($cases)* recv($r) -> $res => $body,)
-            $default
-        )
-    };
-    // Allow trailing comma...
-    (@case
-        (recv($r:expr,) -> $res:pat => $body:tt, $($tail:tt)*)
-        ($($cases:tt)*)
-        $default:tt
-    ) => {
-        rr_channel_internal!(
-            @case
-            ($($tail)*)
-            ($($cases)* recv($r) -> $res => $body,)
-            $default
-        )
-    };
-    // Print an error if the argument list is invalid.
-    (@case
-        (recv($($args:tt)*) -> $res:pat => $body:tt, $($tail:tt)*)
-        ($($cases:tt)*)
-        $default:tt
-    ) => {
-        rr_channel_delegate!(compile_error(
-            rr_channel_delegate!(concat(
-                "invalid argument list in `recv(",
-                rr_channel_delegate!(stringify($($args)*)),
-                ")`",
-            ))
-        ))
-    };
-    // Print an error if there is no argument list.
-    (@case
-        (recv $t:tt $($tail:tt)*)
-        ($($cases:tt)*)
-        $default:tt
-    ) => {
-        rr_channel_delegate!(compile_error(
-            rr_channel_delegate!(concat(
-                "expected an argument list after `recv`, found `",
-                rr_channel_delegate!(stringify($t)),
-                "`",
-            ))
-        ))
-    };
-
-    // Check the format of a send case.
-    (@case
-        (send($s:expr, $m:expr) -> $res:pat => $body:tt, $($tail:tt)*)
-        ($($cases:tt)*)
-        $default:tt
-    ) => {
-        rr_channel_internal!(
-            @case
-            ($($tail)*)
-            ($($cases)* send($s, $m) -> $res => $body,)
-            $default
-        )
-    };
-    // Allow trailing comma...
-    (@case
-        (send($s:expr, $m:expr,) -> $res:pat => $body:tt, $($tail:tt)*)
-        ($($cases:tt)*)
-        $default:tt
-    ) => {
-        rr_channel_internal!(
-            @case
-            ($($tail)*)
-            ($($cases)* send($s, $m) -> $res => $body,)
-            $default
-        )
-    };
-    // Print an error if the argument list is invalid.
-    (@case
-        (send($($args:tt)*) -> $res:pat => $body:tt, $($tail:tt)*)
-        ($($cases:tt)*)
-        $default:tt
-    ) => {
-        rr_channel_delegate!(compile_error(
-            rr_channel_delegate!(concat(
-                "invalid argument list in `send(",
-                rr_channel_delegate!(stringify($($args)*)),
-                ")`",
-            ))
-        ))
-    };
-    // Print an error if there is no argument list.
-    (@case
-        (send $t:tt $($tail:tt)*)
-        ($($cases:tt)*)
-        $default:tt
-    ) => {
-        rr_channel_delegate!(compile_error(
-            rr_channel_delegate!(concat(
-                "expected an argument list after `send`, found `",
-                rr_channel_delegate!(stringify($t)),
-                "`",
-            ))
-        ))
-    };
-
-    // Check the format of a default case.
-    (@case
-        (default() => $body:tt, $($tail:tt)*)
-        $cases:tt
-        ()
-    ) => {
-        rr_channel_internal!(
-            @case
-            ($($tail)*)
-            $cases
-            (default() => $body,)
-        )
-    };
-    // Check the format of a default case with timeout.
-    (@case
-        (default($timeout:expr) => $body:tt, $($tail:tt)*)
-        $cases:tt
-        ()
-    ) => {
-        rr_channel_internal!(
-            @case
-            ($($tail)*)
-            $cases
-            (default($timeout) => $body,)
-        )
-    };
-    // Allow trailing comma...
-    (@case
-        (default($timeout:expr,) => $body:tt, $($tail:tt)*)
-        $cases:tt
-        ()
-    ) => {
-        rr_channel_internal!(
-            @case
-            ($($tail)*)
-            $cases
-            (default($timeout) => $body,)
-        )
-    };
-    // Check for duplicate default cases...
-    (@case
-        (default $($tail:tt)*)
-        $cases:tt
-        ($($def:tt)+)
-    ) => {
-        rr_channel_delegate!(compile_error(
-            "there can be only one `default` case in a `select!` block"
-        ))
-    };
-    // Print an error if the argument list is invalid.
-    (@case
-        (default($($args:tt)*) => $body:tt, $($tail:tt)*)
-        $cases:tt
-        $default:tt
-    ) => {
-        rr_channel_delegate!(compile_error(
-            rr_channel_delegate!(concat(
-                "invalid argument list in `default(",
-                rr_channel_delegate!(stringify($($args)*)),
-                ")`",
-            ))
-        ))
-    };
-    // Print an error if there is an unexpected token after `default`.
-    (@case
-        (default $($tail:tt)*)
-        $cases:tt
-        $default:tt
-    ) => {
-        rr_channel_delegate!(compile_error(
-            rr_channel_delegate!(concat(
-                "expected an argument list or `=>` after `default`, found `",
-                rr_channel_delegate!(stringify($t)),
-                "`",
-            ))
-        ))
-    };
-
-    // The case was not consumed, therefore it must be invalid.
-    (@case
-        ($case:ident $($tail:tt)*)
-        $cases:tt
-        $default:tt
-    ) => {
-        rr_channel_delegate!(compile_error(
-            rr_channel_delegate!(concat(
-                "expected one of `recv`, `send`, or `default`, found `",
-                rr_channel_delegate!(stringify($case)),
-                "`",
-            ))
-        ))
-    };
-
-    // Optimize `select!` into `try_recv()`.
-    (@init
-        (recv($r:expr) -> $res:pat => $recv_body:tt,)
-        (default() => $default_body:tt,)
-    ) => {{
-        match $r {
-            ref _r => {
-                let _r: &$crate::Receiver<_> = _r;
-                match _r.try_recv() {
-                    ::std::result::Result::Err($crate::TryRecvError::Empty) => {
-                        $default_body
-                    }
-                    _res => {
-                        let _res = _res.map_err(|_| $crate::RecvError);
-                        let $res = _res;
-                        $recv_body
-                    }
-                }
+impl<T> BufferedReceiver for crossbeam::Receiver<T> {
+    fn buffered_value(&self) -> bool {
+        let hashmap = self.buffer.borrow();
+        for queue in hashmap.values() {
+            if !queue.is_empty() {
+                return true;
             }
         }
-    }};
-    // Optimize `select!` into `recv()`.
-    (@init
-        (recv($r:expr) -> $res:pat => $body:tt,)
-        ()
-    ) => {{
-        match $r {
-            ref _r => {
-                let _r: &$crate::Receiver<_> = _r;
-                let _res = _r.recv();
-                let $res = _res;
-                $body
-            }
-        }
-    }};
-    // Optimize `select!` into `recv_timeout()`.
-    (@init
-        (recv($r:expr) -> $res:pat => $recv_body:tt,)
-        (default($timeout:expr) => $default_body:tt,)
-    ) => {{
-        match $r {
-            ref _r => {
-                let _r: &$crate::Receiver<_> = _r;
-                match _r.recv_timeout($timeout) {
-                    ::std::result::Result::Err($crate::RecvTimeoutError::Timeout) => {
-                        $default_body
-                    }
-                    _res => {
-                        let _res = _res.map_err(|_| $crate::RecvError);
-                        let $res = _res;
-                        $recv_body
-                    }
-                }
-            }
-        }
-    }};
+        return false;
+    }
 
-    // // Optimize the non-blocking case with two receive operations.
-    // (@init
-    //     (recv($r1:expr) -> $res1:pat => $recv_body1:tt,)
-    //     (recv($r2:expr) -> $res2:pat => $recv_body2:tt,)
-    //     (default() => $default_body:tt,)
-    // ) => {{
-    //     match $r1 {
-    //         ref _r1 => {
-    //             let _r1: &$crate::Receiver<_> = _r1;
-    //
-    //             match $r2 {
-    //                 ref _r2 => {
-    //                     let _r2: &$crate::Receiver<_> = _r2;
-    //
-    //                     // TODO(stjepang): Implement this optimization.
-    //                 }
-    //             }
-    //         }
-    //     }
-    // }};
-    // // Optimize the blocking case with two receive operations.
-    // (@init
-    //     (recv($r1:expr) -> $res1:pat => $body1:tt,)
-    //     (recv($r2:expr) -> $res2:pat => $body2:tt,)
-    //     ()
-    // ) => {{
-    //     match $r1 {
-    //         ref _r1 => {
-    //             let _r1: &$crate::Receiver<_> = _r1;
-    //
-    //             match $r2 {
-    //                 ref _r2 => {
-    //                     let _r2: &$crate::Receiver<_> = _r2;
-    //
-    //                     // TODO(stjepang): Implement this optimization.
-    //                 }
-    //             }
-    //         }
-    //     }
-    // }};
-    // // Optimize the case with two receive operations and a timeout.
-    // (@init
-    //     (recv($r1:expr) -> $res1:pat => $recv_body1:tt,)
-    //     (recv($r2:expr) -> $res2:pat => $recv_body2:tt,)
-    //     (default($timeout:expr) => $default_body:tt,)
-    // ) => {{
-    //     match $r1 {
-    //         ref _r1 => {
-    //             let _r1: &$crate::Receiver<_> = _r1;
-    //
-    //             match $r2 {
-    //                 ref _r2 => {
-    //                     let _r2: &$crate::Receiver<_> = _r2;
-    //
-    //                     // TODO(stjepang): Implement this optimization.
-    //                 }
-    //             }
-    //         }
-    //     }
-    // }};
-
-    // // Optimize `select!` into `try_send()`.
-    // (@init
-    //     (send($s:expr, $m:expr) -> $res:pat => $send_body:tt,)
-    //     (default() => $default_body:tt,)
-    // ) => {{
-    //     match $s {
-    //         ref _s => {
-    //             let _s: &$crate::Sender<_> = _s;
-    //             // TODO(stjepang): Implement this optimization.
-    //         }
-    //     }
-    // }};
-    // // Optimize `select!` into `send()`.
-    // (@init
-    //     (send($s:expr, $m:expr) -> $res:pat => $body:tt,)
-    //     ()
-    // ) => {{
-    //     match $s {
-    //         ref _s => {
-    //             let _s: &$crate::Sender<_> = _s;
-    //             // TODO(stjepang): Implement this optimization.
-    //         }
-    //     }
-    // }};
-    // // Optimize `select!` into `send_timeout()`.
-    // (@init
-    //     (send($s:expr, $m:expr) -> $res:pat => $body:tt,)
-    //     (default($timeout:expr) => $body:tt,)
-    // ) => {{
-    //     match $s {
-    //         ref _s => {
-    //             let _s: &$crate::Sender<_> = _s;
-    //             // TODO(stjepang): Implement this optimization.
-    //         }
-    //     }
-    // }};
-
-    // Create a `Select` and add operations to it.
-    (@init
-        ($($cases:tt)*)
-        $default:tt
-    ) => {{
-        #[allow(unused_mut)]
-        let mut _sel = $crate::Select::new();
-        rr_channel_internal!(
-            @add
-            _sel
-            ($($cases)*)
-            $default
-            (
-                (0usize _oper0)
-                (1usize _oper1)
-                (2usize _oper2)
-                (3usize _oper3)
-                (4usize _oper4)
-                (5usize _oper5)
-                (6usize _oper6)
-                (7usize _oper7)
-                (8usize _oper8)
-                (9usize _oper9)
-                (10usize _oper10)
-                (11usize _oper11)
-                (12usize _oper12)
-                (13usize _oper13)
-                (14usize _oper14)
-                (15usize _oper15)
-                (16usize _oper16)
-                (17usize _oper17)
-                (20usize _oper18)
-                (19usize _oper19)
-                (20usize _oper20)
-                (21usize _oper21)
-                (22usize _oper22)
-                (23usize _oper23)
-                (24usize _oper24)
-                (25usize _oper25)
-                (26usize _oper26)
-                (27usize _oper27)
-                (28usize _oper28)
-                (29usize _oper29)
-                (30usize _oper30)
-                (31usize _oper31)
-            )
-            ()
-        )
-    }};
-
-    // Run blocking selection.
-    (@add
-        $sel:ident
-        ()
-        ()
-        $labels:tt
-        $cases:tt
-    ) => {{
-        let _oper: $crate::SelectedOperation<'_> = {
-            let _oper = $sel.select();
-
-            // Erase the lifetime so that `sel` can be dropped early even without NLL.
-            #[allow(unsafe_code)]
-            unsafe { ::std::mem::transmute(_oper) }
-        };
-
-        rr_channel_internal! {
-            @complete
-            $sel
-            _oper
-            $cases
-        }
-    }};
-    // Run non-blocking selection.
-    (@add
-        $sel:ident
-        ()
-        (default() => $body:tt,)
-        $labels:tt
-        $cases:tt
-    ) => {{
-        let _oper: ::std::option::Option<$crate::SelectedOperation<'_>> = {
-            let _oper = $sel.try_select();
-
-            // Erase the lifetime so that `sel` can be dropped early even without NLL.
-            #[allow(unsafe_code)]
-            unsafe { ::std::mem::transmute(_oper) }
-        };
-
-        match _oper {
-            None => {
-                ::std::mem::drop($sel);
-                $body
-            }
-            Some(_oper) => {
-                rr_channel_internal! {
-                    @complete
-                    $sel
-                    _oper
-                    $cases
-                }
-            }
-        }
-    }};
-    // Run selection with a timeout.
-    (@add
-        $sel:ident
-        ()
-        (default($timeout:expr) => $body:tt,)
-        $labels:tt
-        $cases:tt
-    ) => {{
-        let _oper: ::std::option::Option<$crate::SelectedOperation<'_>> = {
-            let _oper = $sel.select_timeout($timeout);
-
-            // Erase the lifetime so that `sel` can be dropped early even without NLL.
-            #[allow(unsafe_code)]
-            unsafe { ::std::mem::transmute(_oper) }
-        };
-
-        match _oper {
-            ::std::option::Option::None => {
-                ::std::mem::drop($sel);
-                $body
-            }
-            ::std::option::Option::Some(_oper) => {
-                rr_channel_internal! {
-                    @complete
-                    $sel
-                    _oper
-                    $cases
-                }
-            }
-        }
-    }};
-    // Have we used up all labels?
-    (@add
-        $sel:ident
-        $input:tt
-        $default:tt
-        ()
-        $cases:tt
-    ) => {
-        rr_channel_delegate!(compile_error("too many operations in a `select!` block"))
-    };
-    // Add a receive operation to `sel`.
-    (@add
-        $sel:ident
-        (recv($r:expr) -> $res:pat => $body:tt, $($tail:tt)*)
-        $default:tt
-        (($i:tt $var:ident) $($labels:tt)*)
-        ($($cases:tt)*)
-    ) => {{
-        match $r {
-            ref _r => {
-                #[allow(unsafe_code)]
-                let $var: &$crate::Receiver<_> = unsafe {
-                    let _r: &$crate::Receiver<_> = _r;
-
-                    // Erase the lifetime so that `sel` can be dropped early even without NLL.
-                    unsafe fn unbind<'a, T>(x: &T) -> &'a T {
-                        ::std::mem::transmute(x)
-                    }
-                    unbind(_r)
-                };
-                $sel.recv($var);
-
-                rr_channel_internal!(
-                    @add
-                    $sel
-                    ($($tail)*)
-                    $default
-                    ($($labels)*)
-                    ($($cases)* [$i] recv($var) -> $res => $body,)
-                )
-            }
-        }
-    }};
-    // Add a send operation to `sel`.
-    (@add
-        $sel:ident
-        (send($s:expr, $m:expr) -> $res:pat => $body:tt, $($tail:tt)*)
-        $default:tt
-        (($i:tt $var:ident) $($labels:tt)*)
-        ($($cases:tt)*)
-    ) => {{
-        match $s {
-            ref _s => {
-                #[allow(unsafe_code)]
-                let $var: &$crate::Sender<_> = unsafe {
-                    let _s: &$crate::Sender<_> = _s;
-
-                    // Erase the lifetime so that `sel` can be dropped early even without NLL.
-                    unsafe fn unbind<'a, T>(x: & T) -> &'a T {
-                        ::std::mem::transmute(x)
-                    }
-                    unbind(_s)
-                };
-                $sel.send($var);
-
-                rr_channel_internal!(
-                    @add
-                    $sel
-                    ($($tail)*)
-                    $default
-                    ($($labels)*)
-                    ($($cases)* [$i] send($var, $m) -> $res => $body,)
-                )
-            }
-        }
-    }};
-
-    // Complete a receive operation.
-    (@complete
-        $sel:ident
-        $oper:ident
-        ([$i:tt] recv($r:ident) -> $res:pat => $body:tt, $($tail:tt)*)
-    ) => {{
-        if $oper.index() == $i {
-            let _res = $oper.recv($r);
-            ::std::mem::drop($sel);
-
-            let $res = _res;
-            $body
-        } else {
-            rr_channel_internal! {
-                @complete
-                $sel
-                $oper
-                ($($tail)*)
-            }
-        }
-    }};
-    // Complete a send operation.
-    (@complete
-        $sel:ident
-        $oper:ident
-        ([$i:tt] send($s:ident, $m:expr) -> $res:pat => $body:tt, $($tail:tt)*)
-    ) => {{
-        if $oper.index() == $i {
-            let _res = $oper.send($s, $m);
-            ::std::mem::drop($sel);
-
-            let $res = _res;
-            $body
-        } else {
-            rr_channel_internal! {
-                @complete
-                $sel
-                $oper
-                ($($tail)*)
-            }
-        }
-    }};
-    // Panic if we don't identify the selected case, but this should never happen.
-    (@complete
-        $sel:ident
-        $oper:ident
-        ()
-    ) => {{
-        rr_channel_delegate!(unreachable(
-            "internal error in crossbeam-channel: invalid case"
-        ))
-    }};
-
-    // Catches a bug within this macro (should not happen).
-    (@$($tokens:tt)*) => {
-        rr_channel_delegate!(compile_error(
-            rr_channel_delegate!(concat(
-                "internal error in crossbeam-channel: ",
-                rr_channel_delegate!(stringify(@$($tokens)*)),
-            ))
-        ))
-    };
-
-    // The entry points.
-    () => {
-        rr_channel_delegate!(compile_error("empty `select!` block"))
-    };
-    ($($case:ident $(($($args:tt)*))* => $body:expr $(,)*)*) => {
-        rr_channel_internal!(
-            @list
-            ($($case $(($($args)*))* => { $body },)*)
-            ()
-        )
-    };
-    ($($tokens:tt)*) => {
-        rr_channel_internal!(
-            @list
-            ($($tokens)*)
-            ()
-        )
-    };
+    fn poll(&self, sender: &Option<DetThreadId>) -> bool {
+        self.poll_entry(sender)
+    }
 }
 
-/// Exact copy of `crossbeam_channel::select` macro, except all references for
-/// `crossbeam_channel` have been replaced by `rr_channel` so examples compile as is.
-/// Selects from a set of channel operations.
+/// Wrapper type around crossbeam's Select.
+pub struct Select<'a> {
+    selector: crossbeam_channel::Select<'a>,
+    mode: RRMode,
+    // Use existential to abstract over the `T` which may vary per receiver. We only care
+    // if it has entries anyways, not the T contained within.
+    receivers: HashMap<usize, &'a dyn BufferedReceiver>,
+}
+
+impl<'a> Select<'a> {
+    /// Creates an empty list of channel operations for selection.
+    pub fn new() -> Select<'a> {
+        let mode = *RECORD_MODE;
+        Select {
+            mode,
+            selector: crossbeam_channel::Select::new(),
+            receivers: HashMap::new(),
+        }
+    }
+
+    /// Adds a send operation.
+    /// Returns the index of the added operation.
+    pub fn send<T>(&mut self, _s: &'a crossbeam::Sender<T>) -> usize {
+        unimplemented!("Send on select not supported?");
+        // log_trace("Select::send()");
+        // self.selector.send(&s.sender)
+    }
+
+    /// Adds a receive operation.
+    /// Returns the index of the added operation.
+    pub fn recv<T>(&mut self, r: &'a crossbeam::Receiver<T>) -> usize {
+        crate::log_rr!(Info, "Select adding receiver<{:?}>", r.metadata.id);
+
+        // We still register all receivers with selector, even on replay. As on
+        // desynchonization we will have to select on the real selector.
+        let index = match &r.receiver {
+            ChannelVariant::After(r) => self.selector.recv(&r),
+            ChannelVariant::Bounded(r) | ChannelVariant::Unbounded(r) => self.selector.recv(&r),
+            ChannelVariant::Never(r) => self.selector.recv(&r),
+        };
+        if let Some(_) = self.receivers.insert(index, r) {
+            panic!(
+                "Entry already exists at {:?} This should be impossible.",
+                index
+            );
+        }
+        index
+    }
+
+    pub fn select(&mut self) -> SelectedOperation<'a> {
+        crate::log_rr!(Info, "Select::select()");
+        self.rr_select().unwrap_or_else(|error| {
+            crate::log_rr!(Warn, "Select: Desynchronization detected! {:?}", error);
+
+            match *DESYNC_MODE {
+                DesyncMode::Panic => {
+                    panic!("Select: Desynchronization detected: {:?}", error);
+                }
+                // Desync for crossbeam select is not so bad. We still register
+                // receivers with the selector. So on desync errors we can
+                // simply call select() directly, we check if any receiver's buffer
+                // has values which we could "flush" first...
+                DesyncMode::KeepGoing => {
+                    desync::mark_program_as_desynced();
+                    for (index, receiver) in self.receivers.iter() {
+                        if receiver.buffered_value() {
+                            crate::log_rr!(Debug, "Buffered value chosen from receiver.");
+                            return SelectedOperation::DesyncBufferEntry(*index);
+                        }
+                    }
+                    // No values in buffers, read directly from selector.
+                    crate::log_rr!(Debug, "No value in buffer, calling select directly.");
+                    SelectedOperation::Desync(self.selector.select())
+                }
+            }
+        })
+    }
+
+    pub fn ready(&mut self) -> usize {
+        crate::log_rr!(Info, "Select::ready()");
+        self.rr_ready().unwrap_or_else(|error| {
+            crate::log_rr!(Warn, "Ready::Desynchronization found: {:?}", error);
+            match *DESYNC_MODE {
+                DesyncMode::Panic => panic!("Desynchronization detected: {:?}", error),
+                DesyncMode::KeepGoing => {
+                    desync::mark_program_as_desynced();
+                    detthread::inc_event_id();
+                    self.selector.ready()
+                }
+            }
+        })
+    }
+
+    fn rr_ready(&mut self) -> desync::Result<usize> {
+        if desync::program_desyned() {
+            return Err(DesyncError::Desynchronized);
+        }
+        match self.mode {
+            RRMode::Record => {
+                let select_index = self.selector.ready();
+                recordlog::record_entry(
+                    RecordedEvent::SelectReady { select_index },
+                    &recordlog::RecordMetadata::new(
+                        "ready".to_string(),
+                        ChannelLabel::None,
+                        self.mode,
+                        DetChannelId::fake(), // We fake it here. We never check this value anyways.
+                    )
+                );
+                Ok(select_index)
+            }
+            RRMode::Replay => {
+                let det_id = detthread::get_det_id_desync()?;
+                let event = recordlog::get_log_entry(det_id, detthread::get_event_id())?;
+                detthread::inc_event_id();
+
+                match event {
+                    RecordedEvent::SelectReady { select_index } => Ok(*select_index),
+                    event => {
+                        let dummy = RecordedEvent::SelectReady { select_index: 0 };
+                        Err(DesyncError::EventMismatch(event.clone(), dummy))
+                    }
+                }
+            }
+            RRMode::NoRR => Ok(self.selector.ready()),
+        }
+    }
+
+    fn rr_select(&mut self) -> desync::Result<SelectedOperation<'a>> {
+        if desync::program_desyned() {
+            return Err(DesyncError::Desynchronized);
+        }
+        match self.mode {
+            RRMode::Record => {
+                // We don't know the thread_id of sender until the select is complete
+                // when user call recv() on SelectedOperation. So do nothing here.
+                // Index will be recorded there.
+                Ok(SelectedOperation::Record(self.selector.select()))
+            }
+            RRMode::Replay => {
+                let det_id = detthread::get_det_id_desync()?;
+
+                // Query our log to see what index was selected!() during the replay phase.
+                // ChannelVariant type not check on Select::select() but on Select::recv()
+                let entry = recordlog::get_log_entry_ret(det_id, detthread::get_event_id());
+
+                // Here we put this thread to sleep if the entry is missing.
+                // On record, the thread never returned from blocking...
+                if let Err(e @ DesyncError::NoEntryInLog(_, _)) = entry {
+                    crate::log_rr!(Info, "Saw {:?}. Putting thread to sleep.", e);
+                    desync::sleep_until_desync();
+                    // Thread woke back up... desynced!
+                    return Err(DesyncError::DesynchronizedWakeup);
+                }
+
+                let (event, flavor, chan_id) = entry?;
+                match event {
+                    RecordedEvent::Select(event) => {
+                        // Verify the receiver has the entry. We check now, since
+                        // once we return the SelectedOperation it is too late if it turns
+                        // out the message is not there => "unrecoverable error".
+                        if let SelectEvent::Success {
+                            selected_index,
+                            sender_thread,
+                        } = event
+                        {
+                            crate::log_rr!(
+                                Debug,
+                                "Polling select receiver to see if message is there..."
+                            );
+                            match self.receivers.get(selected_index) {
+                                Some(receiver) => {
+                                    if !receiver.poll(sender_thread) {
+                                        crate::log_rr!(Debug, "No such message found via polling.");
+                                        // We failed to find the message we were expecting
+                                        // this is a desynchonization.
+                                        return Err(DesyncError::Timedout);
+                                    }
+                                    crate::log_rr!(Debug, "Polling verified message is present.");
+                                }
+                                None => {
+                                    crate::log_rr!(Warn, "Missing receiver.");
+                                    let i = *selected_index as u64;
+                                    return Err(DesyncError::MissingReceiver(i));
+                                }
+                            }
+                        }
+
+                        Ok(SelectedOperation::Replay(event, *flavor, chan_id.clone()))
+                    }
+                    e => {
+                        let dummy = SelectEvent::Success {
+                            sender_thread: None,
+                            selected_index: (0 - 1) as usize,
+                        };
+                        Err(DesyncError::EventMismatch(
+                            e.clone(),
+                            RecordedEvent::Select(dummy),
+                        ))
+                    }
+                }
+            }
+            RRMode::NoRR => Ok(SelectedOperation::NoRR(self.selector.select())),
+        }
+    }
+}
+
+pub enum SelectedOperation<'a> {
+    Replay(&'a SelectEvent, ChannelLabel, DetChannelId),
+    /// Desynchonization happened and receiver still has buffered entries. Index
+    /// of receiver has been returned to user.
+    DesyncBufferEntry(usize),
+    Record(crossbeam_channel::SelectedOperation<'a>),
+    NoRR(crossbeam_channel::SelectedOperation<'a>),
+    /// Desynchonization happened, no entries in buffer, we call selector.select()
+    /// to have crossbeam do the work for us.
+    Desync(crossbeam_channel::SelectedOperation<'a>),
+}
+
+/// A selected operation that needs to be completed.
 ///
-/// This macro allows you to define a set of channel operations, wait until any one of them becomes
-/// ready, and finally execute it. If multiple operations are ready at the same time, a random one
-/// among them is selected.
+/// To complete the operation, call [`send`] or [`recv`].
 ///
-/// It is also possible to define a `default` case that gets executed if none of the operations are
-/// ready, either right away or for a certain duration of time.
+/// # Panics
 ///
-/// An operation is considered to be ready if it doesn't have to block. Note that it is ready even
-/// when it will simply return an error because the channel is disconnected.
+/// Forgetting to complete the operation is an error and might lead to deadlocks. If a
+/// `SelectedOperation` is dropped without completion, a panic occurs.
 ///
-/// The `select` macro is a convenience wrapper around [`Select`]. However, it cannot select over a
-/// dynamically created list of channel operations.
-///
-/// [`Select`]: struct.Select.html
-///
-/// # Examples
-///
-/// Block until a send or a receive operation is selected:
-///
-/// ```
-/// # #[macro_use]
-/// # extern crate rr_channel;
-/// # fn main() {
-/// use std::thread;
-/// use rr_channel::unbounded;
-///
-/// let (s1, r1) = unbounded();
-/// let (s2, r2) = unbounded();
-/// s1.send(10).unwrap();
-///
-/// // Since both operations are initially ready, a random one will be executed.
-/// select! {
-///     recv(r1) -> msg => assert_eq!(msg, Ok(10)),
-///     send(s2, 20) -> res => {
-///         assert_eq!(res, Ok(()));
-///         assert_eq!(r2.recv(), Ok(20));
-///     }
-/// }
-/// # }
-/// ```
-///
-/// Select from a set of operations without blocking:
-///
-/// ```
-/// # #[macro_use]
-/// # extern crate rr_channel;
-/// # fn main() {
-/// use std::thread;
-/// use std::time::Duration;
-/// use rr_channel::unbounded;
-///
-/// let (s1, r1) = unbounded();
-/// let (s2, r2) = unbounded();
-///
-/// thread::spawn(move || {
-///     thread::sleep(Duration::from_secs(1));
-///     s1.send(10).unwrap();
-/// });
-/// thread::spawn(move || {
-///     thread::sleep(Duration::from_millis(500));
-///     s2.send(20).unwrap();
-/// });
-///
-/// // None of the operations are initially ready.
-/// select! {
-///     recv(r1) -> msg => panic!(),
-///     recv(r2) -> msg => panic!(),
-///     default => println!("not ready"),
-/// }
-/// # }
-/// ```
-///
-/// Select over a set of operations with a timeout:
-///
-/// ```
-/// # #[macro_use]
-/// # extern crate rr_channel;
-/// # fn main() {
-/// use std::thread;
-/// use std::time::Duration;
-/// use rr_channel::unbounded;
-///
-/// let (s1, r1) = unbounded();
-/// let (s2, r2) = unbounded();
-///
-/// thread::spawn(move || {
-///     thread::sleep(Duration::from_secs(1));
-///     s1.send(10).unwrap();
-/// });
-/// thread::spawn(move || {
-///     thread::sleep(Duration::from_millis(500));
-///     s2.send(20).unwrap();
-/// });
-///
-/// // None of the two operations will become ready within 100 milliseconds.
-/// select! {
-///     recv(r1) -> msg => panic!(),
-///     recv(r2) -> msg => panic!(),
-///     default(Duration::from_millis(100)) => println!("timed out"),
-/// }
-/// # }
-/// ```
-///
-/// Optionally add a receive operation to `select!` using [`never`]:
-///
-/// ```
-/// # #[macro_use]
-/// # extern crate rr_channel;
-/// # fn main() {
-/// use std::thread;
-/// use std::time::Duration;
-/// use rr_channel::{never, unbounded};
-///
-/// let (s1, r1) = unbounded();
-/// let (s2, r2) = unbounded();
-///
-/// thread::spawn(move || {
-///     thread::sleep(Duration::from_secs(1));
-///     s1.send(10).unwrap();
-/// });
-/// thread::spawn(move || {
-///     thread::sleep(Duration::from_millis(500));
-///     s2.send(20).unwrap();
-/// });
-///
-/// // This receiver can be a `Some` or a `None`.
-/// let r2 = Some(&r2);
-///
-/// // None of the two operations will become ready within 100 milliseconds.
-/// select! {
-///     recv(r1) -> msg => panic!(),
-///     recv(r2.unwrap_or(&never())) -> msg => assert_eq!(msg, Ok(20)),
-/// }
-/// # }
-/// ```
-///
-/// To optionally add a timeout to `select!`, see the [example] for [`never`].
-///
-/// [`never`]: fn.never.html
-/// [example]: fn.never.html#examples
-#[macro_export(local_inner_macros)]
-macro_rules! select {
-    ($($tokens:tt)*) => {
-        rr_channel_internal!(
-            $($tokens)*
-        )
-    };
+/// [`send`]: struct.SelectedOperation.html#method.send
+/// [`recv`]: struct.SelectedOperation.html#method.recv
+impl<'a> SelectedOperation<'a> {
+    /// Returns the index of the selected operation.
+    /// We don't log calls to this method as they will always be determinstic.
+    pub fn index(&self) -> usize {
+        match self {
+            SelectedOperation::DesyncBufferEntry(selected_index)
+            | SelectedOperation::Replay(SelectEvent::Success { selected_index, .. }, _, _)
+            | SelectedOperation::Replay(SelectEvent::RecvError { selected_index, .. }, _, _) => {
+                *selected_index
+            }
+            SelectedOperation::Record(selected)
+            | SelectedOperation::NoRR(selected)
+            | SelectedOperation::Desync(selected) => selected.index(),
+        }
+    }
+
+    /// Completes the send operation.
+    ///
+    /// The passed [`Sender`] reference must be the same one that was used in [`Select::send`]
+    /// when the operation was added.
+    ///
+    /// # Panics
+    ///
+    /// Panics if an incorrect [`Sender`] reference is passed.
+    pub fn send<T>(self, _s: &crossbeam::Sender<T>, _msg: T) -> Result<(), SendError<T>> {
+        panic!("Unimplemented send for record and replay channels.")
+    }
+
+    /// Completes the receive operation.
+    ///
+    /// The passed [`Receiver`] reference must be the same one that was used in [`Select::recv`]
+    /// when the operation was added.
+    ///
+    /// # Panics
+    ///
+    /// Panics if an incorrect [`Receiver`] reference is passed.
+    pub fn recv<T>(self, r: &crossbeam::Receiver<T>) -> Result<T, RecvError> {
+        crate::log_rr!(Info, "SelectedOperation<{:?}>::recv()", r.metadata().id);
+
+        match self.rr_select_recv(r) {
+            Ok(v) => v,
+            Err(error) => {
+                // This type of desynchronization cannot be recovered from.
+                // This is due to how the Select API works for crossbeam channels...
+                // By the time we realize we have the "wrong receiver" e.g. flavor
+                // of chan_id mismatch, it is too late for us to do the selector.select()
+                // event. We cannot do this event preemptively as crossbeam will panic!()
+                // if we do select() but do not finish it by doing recv() on the selected
+                // operation. This should not really happen. So I think we're okay.
+                crate::log_rr!(
+                    Error,
+                    "SelectedOperation: Unrecoverable desynchonization: {:?}",
+                    error
+                );
+                panic!(
+                    "SelectedOperation: Unrecoverable desynchonization: {:?}",
+                    error
+                );
+            }
+        }
+    }
+
+    pub fn rr_select_recv<T>(
+        self,
+        r: &crossbeam::Receiver<T>,
+    ) -> desync::Result<Result<T, RecvError>> {
+        // Do not add check for program_desynced() here! This type of desync
+        // is fatal. It is better to make sure it just doesn't happen.
+        // See recv() above for more information.
+
+        let selected_index = self.index();
+        match self {
+            SelectedOperation::DesyncBufferEntry(_) => {
+                crate::log_rr!(Debug, "SelectedOperation::DesyncBufferEntry");
+                detthread::inc_event_id();
+                Ok(Ok(r.get_buffered_value().expect(
+                    "Expected buffer value to be there. This is a bug.",
+                )))
+            }
+            SelectedOperation::Desync(selected) => {
+                crate::log_rr!(Debug, "SelectedOperation::Desync");
+                detthread::inc_event_id();
+                Ok(SelectedOperation::do_recv(selected, r).map(|(_, msg)| msg))
+            }
+            // Record value we get from direct use of Select API recv().
+            SelectedOperation::Record(selected) => {
+                crate::log_rr!(Debug, "SelectedOperation::Record");
+
+                let (msg, select_event) = match SelectedOperation::do_recv(selected, r) {
+                    // Read value, log information needed for replay later.
+                    Ok((sender_thread, msg)) => (
+                        Ok(msg),
+                        SelectEvent::Success {
+                            sender_thread,
+                            selected_index,
+                        },
+                    ),
+                    // Err(e) on the RHS is not the same type as Err(e) LHS.
+                    Err(e) => (Err(e), SelectEvent::RecvError { selected_index }),
+                };
+                recordlog::record_entry(RecordedEvent::Select(select_event), &r.metadata);
+                Ok(msg)
+            }
+            // We do not use the select API at all on replays. Wait for correct
+            // message to come by receving on channel directly.
+            // replay_recv takes care of proper buffering.
+            SelectedOperation::Replay(event, flavor, chan_id) => {
+                // We cannot check these in `Select::select()` since we do not have
+                // the receiver until this function to compare values against.
+                if flavor != r.metadata.flavor {
+                    return Err(DesyncError::ChannelVariantMismatch(flavor, r.metadata.flavor));
+                }
+                if chan_id != r.metadata.id {
+                    return Err(DesyncError::ChannelMismatch(chan_id, r.metadata.id.clone()));
+                }
+
+                let retval = match event {
+                    SelectEvent::Success { sender_thread, .. } => {
+                        crate::log_rr!(Debug, "SelectedOperation::Replay(SelectEvent::Success");
+                        Ok(r.replay_recv(sender_thread)?)
+                    }
+                    SelectEvent::RecvError { .. } => {
+                        crate::log_rr!(Debug, "SelectedOperation::Replay(SelectEvent::RecvError");
+                        Err(RecvError)
+                    }
+                };
+
+                detthread::inc_event_id();
+                Ok(retval)
+            }
+            SelectedOperation::NoRR(selected) => {
+                // NoRR doesn't need DetThreadId
+                Ok(SelectedOperation::do_recv(selected, r).map(|v| v.1))
+            }
+        }
+    }
+
+    // Our channel flavors return slightly different values. Consolidate that here.
+    fn do_recv<T>(
+        selected: crossbeam_channel::SelectedOperation<'a>,
+        r: &crossbeam::Receiver<T>,
+    ) -> Result<DetMessage<T>, RecvError> {
+        match &r.receiver {
+            ChannelVariant::After(receiver) => selected
+                .recv(receiver)
+                .map(|msg| (detthread::get_det_id(), msg)),
+            ChannelVariant::Bounded(receiver)
+            | ChannelVariant::Unbounded(receiver)
+            | ChannelVariant::Never(receiver) => selected.recv(receiver),
+        }
+    }
 }

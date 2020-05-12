@@ -3,7 +3,7 @@ use rr_channel::ipc;
 fn main() {
     let (tx, rx) = ipc::channel().unwrap();
 
-    rr_channel::thread::spawn(move || {
+    rr_channel::detthread::spawn(move || {
         for i in 0..30 {
             tx.send(1).unwrap();
         }

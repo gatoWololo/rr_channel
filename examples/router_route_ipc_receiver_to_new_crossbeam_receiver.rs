@@ -1,9 +1,9 @@
+use rr_channel::crossbeam::Receiver;
 use rr_channel::ipc;
 /// Receiver messages from ourselves via the router, from different receivers
 /// each time.
 use rr_channel::router;
 use rr_channel::router::ROUTER;
-use rr_channel::Receiver;
 
 fn main() -> Result<(), std::io::Error> {
     for i in 0..20 {

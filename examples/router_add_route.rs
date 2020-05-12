@@ -1,7 +1,7 @@
+use rr_channel::crossbeam::Receiver;
 use rr_channel::ipc;
 use rr_channel::router;
 use rr_channel::router::ROUTER;
-use rr_channel::Receiver;
 /// Send messages and callbacks to be executed by the router thread.
 use std::time::Duration;
 

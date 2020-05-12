@@ -1,28 +1,16 @@
-// Copyright 2015 The Servo Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
 use log::Level::*;
-use crate::thread::get_det_id;
-use crate::thread::set_det_id;
-use crate::thread::DetThreadId;
 use std::collections::HashMap;
 use std::sync::Mutex;
-use crate::log_rr;
-use crate::thread::start_forwading_id;
-use crate::thread::stop_forwarding_id;
 
+use crate::crossbeam::{Receiver, Sender};
+use crate::detthread;
 use crate::ipc::{
     self, IpcReceiver, IpcReceiverSet, IpcSelectionResult, IpcSender, OpaqueIpcMessage,
     OpaqueIpcReceiver,
 };
-use crate::{Receiver, Sender};
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
+use crate::DetMessage;
 
 lazy_static! {
     pub static ref ROUTER: RouterProxy = RouterProxy::new();
@@ -35,10 +23,10 @@ pub struct RouterProxy {
 
 impl RouterProxy {
     pub fn new() -> RouterProxy {
-        let (msg_sender, msg_receiver) = crate::unbounded();
+        let (msg_sender, msg_receiver) = crate::crossbeam::unbounded();
         let (wakeup_sender, wakeup_receiver) = ipc::channel().unwrap();
 
-        crate::thread::spawn(move || Router::new(msg_receiver, wakeup_receiver).run());
+        crate::detthread::spawn(move || Router::new(msg_receiver, wakeup_receiver).run());
         RouterProxy {
             comm: Mutex::new(RouterProxyComm {
                 msg_sender: msg_sender,
@@ -50,7 +38,7 @@ impl RouterProxy {
     pub fn add_route<T: 'static>(
         &self,
         receiver: IpcReceiver<T>,
-        mut callback: Box<FnMut(Result<T, ipc_channel::Error>) + Send>,
+        mut callback: Box<dyn FnMut(Result<T, ipc_channel::Error>) + Send>,
     ) where
         T: for<'de> Deserialize<'de> + Serialize,
     {
@@ -59,15 +47,15 @@ impl RouterProxy {
         let callback_wrapper = Box::new(move |msg: OpaqueIpcMessage| {
             // We want to forward the DetThreadId. Access the real opaque channel
             // underneath our wrapper. As our wrapper throws the DetThreadId away.
-            match msg.opaque.to::<(Option<DetThreadId>, T)>() {
+            match msg.opaque.to::<DetMessage<T>>() {
                 Ok((forward_id, msg)) => {
                     // Big Hack: Temporarily set TLS DetThreadId so original sender's
                     // DetThreadId is properly forwarded to receiver.
-                    let original_id = get_det_id();
+                    let original_id = detthread::get_det_id();
 
-                    start_forwading_id(forward_id);
+                    detthread::start_forwading_id(forward_id);
                     callback(Ok(msg));
-                    stop_forwarding_id(original_id);
+                    detthread::stop_forwarding_id(original_id);
                 }
                 Err(e) => {
                     callback(Err(e));
@@ -89,8 +77,12 @@ impl RouterProxy {
     ) where
         T: for<'de> Deserialize<'de> + Serialize + Send + 'static,
     {
-        log_rr!(Info, "Routing IpcReceiver<{:?}> to crossbeam_sender: {:?}",
-                ipc_receiver.metadata.id, crossbeam_sender.channel_id);
+        crate::log_rr!(
+            Info,
+            "Routing IpcReceiver<{:?}> to crossbeam_sender: {:?}",
+            ipc_receiver.metadata.id,
+            crossbeam_sender.metadata.id
+        );
         self.add_route(
             ipc_receiver,
             Box::new(move |message| drop(crossbeam_sender.send(message.unwrap()))),
@@ -106,10 +98,14 @@ impl RouterProxy {
     where
         T: for<'de> Deserialize<'de> + Serialize + Send + 'static,
     {
-        log_rr!(Info, "Routing IpcReceiver<{:?}>", ipc_receiver.metadata.id);
+        crate::log_rr!(Info, "Routing IpcReceiver<{:?}>", ipc_receiver.metadata.id);
 
-        let (crossbeam_sender, crossbeam_receiver) = crate::unbounded();
-        log_rr!(Info, "Created Channels<{:?} for routing.", crossbeam_receiver.metadata.id);
+        let (crossbeam_sender, crossbeam_receiver) = crate::crossbeam::unbounded();
+        crate::log_rr!(
+            Info,
+            "Created Channels<{:?} for routing.",
+            crossbeam_receiver.metadata.id
+        );
 
         self.route_ipc_receiver_to_crossbeam_sender(ipc_receiver, crossbeam_sender);
         crossbeam_receiver
@@ -151,12 +147,16 @@ impl Router {
             for result in results.into_iter() {
                 match result {
                     IpcSelectionResult::MessageReceived(id, _) if id == self.msg_wakeup_id => {
-                        match self.msg_receiver.recv().expect("rr_channel:: RouterProxy::run(): Unable to receive message.") {
+                        match self
+                            .msg_receiver
+                            .recv()
+                            .expect("rr_channel:: RouterProxy::run(): Unable to receive message.")
+                        {
                             RouterMsg::AddRoute(receiver, handler) => {
-                                let id = receiver.metadata.id.clone();
                                 let new_receiver_id =
-                                    self.ipc_receiver_set.add_opaque(receiver).
-                                    expect("rr_channel:: RouterProxy::run(): Could not add_opaque");
+                                    self.ipc_receiver_set.add_opaque(receiver).expect(
+                                        "rr_channel:: RouterProxy::run(): Could not add_opaque",
+                                    );
                                 self.handlers.insert(new_receiver_id, handler);
                                 // println!("Added receiver {:?} at {:?} for handler", id, new_receiver_id);
                             }
@@ -168,9 +168,8 @@ impl Router {
                         handler(message)
                     }
                     IpcSelectionResult::ChannelClosed(id) => {
-                        self.handlers.remove(&id).
+                        let _handler = self.handlers.remove(&id).
                             expect(&format!("rr_channel:: RouterProxy::run(): Channel Closed, No such handler: {:?}", id));
-                        // println!("Removed handler for {:?}", id);
                     }
                 }
             }
@@ -182,4 +181,4 @@ enum RouterMsg {
     AddRoute(OpaqueIpcReceiver, RouterHandler),
 }
 
-pub type RouterHandler = Box<FnMut(OpaqueIpcMessage) + Send>;
+pub type RouterHandler = Box<dyn FnMut(OpaqueIpcMessage) + Send>;

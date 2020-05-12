@@ -1,16 +1,18 @@
 use rand::Rng;
-use rr_channel::{thread, TryRecvError};
+use rr_channel::crossbeam::TryRecvError;
+use rr_channel::detthread;
+use std::thread;
 /// Multiple threads write to the same sender with try_recv()
 /// Random delays to bring out more nondeterminism.
 use std::time;
 
 fn main() {
-    let (s, r) = rr_channel::unbounded();
+    let (s, r) = rr_channel::crossbeam::unbounded();
     let s2 = s.clone();
     // Avoid having channel disconnect.
     let _s = s.clone();
 
-    thread::spawn(move || {
+    detthread::spawn(move || {
         for _ in 0..20 {
             if let Err(_) = s.send("Thread 1") {
                 return;
@@ -20,7 +22,7 @@ fn main() {
         }
     });
 
-    thread::spawn(move || {
+    detthread::spawn(move || {
         for _ in 0..20 {
             if let Err(_) = s2.send("Thread 2") {
                 return;
