@@ -1,4 +1,3 @@
-use env_logger;
 use lazy_static::lazy_static;
 use log::warn;
 use serde::{Deserialize, Serialize};
@@ -45,7 +44,9 @@ const NO_DETTHREADID: &str = "DetThreadId was None. This execution may not be de
 lazy_static! {
     /// Singleton environment logger. Must be initialized somewhere, and only once.
     pub static ref ENV_LOGGER: () = {
-        env_logger::init();
+        env_logger::builder()
+            .format_timestamp(None)
+            .init()
     };
 
     /// Record type. Initialized from environment variable RR_CHANNEL.

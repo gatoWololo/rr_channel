@@ -1,6 +1,8 @@
 use rr_channel::{detthread, mpsc};
 
-/// Send messages with the possibility to disconnect.
+// Omar: TODO IDK if this tests as much, since the messages are always present
+// by the time the main thread starts doing .recv() the messages will always
+// arrive in order.
 fn main() {
     let (s1, r1) = mpsc::sync_channel(35);
     let (s2, r2) = mpsc::sync_channel(35);
@@ -9,12 +11,12 @@ fn main() {
 
     detthread::spawn(move || {
         for _ in 0..30 {
-            println!("{:?}", detthread::get_det_id());
+            // println!("{:?}", detthread::get_det_id());
             s1.send(1).unwrap()
         }
     });
     detthread::spawn(move || {
-        println!("{:?}", detthread::get_det_id());
+        // println!("{:?}", detthread::get_det_id());
         for _ in 0..30 {
             s2.send(2).unwrap()
         }

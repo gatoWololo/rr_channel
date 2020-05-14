@@ -147,11 +147,10 @@ pub enum RecordedEvent {
     },
 }
 
+
 lazy_static::lazy_static! {
     /// Global log file which all threads write to.
     pub static ref WRITE_LOG_FILE: Mutex<File> = {
-        crate::log_rr!(Debug, "Initializing WRITE_LOG_FILE lazy static.");
-
         match *RECORD_MODE {
             RRMode::Record => {
                 // Delete file if it already existed... file may not exist. That's okay.
@@ -204,7 +203,7 @@ lazy_static::lazy_static! {
 }
 
 pub(crate) fn record_entry(event: RecordedEvent, metadata: &RecordMetadata) {
-    crate::log_rr!(Debug, "rr::log()");
+    crate::log_rr!(Warn, "rr::log()");
     use std::io::Write;
 
     // Write our (DET_ID, EVENT_ID) -> index to our log file
@@ -230,7 +229,7 @@ pub(crate) fn record_entry(event: RecordedEvent, metadata: &RecordMetadata) {
         .expect("Unable to write to log file.");
 
     crate::log_rr!(
-        Info,
+        Warn,
         "{:?} Logged entry: {:?}",
         entry,
         (detthread::get_det_id(), event_id)
