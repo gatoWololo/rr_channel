@@ -192,7 +192,6 @@ impl<T> ReceiverFlavor<T> {
     }
 }
 
-// TODO(edumenyo)
 impl<T> Sender<T> {
     /// Send our det thread id along with the actual message for both
     /// record and replay.
@@ -275,8 +274,6 @@ impl<T> SenderFlavor<T> {
 
     // TODO(edumenyo)
     pub fn send(&self, t: DetMessage<T>) -> Result<(), mpsc::SendError<T>> {
-        // unimplemented!();
-
         match self {
             Self::Bounded(sender) => sender.send(t).map_err(|e| {
                 let msg: DetMessage<T> = e.0;

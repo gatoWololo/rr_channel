@@ -3,6 +3,7 @@ use std::cell::RefCell;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread;
 use std::thread::JoinHandle;
+use std::convert::Into;
 pub use std::thread::{current, panicking, park, park_timeout, sleep, yield_now};
 
 use crate::{error, recordlog, desync};
@@ -56,7 +57,6 @@ thread_local! {
     /// Unique ID to keep track of events. Not strictly necessary but extremely
     /// helpful for debugging and sanity.
     static EVENT_ID: RefCell<u32> = RefCell::new(0);
-
     static DET_ID_SPAWNER: RefCell<DetIdSpawner> = RefCell::new(DetIdSpawner::starting());
     /// Unique threadID assigned at thread spawn to to each thread.
     pub static DET_ID: RefCell<Option<DetThreadId>> = RefCell::new(DetThreadId::new());
@@ -129,13 +129,13 @@ impl DetIdSpawner {
     pub fn starting() -> DetIdSpawner {
         DetIdSpawner {
             child_index: 0,
-            thread_id: DetThreadId { thread_id: vec![] },
+            thread_id: DetThreadId { thread_id: [0; 10], extra_nodes: Vec::with_capacity(0), size: 0 },
         }
     }
 
     pub fn new_child_det_id(&mut self) -> DetThreadId {
         let mut new_thread_id = self.thread_id.clone();
-        new_thread_id.extend_path(self.child_index);
+        new_thread_id.push(self.child_index);
         self.child_index += 1;
         new_thread_id
     }
@@ -152,13 +152,19 @@ impl From<DetThreadId> for DetIdSpawner {
 
 #[derive(Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
 pub struct DetThreadId {
-    thread_id: Vec<u32>,
+    thread_id: [u32; 10],
+    extra_nodes: Vec<u32>,
+    size: u8,
 }
 
 use std::fmt::Debug;
 impl Debug for DetThreadId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
-        write!(f, "ThreadId{:?}", self.thread_id)
+        let mut vec = Vec::from(&self.thread_id[..self.size as usize]);
+        vec.extend(self.extra_nodes.iter());
+        write!(
+            f, "ThreadId{:?}", &vec
+        )
     }
 }
 
@@ -168,22 +174,49 @@ impl DetThreadId {
     /// thread was spawned through other means (not our API wrapper).
     pub fn new() -> Option<DetThreadId> {
         if Some("main") == thread::current().name() {
-            Some(DetThreadId { thread_id: vec![] })
+            Some(DetThreadId { thread_id: [0; 10], extra_nodes: Vec::with_capacity(0), size: 0 })
         } else {
             None
         }
     }
 
-    fn extend_path(&mut self, node: u32) {
-        self.thread_id.push(node);
+    fn push(&mut self, node: u32) {
+        if self.size < 10 {
+            self.thread_id[self.size as usize] = node;
+            self.size += 1;
+        }
+        else {
+            self.extra_nodes.push(node);
+            self.size += 1;
+        }
+
+        println!("modified id: {:?}", self);
     }
 }
 
 impl From<&[u32]> for DetThreadId {
     fn from(thread_id: &[u32]) -> DetThreadId {
-        DetThreadId {
-            thread_id: Vec::from(thread_id),
+        let mut dti = DetThreadId {
+            thread_id: [0; 10],
+            extra_nodes: Vec::new(),
+            size: 0
+        };
+            
+        for (i, elem) in thread_id.iter().enumerate() {
+            if *elem == 0 {
+                return dti;
+            }
+            else if i >= 10 {
+                dti.extra_nodes.push(*elem);
+                dti.size += 1;
+            }
+            else {
+                dti.thread_id[i] = *elem;
+                dti.size += 1;
+            }
         }
+
+        dti
     }
 }
 
