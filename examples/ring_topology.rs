@@ -15,16 +15,28 @@ fn main() {
     
     let senders = Arc::new(senders);
     let receivers = Arc::new(receivers);
+
     for i in 0..10 {
         // Clone via arc for moving into closure.
         let senders = senders.clone();
         let receivers = receivers.clone();
         rr_channel::detthread::spawn(move || {
+            //Set up the ring
+            if i == 0 {
+                let sender = senders[0].try_lock().expect("Lock already taken");
+                sender.send(1);
+            }
+
             // Locks should never block as every thread accesses exclusive members of vector.
             let sender = senders[(i + 1) % 10].try_lock().expect("Lock already taken");
-            let receiver = receivers[i].try_lock().expect("Lock already taken");
+            let receiver = receivers[(i) % 10].try_lock().expect("Lock already taken");
             // Send message around ring.
-            sender.send(1 /*token*/);
+            let result = receiver.try_recv().unwrap();
+            println!("{}",result);
+            if result == 1{
+                println!("Hi");
+                sender.send(1 /*token*/);
+            }
         });
     }
 }
