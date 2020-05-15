@@ -9,7 +9,8 @@ fn main() {
     let mut senders: Vec<Mutex<_>> = Vec::new();
     let mut receivers: Vec<Mutex<_>> = Vec::new();
     let args: Vec<String> = env::args().collect();
-    let size = args[1].clone().parse().unwrap();
+    let size  = args[1].clone().parse().expect("Expected cmdline argument N (Number of threads)");
+    let loop_times = args[2].clone().parse().expect("Expected cmdline argument N (Number of threads)");
 
     for _ in 0..size {
         let (s, r) = crossbeam::unbounded::<i32>();
@@ -21,10 +22,9 @@ fn main() {
     let receivers = Arc::new(receivers);
 
     //Set up the ring
-    let sender = senders[0].try_lock().expect("Lock already taken");
-    sender.send(1);
+    senders[0].try_lock().expect("Lock already taken").send(1);
 
-    for i in 0..size {
+    for i in 0.. loop_times{
         // Clone via arc for moving into closure.
         let senders = senders.clone();
         let receivers = receivers.clone();
