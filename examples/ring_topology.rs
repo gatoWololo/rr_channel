@@ -20,8 +20,6 @@ fn main() {
     let senders = Arc::new(senders);
     let receivers = Arc::new(receivers);
 
-    let mut handles = Vec::new();
-
     //Set up the ring
     let sender = senders[0].try_lock().expect("Lock already taken");
     sender.send(1);
@@ -43,10 +41,6 @@ fn main() {
                 sender.send(1 /*token*/);
             }
         });
-        handles.push(h);
-    }
-
-    for h in handles {
         h.join().unwrap();
     }
 }
