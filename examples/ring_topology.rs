@@ -46,7 +46,7 @@ fn main() {
         handles.push(h);
     }
 
-    //for h in handles {
-        //h.join().unwrap();
-    //}
+    for h in handles {
+        h.join().unwrap();
+    }
 }
