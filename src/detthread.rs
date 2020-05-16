@@ -129,13 +129,16 @@ impl DetIdSpawner {
     pub fn starting() -> DetIdSpawner {
         DetIdSpawner {
             child_index: 0,
-            thread_id: DetThreadId { thread_id: [0; 10], extra_nodes: Vec::with_capacity(0), size: 0 },
+            thread_id: DetThreadId { 
+                thread_id: [0; DetThreadId::MAX_SIZE as usize], 
+                size: 0 
+            },
         }
     }
 
     pub fn new_child_det_id(&mut self) -> DetThreadId {
         let mut new_thread_id = self.thread_id.clone();
-        new_thread_id.push(self.child_index);
+        new_thread_id.extend_path(self.child_index);
         self.child_index += 1;
         new_thread_id
     }
@@ -150,23 +153,26 @@ impl From<DetThreadId> for DetIdSpawner {
     }
 }
 
+trait DetThreadIdTrait {
+    const MAX_SIZE: u8 = 10;
+}
+
 #[derive(Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
 pub struct DetThreadId {
-    thread_id: [u32; 10],
-    extra_nodes: Vec<u32>,
+    thread_id: [u32; DetThreadId::MAX_SIZE as usize],
     size: u8,
 }
 
 use std::fmt::Debug;
 impl Debug for DetThreadId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
-        let mut vec = Vec::from(&self.thread_id[..self.size as usize]);
-        vec.extend(self.extra_nodes.iter());
         write!(
-            f, "ThreadId{:?}", &vec
+            f, "ThreadId{:?}", &self.thread_id[..self.size as usize]
         )
     }
 }
+
+impl DetThreadIdTrait for DetThreadId {}
 
 impl DetThreadId {
     /// The main thread get initialized here. Every other thread should be assigned a
@@ -174,31 +180,30 @@ impl DetThreadId {
     /// thread was spawned through other means (not our API wrapper).
     pub fn new() -> Option<DetThreadId> {
         if Some("main") == thread::current().name() {
-            Some(DetThreadId { thread_id: [0; 10], extra_nodes: Vec::with_capacity(0), size: 0 })
+            Some(DetThreadId { 
+                thread_id: [0; DetThreadId::MAX_SIZE as usize], 
+                size: 0 
+            })
         } else {
             None
         }
     }
 
-    fn push(&mut self, node: u32) {
-        if self.size < 10 {
+    fn extend_path(&mut self, node: u32) {
+        if self.size < DetThreadId::MAX_SIZE {
             self.thread_id[self.size as usize] = node;
             self.size += 1;
         }
         else {
-            self.extra_nodes.push(node);
-            self.size += 1;
+            panic!();
         }
-
-        println!("modified id: {:?}", self);
     }
 }
 
 impl From<&[u32]> for DetThreadId {
     fn from(thread_id: &[u32]) -> DetThreadId {
         let mut dti = DetThreadId {
-            thread_id: [0; 10],
-            extra_nodes: Vec::new(),
+            thread_id: [0; DetThreadId::MAX_SIZE as usize],
             size: 0
         };
             
@@ -206,9 +211,8 @@ impl From<&[u32]> for DetThreadId {
             if *elem == 0 {
                 return dti;
             }
-            else if i >= 10 {
-                dti.extra_nodes.push(*elem);
-                dti.size += 1;
+            else if i >= DetThreadId::MAX_SIZE as usize {
+                panic!("Thread path is too deep");
             }
             else {
                 dti.thread_id[i] = *elem;
