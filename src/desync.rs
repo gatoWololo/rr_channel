@@ -14,7 +14,6 @@ use crate::{detthread, DetMessage};
 use std::cell::RefMut;
 use crate::BufferedValues;
 use crate::DESYNC_MODE;
-use std::thread;
 
 /// Wrapper around DesyncError.
 pub(crate) type Result<T> = std::result::Result<T, DesyncError>;
