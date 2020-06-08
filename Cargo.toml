@@ -18,3 +18,10 @@ bincode = "1"
 [dev-dependencies]
 ipc-channel = { git = "https://github.com/gatoWololo/ipc-channel", rev = "426df57767d822867cfec5034715274b806b8aa0" }
 crossbeam-channel = "0.3"
+gnuplot = "0.0.36"
+criterion = "0.3"
+structopt = "0.3"
+
+[[bench]]
+name = "channels_benchmark"
+harness = false
