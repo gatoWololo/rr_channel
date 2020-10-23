@@ -4,10 +4,7 @@ use std::sync::Mutex;
 
 use crate::crossbeam_channel::{Receiver, Sender};
 use crate::detthread;
-use crate::ipc_channel::{
-    self, IpcReceiver, IpcReceiverSet, IpcSelectionResult, IpcSender, OpaqueIpcMessage,
-    OpaqueIpcReceiver,
-};
+use crate::ipc_channel::ipc::{self, IpcReceiver, IpcReceiverSet, IpcSelectionResult, IpcSender, OpaqueIpcMessage, OpaqueIpcReceiver};
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 use crate::DetMessage;
@@ -24,17 +21,50 @@ pub struct RouterProxy {
 impl RouterProxy {
     pub fn new() -> RouterProxy {
         let (msg_sender, msg_receiver) = crate::crossbeam_channel::unbounded();
-        let (wakeup_sender, wakeup_receiver) = ipc_channel::channel().unwrap();
+        let (wakeup_sender, wakeup_receiver) = ipc::channel().unwrap();
 
         crate::detthread::spawn(move || Router::new(msg_receiver, wakeup_receiver).run());
         RouterProxy {
             comm: Mutex::new(RouterProxyComm {
                 msg_sender,
-                wakeup_sender
+                wakeup_sender,
+                shutdown: false,
             }),
         }
     }
 
+    /// Send a shutdown message to the router containing a ACK sender,
+    /// send a wakeup message to the router, and block on the ACK.
+    /// Calling it is idempotent,
+    /// which can be useful when running a multi-process system in single-process mode.
+    pub fn shutdown(&self) {
+        let mut comm = self.comm.lock().unwrap();
+
+        if comm.shutdown {
+            return;
+        }
+        comm.shutdown = true;
+
+        let (ack_sender, ack_receiver) = crate::crossbeam_channel::unbounded();
+        let _ = comm
+            .wakeup_sender
+            .send(())
+            .and_then(|_| {
+                comm.msg_sender
+                    .send(RouterMsg::Shutdown(ack_sender))
+                    .unwrap();
+                ack_receiver.recv().unwrap();
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    // This is somewhere where our tivo wrapper diverges from the official ipc-channel API.
+    // Original:
+    // pub fn add_route(&self, receiver: OpaqueIpcReceiver, callback: RouterHandler)
+    // For some reason they ask for an OpaqueIpcReceiver. We instead ask for an IpcReceiver<T>
+    // and internally call `.to_opaque()`. We do this because we need the type information
+    // internally.
     pub fn add_route<T: 'static>(
         &self,
         receiver: IpcReceiver<T>,
@@ -116,6 +146,7 @@ impl RouterProxy {
 struct RouterProxyComm {
     msg_sender: Sender<RouterMsg>,
     wakeup_sender: IpcSender<()>,
+    shutdown: bool,
 }
 
 struct Router {
@@ -160,6 +191,7 @@ impl Router {
                                 self.handlers.insert(new_receiver_id, handler);
                                 // println!("Added receiver {:?} at {:?} for handler", id, new_receiver_id);
                             }
+                            RouterMsg::Shutdown(_) => { panic!("Shutdown in router! unimplemented!")}
                         }
                     }
                     IpcSelectionResult::MessageReceived(id, message) => {
@@ -179,6 +211,8 @@ impl Router {
 
 enum RouterMsg {
     AddRoute(OpaqueIpcReceiver, RouterHandler),
+    /// Shutdown the router, providing a sender to send an acknowledgement.
+    Shutdown(Sender<()>),
 }
 
 pub type RouterHandler = Box<dyn FnMut(OpaqueIpcMessage) + Send>;

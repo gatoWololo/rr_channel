@@ -1,12 +1,13 @@
 use rand::Rng;
 use rr_channel::ipc_channel;
-use rr_channel::ipc_channel::IpcSelectionResult;
+use rr_channel::ipc_channel::ipc::IpcSelectionResult;
 use std::time;
+use rr_channel::ipc_channel::ipc;
 
 fn main() {
-    let (s, r) = ipc_channel::channel::<u32>().unwrap();
-    let (s2, r2) = ipc_channel::channel::<u32>().unwrap();
-    let mut set = ipc_channel::IpcReceiverSet::new().unwrap();
+    let (s, r) = ipc::channel::<u32>().unwrap();
+    let (s2, r2) = ipc::channel::<u32>().unwrap();
+    let mut set = ipc::IpcReceiverSet::new().unwrap();
     let s3 = s2.clone();
 
     rr_channel::detthread::spawn(move || loop {

@@ -1,7 +1,8 @@
 use rr_channel::ipc_channel;
+use rr_channel::ipc_channel::ipc;
 
 fn main() {
-    let (tx, rx) = ipc_channel::channel().unwrap();
+    let (tx, rx) = ipc::channel().unwrap();
     let tx2 = tx.clone();
     let tx3 = tx.clone();
     let tx4 = tx.clone();
@@ -17,7 +18,7 @@ fn main() {
     }
 }
 
-fn spawn_sender(v: i32, tx: ipc_channel::IpcSender<i32>) {
+fn spawn_sender(v: i32, tx: ipc_channel::ipc::IpcSender<i32>) {
     rr_channel::detthread::spawn(move || {
         for i in 0..30 {
             tx.send(v).unwrap();
