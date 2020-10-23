@@ -1,7 +1,8 @@
 use rr_channel::ipc_channel;
+use rr_channel::ipc_channel::ipc;
 
 fn main() {
-    let (tx, rx) = ipc_channel::channel().unwrap();
+    let (tx, rx) = ipc::channel().unwrap();
 
     rr_channel::detthread::spawn(move || {
         for i in 0..30 {

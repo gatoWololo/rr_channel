@@ -1,11 +1,12 @@
 use rr_channel::detthread;
 use rr_channel::ipc_channel;
-use rr_channel::ipc_channel::IpcSelectionResult;
+use rr_channel::ipc_channel::ipc::IpcSelectionResult;
+use rr_channel::ipc_channel::ipc;
 
 fn main() {
-    let (s, r) = ipc_channel::channel::<u32>().unwrap();
-    let (s2, r2) = ipc_channel::channel::<u32>().unwrap();
-    let mut set = ipc_channel::IpcReceiverSet::new().unwrap();
+    let (s, r) = ipc_channel::ipc::channel::<u32>().unwrap();
+    let (s2, r2) = ipc_channel::ipc::channel::<u32>().unwrap();
+    let mut set = ipc::IpcReceiverSet::new().unwrap();
 
     detthread::spawn(move || {
         s.send(1);

@@ -1,9 +1,10 @@
 use rr_channel::ipc_channel;
-use rr_channel::router::ROUTER;
+use rr_channel::ipc_channel::router::ROUTER;
+use rr_channel::ipc_channel::ipc;
 
 fn main() -> Result<(), std::io::Error> {
     // Send messages to ourself via the router.
-    let (ipc_sender, ipc_receiver) = ipc_channel::channel()?;
+    let (ipc_sender, ipc_receiver) = ipc::channel()?;
     let (sender, receiver) = rr_channel::crossbeam_channel::unbounded();
     ROUTER.route_ipc_receiver_to_crossbeam_sender(ipc_receiver, sender);
     for i in 1..20 {

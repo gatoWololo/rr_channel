@@ -19,6 +19,7 @@ pub use crate::{select, DetMessage};
 
 pub use rc::RecvTimeoutError;
 pub use rc::TryRecvError;
+pub use rc::{RecvError, SendError};
 
 pub struct Sender<T> {
     pub(crate) sender: crossbeam_channel::Sender<DetMessage<T>>,

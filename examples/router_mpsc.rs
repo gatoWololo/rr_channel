@@ -1,10 +1,10 @@
 use rr_channel::crossbeam_channel::Receiver;
 use rr_channel::ipc_channel;
-use rr_channel::router;
-use rr_channel::router::ROUTER;
+use rr_channel::ipc_channel::{router, ipc};
+use rr_channel::ipc_channel::router::ROUTER;
 
 fn main() -> Result<(), std::io::Error> {
-    let (sender, receiver) = ipc_channel::channel()?;
+    let (sender, receiver) = ipc::channel()?;
     let sender2 = sender.clone();
 
     rr_channel::detthread::spawn(move || {

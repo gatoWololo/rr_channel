@@ -7,7 +7,6 @@ pub mod crossbeam_channel;
 pub mod detthread;
 pub mod ipc_channel;
 pub mod mpsc;
-pub mod router;
 mod crossbeam_select;
 mod crossbeam_select_macro;
 mod desync;

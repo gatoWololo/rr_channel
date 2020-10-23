@@ -44,7 +44,7 @@ impl DetChannelId {
     }
 }
 
-pub(crate) trait RecvRR<T, E: Error> {
+pub(crate) trait RecvRR<T, E> {
     /// Given a channel receiver function as a closure (e.g. || receiver.try_receive())
     /// handle the recording or replaying logic for this message arrival.
     fn rr_recv(

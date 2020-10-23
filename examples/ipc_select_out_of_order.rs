@@ -3,9 +3,9 @@ use rand::Rng;
 /// with the same DetChannelId and index. This example should panic as receivers,
 /// race on being added to the IpcReceiverSet.
 use rr_channel::ipc_channel;
-use rr_channel::ipc_channel::IpcReceiverSet;
-use rr_channel::ipc_channel::IpcSelectionResult;
-use rr_channel::router::ROUTER;
+use rr_channel::ipc_channel::ipc::IpcReceiverSet;
+use rr_channel::ipc_channel::ipc::IpcSelectionResult;
+use rr_channel::ipc_channel::router::ROUTER;
 use std::sync::{Arc, Mutex};
 use std::time;
 
@@ -34,7 +34,7 @@ fn add_receiver(i: i32, set: Arc<Mutex<IpcReceiverSet>>) {
         let delay = rand::thread_rng().gen_range(0, 3);
         std::thread::sleep(time::Duration::from_millis(delay));
 
-        let (_, r) = ipc_channel::channel::<u32>().unwrap();
+        let (_, r) = ipc_channel::ipc::channel::<u32>().unwrap();
         set.lock().expect("Unable to acquire lock").add(r);
     }
 }

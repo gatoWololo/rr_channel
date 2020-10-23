@@ -5,8 +5,8 @@ use rand::Rng;
 /// IpcReceiverSet _itself_ as its main implementation, it means this is
 /// automatically deterministic.
 use rr_channel::ipc_channel;
-use rr_channel::ipc_channel::IpcSelectionResult;
-use rr_channel::router::ROUTER;
+use rr_channel::ipc_channel::ipc::IpcSelectionResult;
+use rr_channel::ipc_channel::router::ROUTER;
 use std::time;
 
 fn main() {
@@ -33,7 +33,7 @@ fn add_receiver(i: i32) {
         let delay = rand::thread_rng().gen_range(0, 3);
         std::thread::sleep(time::Duration::from_millis(delay));
 
-        let (_, r) = ipc_channel::channel::<u32>().unwrap();
+        let (_, r) = ipc_channel::ipc::channel::<u32>().unwrap();
         ROUTER.route_ipc_receiver_to_new_crossbeam_receiver(r);
     }
 }
