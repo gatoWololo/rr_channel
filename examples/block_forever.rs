@@ -6,8 +6,8 @@ use std::thread;
 use std::time::Duration;
 
 fn main() {
-    let (s, r) = rr_channel::crossbeam::unbounded::<i32>();
-    let (s2, r2) = rr_channel::crossbeam::unbounded::<i32>();
+    let (s, r) = rr_channel::crossbeam_channel::unbounded::<i32>();
+    let (s2, r2) = rr_channel::crossbeam_channel::unbounded::<i32>();
 
     detthread::spawn(move || {
         rr_channel::select! {

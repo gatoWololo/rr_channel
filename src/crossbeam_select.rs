@@ -1,8 +1,8 @@
-use crossbeam_channel::{RecvError, SendError};
+use ::crossbeam_channel as rc; // rc = real_channel
 use log::Level::*;
 use std::collections::HashMap;
 
-use crate::crossbeam::{self, ChannelVariant};
+use crate::crossbeam_channel::{self, ChannelVariant};
 use crate::detthread::DetThreadId;
 use crate::error::DesyncError;
 use crate::recordlog::{self, ChannelLabel, RecordedEvent, SelectEvent};
@@ -21,7 +21,7 @@ trait BufferedReceiver {
     fn poll(&self, sender: &Option<DetThreadId>) -> bool;
 }
 
-impl<T> BufferedReceiver for crossbeam::Receiver<T> {
+impl<T> BufferedReceiver for crossbeam_channel::Receiver<T> {
     fn buffered_value(&self) -> bool {
         let hashmap = self.buffer.borrow();
         for queue in hashmap.values() {
@@ -39,7 +39,7 @@ impl<T> BufferedReceiver for crossbeam::Receiver<T> {
 
 /// Wrapper type around crossbeam's Select.
 pub struct Select<'a> {
-    selector: crossbeam_channel::Select<'a>,
+    selector: rc::Select<'a>,
     mode: RRMode,
     // Use existential to abstract over the `T` which may vary per receiver. We only care
     // if it has entries anyways, not the T contained within.
@@ -52,14 +52,14 @@ impl<'a> Select<'a> {
         let mode = *RECORD_MODE;
         Select {
             mode,
-            selector: crossbeam_channel::Select::new(),
+            selector: rc::Select::new(),
             receivers: HashMap::new(),
         }
     }
 
     /// Adds a send operation.
     /// Returns the index of the added operation.
-    pub fn send<T>(&mut self, _s: &'a crossbeam::Sender<T>) -> usize {
+    pub fn send<T>(&mut self, _s: &'a crossbeam_channel::Sender<T>) -> usize {
         unimplemented!("Send on select not supported?");
         // log_trace("Select::send()");
         // self.selector.send(&s.sender)
@@ -67,7 +67,7 @@ impl<'a> Select<'a> {
 
     /// Adds a receive operation.
     /// Returns the index of the added operation.
-    pub fn recv<T>(&mut self, r: &'a crossbeam::Receiver<T>) -> usize {
+    pub fn recv<T>(&mut self, r: &'a crossbeam_channel::Receiver<T>) -> usize {
         crate::log_rr!(Info, "Select adding receiver<{:?}>", r.metadata.id);
 
         // We still register all receivers with selector, even on replay. As on
@@ -249,11 +249,11 @@ pub enum SelectedOperation<'a> {
     /// Desynchonization happened and receiver still has buffered entries. Index
     /// of receiver has been returned to user.
     DesyncBufferEntry(usize),
-    Record(crossbeam_channel::SelectedOperation<'a>),
-    NoRR(crossbeam_channel::SelectedOperation<'a>),
+    Record(rc::SelectedOperation<'a>),
+    NoRR(rc::SelectedOperation<'a>),
     /// Desynchonization happened, no entries in buffer, we call selector.select()
     /// to have crossbeam do the work for us.
-    Desync(crossbeam_channel::SelectedOperation<'a>),
+    Desync(rc::SelectedOperation<'a>),
 }
 
 /// A selected operation that needs to be completed.
@@ -291,7 +291,7 @@ impl<'a> SelectedOperation<'a> {
     /// # Panics
     ///
     /// Panics if an incorrect [`Sender`] reference is passed.
-    pub fn send<T>(self, _s: &crossbeam::Sender<T>, _msg: T) -> Result<(), SendError<T>> {
+    pub fn send<T>(self, _s: &crossbeam_channel::Sender<T>, _msg: T) -> Result<(), rc::SendError<T>> {
         panic!("Unimplemented send for record and replay channels.")
     }
 
@@ -303,7 +303,7 @@ impl<'a> SelectedOperation<'a> {
     /// # Panics
     ///
     /// Panics if an incorrect [`Receiver`] reference is passed.
-    pub fn recv<T>(self, r: &crossbeam::Receiver<T>) -> Result<T, RecvError> {
+    pub fn recv<T>(self, r: &crossbeam_channel::Receiver<T>) -> Result<T, rc::RecvError> {
         crate::log_rr!(Info, "SelectedOperation<{:?}>::recv()", r.metadata().id);
 
         match self.rr_select_recv(r) {
@@ -331,12 +331,11 @@ impl<'a> SelectedOperation<'a> {
 
     pub fn rr_select_recv<T>(
         self,
-        r: &crossbeam::Receiver<T>,
-    ) -> desync::Result<Result<T, RecvError>> {
+        r: &crossbeam_channel::Receiver<T>,
+    ) -> desync::Result<Result<T, rc::RecvError>> {
         // Do not add check for program_desynced() here! This type of desync
         // is fatal. It is better to make sure it just doesn't happen.
         // See recv() above for more information.
-
         let selected_index = self.index();
         match self {
             SelectedOperation::DesyncBufferEntry(_) => {
@@ -390,7 +389,7 @@ impl<'a> SelectedOperation<'a> {
                     }
                     SelectEvent::RecvError { .. } => {
                         crate::log_rr!(Debug, "SelectedOperation::Replay(SelectEvent::RecvError");
-                        Err(RecvError)
+                        Err(rc::RecvError)
                     }
                 };
 
@@ -406,9 +405,9 @@ impl<'a> SelectedOperation<'a> {
 
     // Our channel flavors return slightly different values. Consolidate that here.
     fn do_recv<T>(
-        selected: crossbeam_channel::SelectedOperation<'a>,
-        r: &crossbeam::Receiver<T>,
-    ) -> Result<DetMessage<T>, RecvError> {
+        selected: rc::SelectedOperation<'a>,
+        r: & crossbeam_channel::Receiver<T>,
+    ) -> Result<DetMessage<T>, rc::RecvError> {
         match &r.receiver {
             ChannelVariant::After(receiver) => selected
                 .recv(receiver)

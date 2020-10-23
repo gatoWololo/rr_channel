@@ -3,15 +3,15 @@
 /// Main thread prints messages. Definetily nondeterministic.
 /// Deterministic thanks to our RR B)
 use rand::Rng;
-use rr_channel::crossbeam::Receiver;
-use rr_channel::ipc;
+use rr_channel::crossbeam_channel::Receiver;
+use rr_channel::ipc_channel;
 use rr_channel::router;
 use rr_channel::router::ROUTER;
 use std::time;
 use std::time::Duration;
 fn main() -> Result<(), std::io::Error> {
-    let (sender, receiver) = ipc::channel::<i32>()?;
-    let (sender2, receiver2) = ipc::channel::<i32>()?;
+    let (sender, receiver) = ipc_channel::channel::<i32>()?;
+    let (sender2, receiver2) = ipc_channel::channel::<i32>()?;
     let thread_sender1 = sender.clone();
     let thread_sender2 = sender.clone();
 

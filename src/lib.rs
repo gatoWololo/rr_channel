@@ -3,9 +3,9 @@ use log::warn;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 
-pub mod crossbeam;
+pub mod crossbeam_channel;
 pub mod detthread;
-pub mod ipc;
+pub mod ipc_channel;
 pub mod mpsc;
 pub mod router;
 mod crossbeam_select;

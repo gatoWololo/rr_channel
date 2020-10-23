@@ -1,8 +1,8 @@
-use rr_channel::ipc;
+use rr_channel::ipc_channel;
 
 fn main() {
     let payload = "Hello, World!".to_owned();
-    let (tx, rx) = ipc::channel().unwrap();
+    let (tx, rx) = ipc_channel::channel().unwrap();
 
     // Send data
     tx.send(payload).unwrap();

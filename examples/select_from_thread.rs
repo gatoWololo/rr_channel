@@ -3,8 +3,8 @@ use rr_channel::detthread;
 /// Two threads send their message through their own individual channels.
 /// A 3rd thread creates a 4th thread which receives messages.
 fn main() {
-    let (s0, r0) = rr_channel::crossbeam::unbounded();
-    let (s1, r1) = rr_channel::crossbeam::unbounded();
+    let (s0, r0) = rr_channel::crossbeam_channel::unbounded();
+    let (s1, r1) = rr_channel::crossbeam_channel::unbounded();
 
     let h0 = detthread::spawn(move || {
         for _ in 0..10 {

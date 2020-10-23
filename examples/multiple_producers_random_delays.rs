@@ -7,8 +7,8 @@ use std::thread;
 use std::time;
 
 fn main() {
-    let (s, r) = rr_channel::crossbeam::unbounded();
-    let (_s2, r2) = rr_channel::crossbeam::unbounded::<i32>();
+    let (s, r) = rr_channel::crossbeam_channel::unbounded();
+    let (_s2, r2) = rr_channel::crossbeam_channel::unbounded::<i32>();
     // Avoid having channel disconnect.
     let _s = s.clone();
 

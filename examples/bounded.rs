@@ -4,8 +4,8 @@
 use rr_channel::detthread;
 
 fn main() {
-    let (s, r) = rr_channel::crossbeam::bounded(1);
-    let (s2, r2) = rr_channel::crossbeam::unbounded();
+    let (s, r) = rr_channel::crossbeam_channel::bounded(1);
+    let (s2, r2) = rr_channel::crossbeam_channel::unbounded();
 
     let h = detthread::spawn(move || {
         for _ in 0..20 {

@@ -1,5 +1,5 @@
 use rand::Rng;
-use rr_channel::crossbeam::RecvTimeoutError;
+use rr_channel::crossbeam_channel::RecvTimeoutError;
 use rr_channel::detthread;
 use std::thread;
 /// Thread write to the same sender with recv_timeout
@@ -7,7 +7,7 @@ use std::thread;
 use std::time;
 
 fn main() {
-    let (s, r) = rr_channel::crossbeam::unbounded();
+    let (s, r) = rr_channel::crossbeam_channel::unbounded();
     let s2 = s.clone();
     // Avoid having channel disconnect.
     let _s = s.clone();

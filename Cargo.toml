@@ -14,7 +14,3 @@ serde_json = "1.0"
 ipc-channel = { git = "https://github.com/gatoWololo/ipc-channel", rev = "426df57767d822867cfec5034715274b806b8aa0" }
 rand = "0.6.5"
 bincode = "1"
-
-[dev-dependencies]
-ipc-channel = { git = "https://github.com/gatoWololo/ipc-channel", rev = "426df57767d822867cfec5034715274b806b8aa0" }
-crossbeam-channel = "0.3"

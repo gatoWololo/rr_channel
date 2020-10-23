@@ -1,4 +1,5 @@
-pub use crossbeam_channel::{self, RecvError, RecvTimeoutError, SendError, TryRecvError};
+// pub use crossbeam_channel::{self, RecvError, RecvTimeoutError, SendError, TryRecvError};
+use crossbeam_channel as rc; // rc = real_crossbeam
 use log::Level::*;
 use std::cell::{RefCell, RefMut};
 use std::collections::{HashMap, VecDeque};
@@ -16,6 +17,8 @@ pub use crate::crossbeam_select::{Select, SelectedOperation};
 use crate::rr::RecvRR;
 pub use crate::{select, DetMessage};
 
+pub use rc::RecvTimeoutError;
+pub use rc::TryRecvError;
 
 pub struct Sender<T> {
     pub(crate) sender: crossbeam_channel::Sender<DetMessage<T>>,
@@ -42,7 +45,7 @@ impl<T> Clone for Sender<T> {
     }
 }
 
-impl<T> SendRR<T, SendError<T>> for Sender<T> {
+impl<T> SendRR<T, rc::SendError<T>> for Sender<T> {
     fn check_log_entry(&self, entry: RecordedEvent) -> desync::Result<()> {
         match entry {
             RecordedEvent::Sender => Ok(()),
@@ -50,10 +53,10 @@ impl<T> SendRR<T, SendError<T>> for Sender<T> {
         }
     }
 
-    fn send(&self, thread_id: Option<DetThreadId>, msg: T) -> Result<(), SendError<T>> {
+    fn send(&self, thread_id: Option<DetThreadId>, msg: T) -> Result<(), rc::SendError<T>> {
         self.sender
             .send((thread_id, msg))
-            .map_err(|e| SendError(e.into_inner().1))
+            .map_err(|e| rc::SendError(e.into_inner().1))
     }
 
     const EVENT_VARIANT: RecordedEvent = RecordedEvent::Sender;
@@ -62,7 +65,7 @@ impl<T> SendRR<T, SendError<T>> for Sender<T> {
 /// Implement crossbeam channel API.
 impl<T> Sender<T> {
     /// crossbeam_channel::send implementation.
-    pub fn send(&self, msg: T) -> Result<(), SendError<T>> {
+    pub fn send(&self, msg: T) -> Result<(), rc::SendError<T>> {
         match self.rr_send(
             msg,
             &self.metadata,
@@ -104,7 +107,7 @@ pub(crate) enum ChannelVariant<T> {
 }
 
 impl<T> ChannelVariant<T> {
-    pub(crate) fn try_recv(&self) -> Result<DetMessage<T>, TryRecvError> {
+    pub(crate) fn try_recv(&self) -> Result<DetMessage<T>, rc::TryRecvError> {
             match self {
                 ChannelVariant::After(receiver) => {
                     match receiver.try_recv() {
@@ -119,7 +122,7 @@ impl<T> ChannelVariant<T> {
             }
     }
 
-    pub(crate) fn recv(&self) -> Result<DetMessage<T>, RecvError> {
+    pub(crate) fn recv(&self) -> Result<DetMessage<T>, rc::RecvError> {
             match self {
                 ChannelVariant::After(receiver) => {
                     match receiver.recv() {
@@ -137,7 +140,7 @@ impl<T> ChannelVariant<T> {
     pub(crate) fn recv_timeout(
         &self,
         duration: Duration,
-    ) -> Result<DetMessage<T>, RecvTimeoutError> {
+    ) -> Result<DetMessage<T>, rc::RecvTimeoutError> {
         match self {
             ChannelVariant::After(receiver) => match receiver.recv_timeout(duration) {
                 Ok(msg) => Ok((detthread::get_det_id(), msg)),
@@ -205,26 +208,26 @@ macro_rules! impl_recvrr {
     };
 }
 
-impl_recvrr!(RecvError, RecvSucc, RecvErr);
-impl_recvrr!(TryRecvError, TryRecvSucc, TryRecvErr);
-impl_recvrr!(RecvTimeoutError, RecvTimeoutSucc, RecvTimeoutErr);
+impl_recvrr!(rc::RecvError, RecvSucc, RecvErr);
+impl_recvrr!(rc::TryRecvError, TryRecvSucc, TryRecvErr);
+impl_recvrr!(rc::RecvTimeoutError, RecvTimeoutSucc, RecvTimeoutErr);
 
 impl<T> Receiver<T> {
     // Implementation of crossbeam_channel public API.
 
-    pub fn recv(&self) -> Result<T, RecvError> {
+    pub fn recv(&self) -> Result<T, rc::RecvError> {
         let receiver = || self.receiver.recv();
         RecvRR::rr_recv(self, self.metadata(), receiver, "channel::recv()")
             .unwrap_or_else(|e| desync::handle_desync(e, receiver, self.get_buffer()))
     }
 
-    pub fn try_recv(&self) -> Result<T, TryRecvError> {
+    pub fn try_recv(&self) -> Result<T, rc::TryRecvError> {
         let f = || self.receiver.try_recv();
         self.rr_recv(self.metadata(), f, "channel::try_recv()")
             .unwrap_or_else(|e| desync::handle_desync(e, f, self.get_buffer()))
     }
 
-    pub fn recv_timeout(&self, timeout: Duration) -> Result<T, RecvTimeoutError> {
+    pub fn recv_timeout(&self, timeout: Duration) -> Result<T, rc::RecvTimeoutError> {
         let f = || self.receiver.recv_timeout(timeout);
         self.rr_recv(self.metadata(), f, "channel::rect_timeout()")
             .unwrap_or_else(|e| desync::handle_desync(e, f, self.get_buffer()))

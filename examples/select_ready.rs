@@ -1,10 +1,9 @@
-use rr_channel::detthread;
 use std::thread;
 
 /// Test select::ready() function directly.
 fn main() {
-    let (s1, r1) = rr_channel::crossbeam::unbounded();
-    let (s2, r2) = rr_channel::crossbeam::unbounded();
+    let (s1, r1) = rr_channel::crossbeam_channel::unbounded();
+    let (s2, r2) = rr_channel::crossbeam_channel::unbounded();
 
     // Keep copies around to avoid disconnecting channel.
     // Else we end up getting spurious RecvError from channel.
@@ -22,7 +21,7 @@ fn main() {
         }
     });
 
-    let mut select = rr_channel::crossbeam::Select::new();
+    let mut select = rr_channel::crossbeam_channel::Select::new();
     select.recv(&r1);
     select.recv(&r2);
     for _ in 0..60 {

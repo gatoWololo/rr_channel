@@ -3,8 +3,8 @@
 use rr_channel::detthread;
 
 fn main() {
-    let (s1, r1) = rr_channel::crossbeam::unbounded();
-    let (s2, r2) = rr_channel::crossbeam::unbounded();
+    let (s1, r1) = rr_channel::crossbeam_channel::unbounded();
+    let (s2, r2) = rr_channel::crossbeam_channel::unbounded();
 
     // Keep copies around to avoid disconnecting channel.
     // Else we end up getting spurious RecvError from channel.

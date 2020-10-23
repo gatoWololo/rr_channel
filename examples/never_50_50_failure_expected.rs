@@ -9,7 +9,7 @@ use std::thread::sleep;
 use std::time::Duration;
 
 fn main() {
-    let (s, r) = rr_channel::crossbeam::unbounded();
+    let (s, r) = rr_channel::crossbeam_channel::unbounded();
 
     detthread::spawn(move || {
         sleep(Duration::from_secs(1));
@@ -25,8 +25,8 @@ fn main() {
 
     // Create a channel that times out after the specified duration.
     let timeout = duration
-        .map(|d| rr_channel::crossbeam::after(d))
-        .unwrap_or(rr_channel::crossbeam::never());
+        .map(|d| rr_channel::crossbeam_channel::after(d))
+        .unwrap_or(rr_channel::crossbeam_channel::never());
 
     rr_channel::select! {
         recv(r) -> msg => println!("Message: {:?}", msg),

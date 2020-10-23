@@ -607,13 +607,13 @@ macro_rules! rr_channel_internal {
     ) => {{
         match $r {
             ref _r => {
-                let _r: &$crate::crossbeam::Receiver<_> = _r;
+                let _r: &$crate::crossbeam_channel::Receiver<_> = _r;
                 match _r.try_recv() {
-                    ::std::result::Result::Err($crate::crossbeam::TryRecvError::Empty) => {
+                    ::std::result::Result::Err($crate::crossbeam_channel::TryRecvError::Empty) => {
                         $default_body
                     }
                     _res => {
-                        let _res = _res.map_err(|_| $crate::crossbeam::RecvError);
+                        let _res = _res.map_err(|_| $crate::crossbeam_channel::RecvError);
                         let $res = _res;
                         $recv_body
                     }
@@ -628,7 +628,7 @@ macro_rules! rr_channel_internal {
     ) => {{
         match $r {
             ref _r => {
-                let _r: &$crate::crossbeam::Receiver<_> = _r;
+                let _r: &$crate::crossbeam_channel::Receiver<_> = _r;
                 let _res = _r.recv();
                 let $res = _res;
                 $body
@@ -642,13 +642,13 @@ macro_rules! rr_channel_internal {
     ) => {{
         match $r {
             ref _r => {
-                let _r: &$crate::crossbeam::Receiver<_> = _r;
+                let _r: &$crate::crossbeam_channel::Receiver<_> = _r;
                 match _r.recv_timeout($timeout) {
-                    ::std::result::Result::Err($crate::crossbeam::RecvTimeoutError::Timeout) => {
+                    ::std::result::Result::Err($crate::crossbeam_channel::RecvTimeoutError::Timeout) => {
                         $default_body
                     }
                     _res => {
-                        let _res = _res.map_err(|_| $crate::crossbeam::RecvError);
+                        let _res = _res.map_err(|_| $crate::crossbeam_channel::RecvError);
                         let $res = _res;
                         $recv_body
                     }
@@ -665,11 +665,11 @@ macro_rules! rr_channel_internal {
     // ) => {{
     //     match $r1 {
     //         ref _r1 => {
-    //             let _r1: &$crate::crossbeam::Receiver<_> = _r1;
+    //             let _r1: &$crate::crossbeam_channel::Receiver<_> = _r1;
     //
     //             match $r2 {
     //                 ref _r2 => {
-    //                     let _r2: &$crate::crossbeam::Receiver<_> = _r2;
+    //                     let _r2: &$crate::crossbeam_channel::Receiver<_> = _r2;
     //
     //                     // TODO(stjepang): Implement this optimization.
     //                 }
@@ -685,11 +685,11 @@ macro_rules! rr_channel_internal {
     // ) => {{
     //     match $r1 {
     //         ref _r1 => {
-    //             let _r1: &$crate::crossbeam::Receiver<_> = _r1;
+    //             let _r1: &$crate::crossbeam_channel::Receiver<_> = _r1;
     //
     //             match $r2 {
     //                 ref _r2 => {
-    //                     let _r2: &$crate::crossbeam::Receiver<_> = _r2;
+    //                     let _r2: &$crate::crossbeam_channel::Receiver<_> = _r2;
     //
     //                     // TODO(stjepang): Implement this optimization.
     //                 }
@@ -705,11 +705,11 @@ macro_rules! rr_channel_internal {
     // ) => {{
     //     match $r1 {
     //         ref _r1 => {
-    //             let _r1: &$crate::crossbeam::Receiver<_> = _r1;
+    //             let _r1: &$crate::crossbeam_channel::Receiver<_> = _r1;
     //
     //             match $r2 {
     //                 ref _r2 => {
-    //                     let _r2: &$crate::crossbeam::Receiver<_> = _r2;
+    //                     let _r2: &$crate::crossbeam_channel::Receiver<_> = _r2;
     //
     //                     // TODO(stjepang): Implement this optimization.
     //                 }
@@ -725,7 +725,7 @@ macro_rules! rr_channel_internal {
     // ) => {{
     //     match $s {
     //         ref _s => {
-    //             let _s: &$crate::crossbeam::Sender<_> = _s;
+    //             let _s: &$crate::crossbeam_channel::Sender<_> = _s;
     //             // TODO(stjepang): Implement this optimization.
     //         }
     //     }
@@ -737,7 +737,7 @@ macro_rules! rr_channel_internal {
     // ) => {{
     //     match $s {
     //         ref _s => {
-    //             let _s: &$crate::crossbeam::Sender<_> = _s;
+    //             let _s: &$crate::crossbeam_channel::Sender<_> = _s;
     //             // TODO(stjepang): Implement this optimization.
     //         }
     //     }
@@ -749,7 +749,7 @@ macro_rules! rr_channel_internal {
     // ) => {{
     //     match $s {
     //         ref _s => {
-    //             let _s: &$crate::crossbeam::Sender<_> = _s;
+    //             let _s: &$crate::crossbeam_channel::Sender<_> = _s;
     //             // TODO(stjepang): Implement this optimization.
     //         }
     //     }
@@ -761,7 +761,7 @@ macro_rules! rr_channel_internal {
         $default:tt
     ) => {{
         #[allow(unused_mut)]
-        let mut _sel = $crate::crossbeam::Select::new();
+        let mut _sel = $crate::crossbeam_channel::Select::new();
         rr_channel_internal!(
             @add
             _sel
@@ -813,7 +813,7 @@ macro_rules! rr_channel_internal {
         $labels:tt
         $cases:tt
     ) => {{
-        let _oper: $crate::crossbeam::SelectedOperation<'_> = {
+        let _oper: $crate::crossbeam_channel::SelectedOperation<'_> = {
             let _oper = $sel.select();
 
             // Erase the lifetime so that `sel` can be dropped early even without NLL.
@@ -836,7 +836,7 @@ macro_rules! rr_channel_internal {
         $labels:tt
         $cases:tt
     ) => {{
-        let _oper: ::std::option::Option<$crate::crossbeam::SelectedOperation<'_>> = {
+        let _oper: ::std::option::Option<$crate::crossbeam_channel::SelectedOperation<'_>> = {
             let _oper = $sel.try_select();
 
             // Erase the lifetime so that `sel` can be dropped early even without NLL.
@@ -867,7 +867,7 @@ macro_rules! rr_channel_internal {
         $labels:tt
         $cases:tt
     ) => {{
-        let _oper: ::std::option::Option<$crate::crossbeam::SelectedOperation<'_>> = {
+        let _oper: ::std::option::Option<$crate::crossbeam_channel::SelectedOperation<'_>> = {
             let _oper = $sel.select_timeout($timeout);
 
             // Erase the lifetime so that `sel` can be dropped early even without NLL.
@@ -911,8 +911,8 @@ macro_rules! rr_channel_internal {
         match $r {
             ref _r => {
                 #[allow(unsafe_code)]
-                let $var: &$crate::crossbeam::Receiver<_> = unsafe {
-                    let _r: &$crate::crossbeam::Receiver<_> = _r;
+                let $var: &$crate::crossbeam_channel::Receiver<_> = unsafe {
+                    let _r: &$crate::crossbeam_channel::Receiver<_> = _r;
 
                     // Erase the lifetime so that `sel` can be dropped early even without NLL.
                     unsafe fn unbind<'a, T>(x: &T) -> &'a T {
@@ -944,8 +944,8 @@ macro_rules! rr_channel_internal {
         match $s {
             ref _s => {
                 #[allow(unsafe_code)]
-                let $var: &$crate::crossbeam::Sender<_> = unsafe {
-                    let _s: &$crate::crossbeam::Sender<_> = _s;
+                let $var: &$crate::crossbeam_channel::Sender<_> = unsafe {
+                    let _s: &$crate::crossbeam_channel::Sender<_> = _s;
 
                     // Erase the lifetime so that `sel` can be dropped early even without NLL.
                     unsafe fn unbind<'a, T>(x: & T) -> &'a T {
@@ -1016,7 +1016,7 @@ macro_rules! rr_channel_internal {
         ()
     ) => {{
         rr_channel_delegate!(unreachable(
-            "internal error in crossbeam-channel: invalid case"
+            "internal error in crossbeam_channel-channel: invalid case"
         ))
     }};
 
@@ -1024,7 +1024,7 @@ macro_rules! rr_channel_internal {
     (@$($tokens:tt)*) => {
         rr_channel_delegate!(compile_error(
             rr_channel_delegate!(concat(
-                "internal error in crossbeam-channel: ",
+                "internal error in crossbeam_channel-channel: ",
                 rr_channel_delegate!(stringify(@$($tokens)*)),
             ))
         ))
@@ -1050,8 +1050,8 @@ macro_rules! rr_channel_internal {
     };
 }
 
-/// Exact copy of `crossbeam_channel::select` macro, except all references for
-/// `crossbeam_channel` have been replaced by `rr_channel` so examples compile as is.
+/// Exact copy of `crossbeam_channel_channel::select` macro, except all references for
+/// `crossbeam_channel_channel` have been replaced by `rr_channel` so examples compile as is.
 /// Selects from a set of channel operations.
 ///
 /// This macro allows you to define a set of channel operations, wait until any one of them becomes
@@ -1078,7 +1078,7 @@ macro_rules! rr_channel_internal {
 /// # extern crate rr_channel;
 /// # fn main() {
 /// use std::thread;
-/// use rr_channel::crossbeam::unbounded;
+/// use rr_channel::crossbeam_channel::unbounded;
 ///
 /// let (s1, r1) = unbounded();
 /// let (s2, r2) = unbounded();
@@ -1103,7 +1103,7 @@ macro_rules! rr_channel_internal {
 /// # fn main() {
 /// use std::thread;
 /// use std::time::Duration;
-/// use rr_channel::crossbeam::unbounded;
+/// use rr_channel::crossbeam_channel::unbounded;
 ///
 /// let (s1, r1) = unbounded();
 /// let (s2, r2) = unbounded();
@@ -1134,7 +1134,7 @@ macro_rules! rr_channel_internal {
 /// # fn main() {
 /// use std::thread;
 /// use std::time::Duration;
-/// use rr_channel::crossbeam::unbounded;
+/// use rr_channel::crossbeam_channel::unbounded;
 ///
 /// let (s1, r1) = unbounded();
 /// let (s2, r2) = unbounded();
@@ -1165,7 +1165,7 @@ macro_rules! rr_channel_internal {
 /// # fn main() {
 /// use std::thread;
 /// use std::time::Duration;
-/// use rr_channel::{never, unbounded};
+/// use rr_channel::crossbeam_channel::{never, unbounded};
 ///
 /// let (s1, r1) = unbounded();
 /// let (s2, r2) = unbounded();

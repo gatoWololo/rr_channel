@@ -2,9 +2,9 @@ use log::Level::*;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use crate::crossbeam::{Receiver, Sender};
+use crate::crossbeam_channel::{Receiver, Sender};
 use crate::detthread;
-use crate::ipc::{
+use crate::ipc_channel::{
     self, IpcReceiver, IpcReceiverSet, IpcSelectionResult, IpcSender, OpaqueIpcMessage,
     OpaqueIpcReceiver,
 };
@@ -23,14 +23,14 @@ pub struct RouterProxy {
 
 impl RouterProxy {
     pub fn new() -> RouterProxy {
-        let (msg_sender, msg_receiver) = crate::crossbeam::unbounded();
-        let (wakeup_sender, wakeup_receiver) = ipc::channel().unwrap();
+        let (msg_sender, msg_receiver) = crate::crossbeam_channel::unbounded();
+        let (wakeup_sender, wakeup_receiver) = ipc_channel::channel().unwrap();
 
         crate::detthread::spawn(move || Router::new(msg_receiver, wakeup_receiver).run());
         RouterProxy {
             comm: Mutex::new(RouterProxyComm {
-                msg_sender: msg_sender,
-                wakeup_sender: wakeup_sender,
+                msg_sender,
+                wakeup_sender
             }),
         }
     }
@@ -100,7 +100,7 @@ impl RouterProxy {
     {
         crate::log_rr!(Info, "Routing IpcReceiver<{:?}>", ipc_receiver.metadata.id);
 
-        let (crossbeam_sender, crossbeam_receiver) = crate::crossbeam::unbounded();
+        let (crossbeam_sender, crossbeam_receiver) = crate::crossbeam_channel::unbounded();
         crate::log_rr!(
             Info,
             "Created Channels<{:?} for routing.",

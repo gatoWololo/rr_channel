@@ -11,7 +11,7 @@ fn main() {
     let mut senders = Vec::new();
 
     for _ in 0..10 {
-        let (s, r) = rr_channel::crossbeam::unbounded();
+        let (s, r) = rr_channel::crossbeam_channel::unbounded();
         receivers.push(r);
         senders.push(s);
     }

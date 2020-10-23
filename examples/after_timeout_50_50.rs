@@ -3,7 +3,7 @@
 
 use rand::thread_rng;
 use rand::Rng;
-use rr_channel::crossbeam::{after, unbounded};
+use rr_channel::crossbeam_channel::{after, unbounded};
 use rr_channel::detthread;
 use std::thread::sleep;
 /// Times out roughly 50/50%
