@@ -4,6 +4,7 @@ use rr_channel::{detthread, mpsc};
 // by the time the main thread starts doing .recv() the messages will always
 // arrive in order.
 fn main() {
+    rr_channel::init_tivo_thread_root();
     let (s1, r1) = mpsc::sync_channel(35);
     let (s2, r2) = mpsc::sync_channel(35);
 

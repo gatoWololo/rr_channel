@@ -2,6 +2,7 @@ use rr_channel::detthread;
 use rr_channel::mpsc;
 
 fn main() {
+    rr_channel::init_tivo_thread_root();
     let mut handles = Vec::new();
 
     // Create a shared channel that can be sent along from many threads.

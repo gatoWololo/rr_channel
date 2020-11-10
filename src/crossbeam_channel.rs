@@ -9,12 +9,12 @@ use crate::desync::{self, DesyncMode};
 use crate::detthread::{self, DetThreadId};
 use crate::error::DesyncError;
 use crate::recordlog::{self, ChannelLabel, RecordedEvent};
-use crate::rr::{self, DetChannelId, SendRR};
+use crate::rr::{self, DetChannelId, SendRecordReplay};
 use crate::{get_generic_name, ENV_LOGGER, RECORD_MODE};
 use crate::{DESYNC_MODE, BufferedValues};
 
 pub use crate::crossbeam_select::{Select, SelectedOperation};
-use crate::rr::RecvRR;
+use crate::rr::RecvRecordReplay;
 pub use crate::{select, DetMessage};
 
 pub use rc::RecvTimeoutError;
@@ -36,7 +36,7 @@ impl<T> Clone for Sender<T> {
             crate::log_rr!(
                 Warn,
                 "MPSC for bounded channels not supported. Blocking semantics \
-                     of bounded channels will not be preseved!"
+                     of bounded channels will not be preserved!"
             );
         }
         Sender {
@@ -46,7 +46,9 @@ impl<T> Clone for Sender<T> {
     }
 }
 
-impl<T> SendRR<T, rc::SendError<T>> for Sender<T> {
+impl<T> SendRecordReplay<T, rc::SendError<T>> for Sender<T> {
+    const EVENT_VARIANT: RecordedEvent = RecordedEvent::Sender;
+
     fn check_log_entry(&self, entry: RecordedEvent) -> desync::Result<()> {
         match entry {
             RecordedEvent::Sender => Ok(()),
@@ -54,20 +56,18 @@ impl<T> SendRR<T, rc::SendError<T>> for Sender<T> {
         }
     }
 
-    fn send(&self, thread_id: Option<DetThreadId>, msg: T) -> Result<(), rc::SendError<T>> {
+    fn underlying_send(&self, thread_id: DetThreadId, msg: T) -> Result<(), rc::SendError<T>> {
         self.sender
             .send((thread_id, msg))
             .map_err(|e| rc::SendError(e.into_inner().1))
     }
-
-    const EVENT_VARIANT: RecordedEvent = RecordedEvent::Sender;
 }
 
 /// Implement crossbeam channel API.
 impl<T> Sender<T> {
     /// crossbeam_channel::send implementation.
     pub fn send(&self, msg: T) -> Result<(), rc::SendError<T>> {
-        match self.rr_send(
+        match self.record_replay_send(
             msg,
             &self.metadata,
             "CrossbeamSender",
@@ -84,7 +84,7 @@ impl<T> Sender<T> {
                     DesyncMode::KeepGoing => {
                         desync::mark_program_as_desynced();
 
-                        let res = rr::SendRR::send(self, detthread::get_forwarding_id(), msg);
+                        let res = rr::SendRecordReplay::underlying_send(self, detthread::get_forwarding_id(), msg);
                         // TODO Ugh, right now we have to carefully increase the event_id
                         // in the "right places" or nothing will work correctly.
                         // How can we make this a lot less error prone?
@@ -167,9 +167,9 @@ pub struct Receiver<T> {
 macro_rules! impl_recvrr {
     ($err_type:ty, $succ: ident, $err:ident) => {
 
-        impl<T> rr::RecvRR<T, $err_type> for Receiver<T> {
+        impl<T> rr::RecvRecordReplay<T, $err_type> for Receiver<T> {
 
-            fn recorded_event_succ(dtid: Option<DetThreadId>) -> recordlog::RecordedEvent {
+            fn recorded_event_succ(dtid: DetThreadId) -> recordlog::RecordedEvent {
                 RecordedEvent::$succ { sender_thread: dtid }
             }
 
@@ -199,7 +199,9 @@ macro_rules! impl_recvrr {
                     }
                     e => {
                         let mock_event = RecordedEvent::$succ {
-                            sender_thread: None,
+                            // TODO: Is there a better value that makes it obvious this is just
+                            // a placeholder?
+                            sender_thread: DetThreadId::new(),
                         };
                         Err(DesyncError::EventMismatch(e, mock_event))
                     }
@@ -218,19 +220,19 @@ impl<T> Receiver<T> {
 
     pub fn recv(&self) -> Result<T, rc::RecvError> {
         let receiver = || self.receiver.recv();
-        RecvRR::rr_recv(self, self.metadata(), receiver, "channel::recv()")
+        RecvRecordReplay::record_replay_with(self, self.metadata(), receiver, "channel::recv()")
             .unwrap_or_else(|e| desync::handle_desync(e, receiver, self.get_buffer()))
     }
 
     pub fn try_recv(&self) -> Result<T, rc::TryRecvError> {
         let f = || self.receiver.try_recv();
-        self.rr_recv(self.metadata(), f, "channel::try_recv()")
+        self.record_replay_with(self.metadata(), f, "channel::try_recv()")
             .unwrap_or_else(|e| desync::handle_desync(e, f, self.get_buffer()))
     }
 
     pub fn recv_timeout(&self, timeout: Duration) -> Result<T, rc::RecvTimeoutError> {
         let f = || self.receiver.recv_timeout(timeout);
-        self.rr_recv(self.metadata(), f, "channel::rect_timeout()")
+        self.record_replay_with(self.metadata(), f, "channel::rect_timeout()")
             .unwrap_or_else(|e| desync::handle_desync(e, f, self.get_buffer()))
     }
 
@@ -239,8 +241,8 @@ impl<T> Receiver<T> {
     /// Receives messages from `sender` buffering all other messages which it gets.
     /// Times out after 1 second (this value can easily be changed).
     /// Used by crossbeam select function, and implementing ReceiverRR for this type.
-    pub(crate) fn replay_recv(&self, sender: &Option<DetThreadId>) -> desync::Result<T> {
-        rr::recv_from_sender(
+    pub(crate) fn replay_recv(&self, sender: &DetThreadId) -> desync::Result<T> {
+        rr::recv_expected_message(
             &sender,
             || self.receiver.recv_timeout(Duration::from_secs(1)).map_err(|e| e.into()),
             self.get_buffer(),
@@ -298,7 +300,7 @@ impl<T> Receiver<T> {
     ///
     /// Notice even on `false`, an arbitrary number of messages from _other_ senders may
     /// be buffered.
-    pub(crate) fn poll_entry(&self, sender: &Option<DetThreadId>) -> bool {
+    pub(crate) fn poll_entry(&self, sender: &DetThreadId) -> bool {
         crate::log_rr!(Debug, "poll_entry()");
         // There is already an entry in the buffer.
         if let Some(queue) = self.buffer.borrow_mut().get(sender) {

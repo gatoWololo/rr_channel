@@ -6,21 +6,22 @@ use std::thread;
 use std::time::Duration;
 
 fn main() {
+    rr_channel::init_tivo_thread_root();
     let (s, r) = rr_channel::crossbeam_channel::unbounded::<i32>();
     let (s2, r2) = rr_channel::crossbeam_channel::unbounded::<i32>();
 
-    detthread::spawn(move || {
-        rr_channel::select! {
-            recv(r) -> x => println!("Got value: {:?}", x),
-            recv(r2) -> x => println!("Got value: {:?}", x),
-        }
-
-        rr_channel::select! {
-            recv(r) -> x => println!("Got value: {:?}", x),
-            recv(r2) -> x => println!("Got value: {:?}", x),
-        }
-    });
-
-    s.send(3);
-    thread::sleep(Duration::from_millis(30));
+    // detthread::spawn(move || {
+    //     rr_channel::select! {
+    //         recv(r) -> x => println!("channel r got value: {:?}", x),
+    //         recv(r2) -> x => println!("channel r2 got value: {:?}", x),
+    //     }
+    //
+    //     rr_channel::select! {
+    //         recv(r) -> x => println!("channel r got value: {:?}", x),
+    //         recv(r2) -> x => println!("channel r2 got value: {:?}", x),
+    //     }
+    // });
+    //
+    // s.send(3);
+    // thread::sleep(Duration::from_millis(100));
 }

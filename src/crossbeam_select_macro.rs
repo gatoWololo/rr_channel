@@ -1073,89 +1073,12 @@ macro_rules! rr_channel_internal {
 ///
 /// Block until a send or a receive operation is selected:
 ///
-/// ```
-/// # #[macro_use]
-/// # extern crate rr_channel;
-/// # fn main() {
-/// use std::thread;
-/// use rr_channel::crossbeam_channel::unbounded;
-///
-/// let (s1, r1) = unbounded();
-/// let (s2, r2) = unbounded();
-/// s1.send(10).unwrap();
-///
-/// // Since both operations are initially ready, a random one will be executed.
-/// select! {
-///     recv(r1) -> msg => assert_eq!(msg, Ok(10)),
-///     send(s2, 20) -> res => {
-///         assert_eq!(res, Ok(()));
-///         assert_eq!(r2.recv(), Ok(20));
-///     }
-/// }
-/// # }
-/// ```
 ///
 /// Select from a set of operations without blocking:
 ///
-/// ```
-/// # #[macro_use]
-/// # extern crate rr_channel;
-/// # fn main() {
-/// use std::thread;
-/// use std::time::Duration;
-/// use rr_channel::crossbeam_channel::unbounded;
-///
-/// let (s1, r1) = unbounded();
-/// let (s2, r2) = unbounded();
-///
-/// thread::spawn(move || {
-///     thread::sleep(Duration::from_secs(1));
-///     s1.send(10).unwrap();
-/// });
-/// thread::spawn(move || {
-///     thread::sleep(Duration::from_millis(500));
-///     s2.send(20).unwrap();
-/// });
-///
-/// // None of the operations are initially ready.
-/// select! {
-///     recv(r1) -> msg => panic!(),
-///     recv(r2) -> msg => panic!(),
-///     default => println!("not ready"),
-/// }
-/// # }
-/// ```
 ///
 /// Select over a set of operations with a timeout:
 ///
-/// ```
-/// # #[macro_use]
-/// # extern crate rr_channel;
-/// # fn main() {
-/// use std::thread;
-/// use std::time::Duration;
-/// use rr_channel::crossbeam_channel::unbounded;
-///
-/// let (s1, r1) = unbounded();
-/// let (s2, r2) = unbounded();
-///
-/// thread::spawn(move || {
-///     thread::sleep(Duration::from_secs(1));
-///     s1.send(10).unwrap();
-/// });
-/// thread::spawn(move || {
-///     thread::sleep(Duration::from_millis(500));
-///     s2.send(20).unwrap();
-/// });
-///
-/// // None of the two operations will become ready within 100 milliseconds.
-/// select! {
-///     recv(r1) -> msg => panic!(),
-///     recv(r2) -> msg => panic!(),
-///     default(Duration::from_millis(100)) => println!("timed out"),
-/// }
-/// # }
-/// ```
 ///
 /// Optionally add a receive operation to `select!` using [`never`]:
 ///

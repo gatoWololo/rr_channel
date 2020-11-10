@@ -20,6 +20,8 @@ use log::Level::*;
 use std::env::var;
 use std::env::VarError;
 
+pub use crate::detthread::init_tivo_thread_root;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum RRMode {
     Record,
@@ -29,10 +31,10 @@ pub enum RRMode {
 
 /// To deterministically replay messages we pass our determininistic thread ID + the
 /// original message.
-pub type DetMessage<T> = (Option<DetThreadId>, T);
+pub type DetMessage<T> = (DetThreadId, T);
 
 /// Every channel carries a buffer where message that shouldn't have arrived are stored.
-pub type BufferedValues<T> = HashMap<Option<DetThreadId>, VecDeque<T>>;
+pub type BufferedValues<T> = HashMap<DetThreadId, VecDeque<T>>;
 
 const RECORD_MODE_VAR: &str = "RR_CHANNEL";
 const DESYNC_MODE_VAR: &str = "RR_DESYNC_MODE";

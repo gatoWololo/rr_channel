@@ -3,6 +3,7 @@
 use rr_channel::detthread;
 
 fn main() {
+    rr_channel::init_tivo_thread_root();
     let (s1, r1) = rr_channel::crossbeam_channel::unbounded();
     let (s2, r2) = rr_channel::crossbeam_channel::unbounded();
 

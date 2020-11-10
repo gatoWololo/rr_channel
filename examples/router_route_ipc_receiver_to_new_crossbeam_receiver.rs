@@ -6,6 +6,8 @@ use rr_channel::ipc_channel::{router, ipc};
 use rr_channel::ipc_channel::router::ROUTER;
 
 fn main() -> Result<(), std::io::Error> {
+    rr_channel::init_tivo_thread_root();
+
     for i in 0..20 {
         let (sender, receiver) = ipc::channel()?;
 

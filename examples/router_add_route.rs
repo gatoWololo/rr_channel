@@ -6,6 +6,7 @@ use rr_channel::ipc_channel::router::ROUTER;
 use std::time::Duration;
 
 fn main() -> Result<(), std::io::Error> {
+    rr_channel::init_tivo_thread_root();
     let (sender, receiver) = ipc_channel::ipc::channel::<i32>()?;
 
     let f = Box::new(|result| println!("Result: {:?}", result));

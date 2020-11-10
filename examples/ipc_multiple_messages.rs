@@ -2,6 +2,7 @@ use rr_channel::ipc_channel;
 use rr_channel::ipc_channel::ipc;
 
 fn main() {
+    rr_channel::init_tivo_thread_root();
     let (tx, rx) = ipc::channel().unwrap();
 
     rr_channel::detthread::spawn(move || {

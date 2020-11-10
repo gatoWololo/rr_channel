@@ -5,6 +5,8 @@ use std::time;
 use rr_channel::ipc_channel::ipc;
 
 fn main() {
+    rr_channel::init_tivo_thread_root();
+
     let (s, r) = ipc::channel::<u32>().unwrap();
     let (s2, r2) = ipc::channel::<u32>().unwrap();
     let mut set = ipc::IpcReceiverSet::new().unwrap();

@@ -10,6 +10,8 @@ use rr_channel::ipc_channel::router::ROUTER;
 use std::time;
 use std::time::Duration;
 fn main() -> Result<(), std::io::Error> {
+    rr_channel::init_tivo_thread_root();
+
     let (sender, receiver) = ipc::channel::<i32>()?;
     let (sender2, receiver2) = ipc::channel::<i32>()?;
     let thread_sender1 = sender.clone();

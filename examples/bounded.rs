@@ -1,9 +1,10 @@
-//The test creates two channels. The first channel is bounded with size 1. Channel 1 will
-// continously return. Thread 1 because its capacity is full. Channel 2 will not return anything
-// because it has unbounded capacity.
 use rr_channel::detthread;
+use env_logger;
+use rr_channel::detthread::init_tivo_thread_root;
 
 fn main() {
+    init_tivo_thread_root();
+    env_logger::init();
     let (s, r) = rr_channel::crossbeam_channel::bounded(1);
     let (s2, r2) = rr_channel::crossbeam_channel::unbounded();
 

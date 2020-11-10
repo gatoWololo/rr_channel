@@ -11,6 +11,7 @@ use std::time;
 use std::time::Duration;
 
 fn main() {
+    rr_channel::init_tivo_thread_root();
     let (s, r) = unbounded::<i32>();
     // Avoid having channel disconnect.
     let _s = s.clone();
@@ -18,7 +19,7 @@ fn main() {
     detthread::spawn(move || {
         // 50/50 chance of sleeping.
         if thread_rng().gen_bool(0.50) {
-            sleep(time::Duration::from_millis(150));
+            sleep(time::Duration::from_millis(10));
         }
         s.send(1);
     });

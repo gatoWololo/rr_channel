@@ -7,6 +7,8 @@ use rr_channel::detthread;
 use rr_channel;
 
 fn main() {
+    rr_channel::init_tivo_thread_root();
+
     let mut receivers = Vec::new();
     let mut senders = Vec::new();
 

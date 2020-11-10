@@ -18,7 +18,7 @@ trait BufferedReceiver {
     fn buffered_value(&self) -> bool;
     /// Returns true if there is an entry in this receiver waiting to be read.
     /// Returns false if no entry arrives by `timeout`.
-    fn poll(&self, sender: &Option<DetThreadId>) -> bool;
+    fn poll(&self, sender: &DetThreadId) -> bool;
 }
 
 impl<T> BufferedReceiver for crossbeam_channel::Receiver<T> {
@@ -32,7 +32,7 @@ impl<T> BufferedReceiver for crossbeam_channel::Receiver<T> {
         return false;
     }
 
-    fn poll(&self, sender: &Option<DetThreadId>) -> bool {
+    fn poll(&self, sender: &DetThreadId) -> bool {
         self.poll_entry(sender)
     }
 }
@@ -149,8 +149,7 @@ impl<'a> Select<'a> {
                 Ok(select_index)
             }
             RRMode::Replay => {
-                let det_id = detthread::get_det_id_desync()?;
-                let event = recordlog::get_log_entry(det_id, detthread::get_event_id())?;
+                let event = recordlog::get_log_entry(detthread::get_det_id(), detthread::get_event_id())?;
                 detthread::inc_event_id();
 
                 match event {
@@ -177,11 +176,9 @@ impl<'a> Select<'a> {
                 Ok(SelectedOperation::Record(self.selector.select()))
             }
             RRMode::Replay => {
-                let det_id = detthread::get_det_id_desync()?;
-
                 // Query our log to see what index was selected!() during the replay phase.
                 // ChannelVariant type not check on Select::select() but on Select::recv()
-                let entry = recordlog::get_log_entry_ret(det_id, detthread::get_event_id());
+                let entry = recordlog::get_log_entry_ret(detthread::get_det_id(), detthread::get_event_id());
 
                 // Here we put this thread to sleep if the entry is missing.
                 // On record, the thread never returned from blocking...
@@ -229,7 +226,8 @@ impl<'a> Select<'a> {
                     }
                     e => {
                         let dummy = SelectEvent::Success {
-                            sender_thread: None,
+                            // TODO: Is there a better value to show this is a mock DTI?
+                            sender_thread: DetThreadId::new(),
                             selected_index: (0 - 1) as usize,
                         };
                         Err(DesyncError::EventMismatch(

@@ -7,6 +7,8 @@ use rr_channel::detthread;
 use rr_channel::ipc_channel::ipc;
 
 fn main() {
+    rr_channel::init_tivo_thread_root();
+
     let (s, r) = ipc::channel::<u32>().unwrap();
     let (s2, r2) = ipc::channel::<u32>().unwrap();
     let (s3, r3) = ipc::channel::<u32>().unwrap();

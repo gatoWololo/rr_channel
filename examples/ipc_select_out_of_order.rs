@@ -10,6 +10,8 @@ use std::sync::{Arc, Mutex};
 use std::time;
 
 fn main() {
+    rr_channel::init_tivo_thread_root();
+
     let set = Arc::new(Mutex::new(IpcReceiverSet::new().expect("IpcReceiverSet")));
     let set2 = set.clone();
     let set3 = set.clone();

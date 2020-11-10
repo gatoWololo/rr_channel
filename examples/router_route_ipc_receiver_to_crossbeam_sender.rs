@@ -3,6 +3,8 @@ use rr_channel::ipc_channel::router::ROUTER;
 use rr_channel::ipc_channel::ipc;
 
 fn main() -> Result<(), std::io::Error> {
+    rr_channel::init_tivo_thread_root();
+
     // Send messages to ourself via the router.
     let (ipc_sender, ipc_receiver) = ipc::channel()?;
     let (sender, receiver) = rr_channel::crossbeam_channel::unbounded();

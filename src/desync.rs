@@ -110,23 +110,32 @@ pub(crate) fn handle_desync<T, E>(
     }
 }
 
-#[test]
-fn condvar_test() {
-    let mut handles = vec![];
-    for i in 1..10 {
-        let h = thread::spawn(move || {
-            println!("Putting thread {} to sleep.", i);
-            sleep_until_desync();
-            println!("Thread {} woke up!", i);
-        });
-        handles.push(h);
-    }
+#[cfg(test)]
+mod test {
+    use crate::desync::{sleep_until_desync, wake_up_threads};
+    use std::time::Duration;
+    use crate::detthread::init_tivo_thread_root;
 
-    thread::sleep_ms(1000);
-    println!("Main thread waking everyone up...");
-    wake_up_threads();
-    for h in handles {
-        h.join().unwrap();
+    #[test]
+    fn condvar_test() {
+        init_tivo_thread_root();
+        let mut handles = vec![];
+        for i in 1..10 {
+            let h = crate::detthread::spawn(move || {
+                println!("Putting thread {} to sleep.", i);
+                sleep_until_desync();
+                println!("Thread {} woke up!", i);
+            });
+            handles.push(h);
+        }
+
+        //TODO Is this enough time?
+        std::thread::sleep(Duration::from_millis(1));
+        println!("Main thread waking everyone up...");
+        wake_up_threads();
+        for h in handles {
+            h.join().unwrap();
+        }
+        assert!(true);
     }
-    assert!(true);
 }

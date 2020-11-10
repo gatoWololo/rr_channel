@@ -13,13 +13,13 @@ use crate::error;
 use crate::rr::DetChannelId;
 use crate::{RRMode, LOG_FILE_NAME, RECORD_MODE};
 
-/// Record representing a sucessful select from a channel. Used in replay mode.
+/// Record representing a successful select from a channel. Used in replay mode.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum SelectEvent {
     Success {
         /// For multiple producer channels we need to diffentiate who the sender was.
         /// As the index only tells us the correct receiver end, but not who the sender was.
-        sender_thread: Option<DetThreadId>,
+        sender_thread: DetThreadId,
         /// Index of selected channel for select!()
         selected_index: usize,
     },
@@ -33,7 +33,7 @@ pub enum SelectEvent {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum IpcSelectEvent {
-    MessageReceived(/*index:*/ u64, Option<DetThreadId>),
+    MessageReceived(/*index:*/ u64, DetThreadId),
     ChannelClosed(/*index:*/ u64),
 }
 
@@ -61,7 +61,7 @@ pub enum ChannelLabel {
 pub struct LogEntry {
     /// Thread performing the operation's unique ID.
     /// (current_thread, event_id) form a unique key per entry in our map and log.
-    pub current_thread: Option<DetThreadId>,
+    pub current_thread: DetThreadId,
     /// Unique per-thread identifier given to every select dynamic instance.
     /// (current_thread, event_id) form a unique key per entry in our map and log.
     pub event_id: u32,
@@ -83,68 +83,67 @@ pub enum RecordedEvent {
         select_index: usize,
     },
     Select(SelectEvent),
-
     // Crossbeam recv.
     RecvSucc {
-        sender_thread: Option<DetThreadId>,
+        sender_thread: DetThreadId,
     },
-
     #[serde(with = "error::RecvErrorDef")]
     RecvErr(crossbeam_channel::RecvError),
-
     // MPSC recv.
     MpscRecvSucc {
-        sender_thread: Option<DetThreadId>,
+        sender_thread: DetThreadId,
     },
     #[serde(with = "error::MpscRecvErrorDef")]
     MpscRecvErr(mpsc::RecvError),
-
     // Crossbeam try_recv
     TryRecvSucc {
-        sender_thread: Option<DetThreadId>,
+        sender_thread: DetThreadId,
     },
     #[serde(with = "error::TryRecvErrorDef")]
     TryRecvErr(crossbeam_channel::TryRecvError),
-
     // MPSC try_recv
     MpscTryRecvSucc {
-        sender_thread: Option<DetThreadId>,
+        sender_thread: DetThreadId,
     },
     #[serde(with = "error::MpscTryRecvErrorDef")]
     MpscTryRecvErr(mpsc::TryRecvError),
-
     // Crossbeam recv_timeout
     RecvTimeoutSucc {
-        sender_thread: Option<DetThreadId>,
+        sender_thread: DetThreadId,
     },
     #[serde(with = "error::RecvTimeoutErrorDef")]
     RecvTimeoutErr(crossbeam_channel::RecvTimeoutError),
-
     // MPSC recv_timeout
     MpscRecvTimeoutSucc {
-        sender_thread: Option<DetThreadId>,
+        sender_thread: DetThreadId,
     },
     #[serde(with = "error::MpscRecvTimeoutErrorDef")]
     MpscRecvTimeoutErr(mpsc::RecvTimeoutError),
-
     // IPC recv
     IpcRecvSucc {
-        sender_thread: Option<DetThreadId>,
+        sender_thread: DetThreadId,
     },
-    IpcRecvErr,
-
+    IpcError(IpcErrorVariants),
+    IpcTryRecvErrorEmpty,
+    IpcTryRecvIpcError(IpcErrorVariants),
     // Crossbeam send.
     Sender,
     // MPSC (standard library) send
     MpscSender,
     // Ipc send.
     IpcSender,
-
     // IpcReceiverSet
     IpcSelectAdd(/*index:*/ u64),
     IpcSelect {
         select_events: Vec<IpcSelectEvent>,
     },
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum IpcErrorVariants {
+    Bincode,
+    Io,
+    Disconnected
 }
 
 
@@ -180,11 +179,7 @@ lazy_static::lazy_static! {
             let line = line.expect("Unable to read recorded log file");
             let entry: LogEntry = serde_json::from_str(&line).expect("Malformed log entry.");
 
-            if entry.current_thread.is_none() {
-                crate::log_rr!(Trace, "Skipping None entry in log for entry: {:?}", entry);
-                continue;
-            }
-            let curr_thread = entry.current_thread.clone().unwrap();
+                let curr_thread = entry.current_thread.clone();
             let key = (curr_thread, entry.event_id);
             let value = (entry.event.clone(), entry.channel_flavor, entry.chan_id.clone());
 

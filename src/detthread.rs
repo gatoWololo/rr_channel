@@ -4,35 +4,37 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread;
 use std::thread::JoinHandle;
 pub use std::thread::{current, panicking, park, park_timeout, sleep, yield_now};
+use std::fmt::Debug;
+use serde::{Deserialize, Serialize};
 
 use crate::{error, recordlog, desync};
 
-pub fn get_det_id() -> Option<DetThreadId> {
+pub fn get_det_id() -> DetThreadId {
     DET_ID.with(|di| di.borrow().clone())
 }
 
-/// Like `get_det_id` but treats missing DetThreadId as a
-/// desynchonization error.
-pub fn get_det_id_desync() -> desync::Result<DetThreadId> {
-    match get_det_id() {
-        Some(v) => Ok(v),
-        None => Err(error::DesyncError::UnitializedDetThreadId),
-    }
-}
+/// Like `get_det_id` but treats missing DetThreadId as a desynchonization error.
+/// NO LONGER NEEDED.
+// pub fn get_det_id_desync() -> DetThreadId {
+//     match get_det_id() {
+//         Some(v) => Ok(v),
+//         None => Err(error::DesyncError::UnitializedDetThreadId),
+//     }
+// }
 
-pub fn set_det_id(new_id: Option<DetThreadId>) {
+pub fn set_det_id(new_id: DetThreadId) {
     DET_ID.with(|id| {
         *id.borrow_mut() = new_id;
     });
 }
 
-pub fn get_temp_det_id() -> Option<DetThreadId> {
-    TEMP_DET_ID.with(|di| di.borrow().clone())
+pub fn get_temp_det_id() -> DetThreadId {
+    TEMP_DET_ID.with(|di| di.borrow().clone().expect("No ID set!"))
 }
 
-pub fn set_temp_det_id(new_id: Option<DetThreadId>) {
+pub fn set_temp_det_id(new_id: DetThreadId) {
     TEMP_DET_ID.with(|id| {
-        *id.borrow_mut() = new_id;
+        *id.borrow_mut() = Some(new_id);
     });
 }
 
@@ -57,18 +59,24 @@ thread_local! {
     /// helpful for debugging and sanity.
     static EVENT_ID: RefCell<u32> = RefCell::new(0);
     static DET_ID_SPAWNER: RefCell<DetIdSpawner> = RefCell::new(DetIdSpawner::starting());
-    /// Unique threadID assigned at thread spawn to to each thread.
-    pub static DET_ID: RefCell<Option<DetThreadId>> = RefCell::new(DetThreadId::new());
+    /// Unique threadID assigned at thread spawn to each thread.
+    pub static DET_ID: RefCell<DetThreadId> = RefCell::new(DetThreadId::new());
+    /// Tells us whether this thread has been initialized yet. Init happens either through use of
+    /// our det thread spawning wrappers or through explicit call to `init_tivo_thread_root`. This
+    /// allows us to tell if a thread was spawned outside of our API. When this is false, the first
+    /// call to DET_ID will error. This works because DET_ID is initialized lazily.
+    static THREAD_INITIALIZED: RefCell<bool> = RefCell::new(false);
+
     static CHANNEL_ID: AtomicU32 = AtomicU32::new(0);
     /// Hack to know when we're in the router. Forwading the DetThreadId to to the callback
     /// by temporarily setting DET_ID to a different value.
     static FORWADING_ID: RefCell<bool> = RefCell::new(false);
-    /// DetId set when forwading id. Should only be accessed if in_forwading() returns
-    /// true. Which is set by start_forwading_id() and ends by stop_forwading_id()
-    pub static TEMP_DET_ID: RefCell<Option<DetThreadId>> = RefCell::new(DetThreadId::new());
+    /// DetId set when forwarding id. Should only be accessed if in_forwading() returns
+    /// true. Which is set by start_forwarding_id() and ends by stop_forwading_id().
+    pub static TEMP_DET_ID: RefCell<Option<DetThreadId>> = RefCell::new(None);
 }
 
-pub fn start_forwading_id(forwarding_id: Option<DetThreadId>) {
+pub fn start_forwading_id(forwarding_id: DetThreadId) {
     FORWADING_ID.with(|fi| {
         *fi.borrow_mut() = true;
     });
@@ -79,45 +87,45 @@ pub fn in_forwarding() -> bool {
     FORWADING_ID.with(|fi| *fi.borrow())
 }
 
-pub fn stop_forwarding_id(original_id: Option<DetThreadId>) {
+pub fn stop_forwarding_id(original_id: DetThreadId) {
     FORWADING_ID.with(|fi| {
         *fi.borrow_mut() = false;
     });
     set_temp_det_id(original_id);
 }
 
-/// Wrapper around thread::spawn. We will need this later to assign a
-/// deterministic thread id, and allow each thread to have access to its ID and
-/// a local dynamic select counter through TLS.
+/// Wrapper around thread::spawn. We will need this later to assign a deterministic thread id, and
+/// allow each thread to have access to its ID and a local dynamic select counter through TLS.
 pub fn spawn<F, T>(f: F) -> JoinHandle<T>
-where
-    F: FnOnce() -> T,
-    F: Send + 'static,
-    T: Send + 'static,
+    where
+        F: FnOnce() -> T,
+        F: Send + 'static,
+        T: Send + 'static,
 {
     let new_id = DET_ID_SPAWNER.with(|spawner| spawner.borrow_mut().new_child_det_id());
-    let new_spawner = DetIdSpawner::from(new_id.clone());
     crate::log_rr!(
         Info,
-        "thread::spawn() Assigned determinsitic id {:?} for new thread.",
+        "std::thread::spawn Assigned determinsitic id {:?} for new thread.",
         new_id
     );
 
     thread::spawn(|| {
-        // Initialize TLS for this thread.
-        DET_ID.with(|id| {
-            *id.borrow_mut() = Some(new_id);
-        });
-        DET_ID_SPAWNER.with(|spawner| {
-            *spawner.borrow_mut() = new_spawner;
+        THREAD_INITIALIZED.with(|ti| {
+            ti.replace(true);
         });
 
-        // EVENT_ID is fine starting at 0.
+        // Initialize TLS for this thread.
+        DET_ID.with(|id| {
+            *id.borrow_mut() = new_id;
+        });
+        DET_ID_SPAWNER.with(|spawner| {
+            // Initalizes DET_ID_SPAWNER based on the value just set for DET_ID.
+        });
+
+        // EVENT_ID will be initalized to zero on first usage.
         f()
     })
 }
-
-use serde::{Deserialize, Serialize};
 
 pub struct DetIdSpawner {
     pub child_index: u32,
@@ -128,10 +136,12 @@ impl DetIdSpawner {
     pub fn starting() -> DetIdSpawner {
         DetIdSpawner {
             child_index: 0,
-            thread_id: DetThreadId {
-                thread_id: [0; DetThreadId::MAX_SIZE as usize],
-                size: 0
-            },
+            thread_id: DET_ID.with(|id| {
+                // This happens when the current thread was initialized without using our
+                // deterministic thread spawning API.
+                let e = "This thread did not have its DetThreadId initalized";
+                id.borrow().clone()
+            }),
         }
     }
 
@@ -143,16 +153,12 @@ impl DetIdSpawner {
     }
 }
 
-impl From<DetThreadId> for DetIdSpawner {
-    fn from(thread_id: DetThreadId) -> DetIdSpawner {
-        DetIdSpawner {
-            child_index: 0,
-            thread_id,
-        }
-    }
-}
-
-
+/// Every thread is assigned a deterministic thread id (DTI) if the thread is spawned via our API.
+/// This value should be deterministic even across executions of the program. Assuming the same
+/// number of threads are spawned every execution. We don't really check this assumption, but notice
+/// that if this ever doesn't hold true the program will quickly diverge during replay. Thus it
+/// is sorta self checking? Then again it would be nice to test for this and fail quickly with a
+/// good error. TODO we probably want to check channel creation (maybe even destruction) events.
 #[derive(Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
 pub struct DetThreadId {
     thread_id: [u32; DetThreadId::MAX_SIZE],
@@ -161,29 +167,17 @@ pub struct DetThreadId {
 
 impl DetThreadId {
     const MAX_SIZE: usize = 10;
-}
 
-use std::fmt::Debug;
-impl Debug for DetThreadId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
-        write!(
-            f, "ThreadId{:?}", &self.thread_id
-        )
-    }
-}
-
-impl DetThreadId {
-    /// The main thread get initialized here. Every other thread should be assigned a
-    /// DetThreadId through the thread/Builder spawn wrappers. This allows to to tell if a
-    /// thread was spawned through other means (not our API wrapper).
-    pub fn new() -> Option<DetThreadId> {
-        if Some("main") == thread::current().name() {
-            Some(DetThreadId {
-                thread_id: [0; DetThreadId::MAX_SIZE],
-                size: 0
-            })
-        } else {
-            None
+    /// TODO DOCUMENT. Also should this be pub? That looks wrong...
+    pub fn new() -> DetThreadId {
+        THREAD_INITIALIZED.with(|ti| {
+            if !*ti.borrow() {
+                panic!("thread not initialized");
+            }
+        });
+        DetThreadId {
+            thread_id: [0; DetThreadId::MAX_SIZE],
+            size: 0,
         }
     }
 
@@ -196,32 +190,21 @@ impl DetThreadId {
             panic!("Cannot extend path. Thread tree too deep.");
         }
     }
-}
 
-impl From<&[u32]> for DetThreadId {
-    fn from(thread_id: &[u32]) -> DetThreadId {
-        let mut dti = DetThreadId {
-            thread_id: [0; DetThreadId::MAX_SIZE],
-            size: 0
-        };
-
-        for (i, elem) in thread_id.iter().enumerate() {
-            if *elem == 0 {
-                return dti;
-            }
-            else if i >= DetThreadId::MAX_SIZE {
-                panic!("Thread path is too deep");
-            }
-            else {
-                dti.thread_id[i] = *elem;
-                dti.size += 1;
-            }
-        }
-
-        dti
+    #[allow(dead_code)] // Used for testing.
+    fn as_slice(&self) -> &[u32] {
+        &self.thread_id[0..self.size]
     }
 }
 
+impl Debug for DetThreadId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        // Only print up to channel size.
+        write!(f, "ThreadId{:?}", &self.thread_id[0..self.size])
+    }
+}
+
+/// Wrapper around std::thread::Builder API but with deterministic ID assignment.
 pub struct Builder {
     builder: std::thread::Builder,
 }
@@ -252,25 +235,24 @@ impl Builder {
         T: Send + 'static,
     {
         let new_id = DET_ID_SPAWNER.with(|spawner| spawner.borrow_mut().new_child_det_id());
-
-        let new_spawner = DetIdSpawner::from(new_id.clone());
         crate::log_rr!(
             Info,
-            "Builder: Assigned determinsitic id {:?} for new thread.",
+            "std::thread::Builder::spawn: Assigned deterministic id {:?} for new thread.",
             new_id
         );
 
         self.builder.spawn(|| {
-            // Initialize TLS for this thread.
+            THREAD_INITIALIZED.with(|ti| {
+                ti.replace(true);
+            });
+            // Set DET_ID to correct id! This is now safe as we have set THREAD_INITIALIZED To true.
             DET_ID.with(|id| {
-                *id.borrow_mut() = Some(new_id);
+                *id.borrow_mut() = new_id;
             });
+            // Inits!
+            DET_ID_SPAWNER;
 
-            DET_ID_SPAWNER.with(|spawner| {
-                *spawner.borrow_mut() = new_spawner;
-            });
-
-            // EVENT_ID is fine starting at 0.
+            // EVENT_ID will be initalized to zero on first usage.
             f()
         })
     }
@@ -279,7 +261,7 @@ impl Builder {
 /// Because of the router, we want to "forward" the original sender's DetThreadId
 /// sometimes. We should always use this function when sending our DetThreadId via a
 /// sender channel as it handles the router and non-router cases.
-pub fn get_forwarding_id() -> Option<DetThreadId> {
+pub fn get_forwarding_id() -> DetThreadId {
     if in_forwarding() {
         get_temp_det_id()
     } else {
@@ -287,25 +269,44 @@ pub fn get_forwarding_id() -> Option<DetThreadId> {
     }
 }
 
+pub fn init_tivo_thread_root() {
+    THREAD_INITIALIZED.with(|ti| {
+        ti.replace(true);
+    });
+    // Init!
+    DET_ID;
+}
+#[cfg(test)]
 mod tests {
+    use std::time::Duration;
+    use rand::{Rng, thread_rng};
+    use crate::detthread::init_tivo_thread_root;
+
     #[test]
     /// TODO Add random delays to increase amount of nondeterminism.
+    /// Create a thread tree and ensure the threads are given IDs according to their index.
     fn deterministic_ids() {
-        use super::{get_det_id, spawn, DetThreadId};
+        init_tivo_thread_root();
+        use super::{get_det_id, spawn};
         use std::thread::JoinHandle;
 
         let mut v1: Vec<JoinHandle<_>> = vec![];
 
         for i in 0..4 {
             let h1 = spawn(move || {
+                // Wait a random amount of time, so that threads spawned after us have a chance
+                // to spawn their children first.
+                let n = thread_rng().gen_range(1, 15);
+                std::thread::sleep(Duration::from_millis(n));
+
                 let a = [i];
-                assert_eq!(DetThreadId::from(&a[..]), get_det_id().unwrap());
+                assert_eq!(&a[..], get_det_id().as_slice());
 
                 let mut v2 = vec![];
                 for j in 0..4 {
                     let h2 = spawn(move || {
                         let a = [i, j];
-                        assert_eq!(DetThreadId::from(&a[..]), get_det_id().unwrap());
+                        assert_eq!(&a[..], get_det_id().as_slice());
                     });
                     v2.push(h2);
                 }

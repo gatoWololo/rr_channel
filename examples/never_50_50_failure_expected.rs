@@ -9,6 +9,8 @@ use std::thread::sleep;
 use std::time::Duration;
 
 fn main() {
+    rr_channel::init_tivo_thread_root();
+
     let (s, r) = rr_channel::crossbeam_channel::unbounded();
 
     detthread::spawn(move || {

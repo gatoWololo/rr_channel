@@ -7,6 +7,8 @@ use std::thread;
 use std::time;
 
 fn main() {
+    rr_channel::init_tivo_thread_root();
+
     let (s, r) = rr_channel::crossbeam_channel::unbounded();
     let s2 = s.clone();
     // Avoid having channel disconnect.

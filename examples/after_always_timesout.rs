@@ -8,8 +8,9 @@ use rr_channel::crossbeam_channel::unbounded;
 use rr_channel::crossbeam_channel::after;
 
 fn main() {
+    rr_channel::init_tivo_thread_root();
     let (s, r) = unbounded::<i32>();
-    let timeout = Duration::from_millis(100);
+    let timeout = Duration::from_millis(1);
 
     rr_channel::crossbeam_channel::select! {
         recv(r) -> msg => println!("received {:?}", msg),

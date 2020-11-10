@@ -10,6 +10,7 @@ use rr_channel::ipc_channel::router::ROUTER;
 use std::time;
 
 fn main() {
+    rr_channel::init_tivo_thread_root();
     // To ensure deterministic router. We require the router to
     // be explicitly initialized at the very beginning!
     lazy_static::initialize(&ROUTER);

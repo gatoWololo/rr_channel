@@ -12,7 +12,6 @@ use crate::{DetMessage, NO_DETTHREADID, BufferedValues};
 
 use log::Level::*;
 use serde::{Deserialize, Serialize};
-use std::error::Error;
 use std::cell::RefMut;
 use std::collections::VecDeque;
 
@@ -20,7 +19,7 @@ use std::collections::VecDeque;
 /// possible to ensure the message was sent from the same sender every time.
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub struct DetChannelId {
-    det_thread_id: Option<DetThreadId>,
+    det_thread_id: DetThreadId,
     channel_id: u32,
 }
 
@@ -38,16 +37,17 @@ impl DetChannelId {
     /// Create a fake one here. Later we might get rid of this an use a Option instead...
     pub fn fake() -> DetChannelId {
         DetChannelId {
-            det_thread_id: None,
+            // TODO: Is there a better value to show this is a mock DTI?
+            det_thread_id: DetThreadId::new(),
             channel_id: 0,
         }
     }
 }
 
-pub(crate) trait RecvRR<T, E> {
+pub(crate) trait RecvRecordReplay<T, E> {
     /// Given a channel receiver function as a closure (e.g. || receiver.try_receive())
     /// handle the recording or replaying logic for this message arrival.
-    fn rr_recv(
+    fn record_replay_with(
         &self,
         metadata: &recordlog::RecordMetadata,
         recv_message: impl FnOnce() -> Result<DetMessage<T>, E>,
@@ -70,33 +70,23 @@ pub(crate) trait RecvRR<T, E> {
                 Ok(result)
             }
             RRMode::Replay => {
-                match detthread::get_det_id() {
-                    None => {
-                        crate::log_rr!(Warn, "{}", NO_DETTHREADID);
-                        detthread::inc_event_id();
-                        // TODO: This seems wrong. I think we should be doing a
-                        // replay_recv() here even if the det_id is none.
-                        Ok(recv_message().map(|v| v.1))
-                    }
-                    Some(det_id) => {
-                        let entry = recordlog::get_log_entry_with(
-                            det_id,
-                            detthread::get_event_id(),
-                            &metadata.flavor,
-                            &metadata.id,
-                        );
+                let det_id =  detthread::get_det_id();
+                let entry = recordlog::get_log_entry_with(
+                    det_id,
+                    detthread::get_event_id(),
+                    &metadata.flavor,
+                    &metadata.id,
+                );
 
-                        // Special case for NoEntryInLog. Hang this thread forever.
-                        if let Err(e @ error::DesyncError::NoEntryInLog(_, _)) = entry {
-                            crate::log_rr!(Info, "Saw {:?}. Putting thread to sleep.", e);
-                            desync::sleep_until_desync();
-                            // Thread woke back up... desynced!
-                            return Err(error::DesyncError::DesynchronizedWakeup);
-                        }
-
-                        Ok(RecvRR::replay_recorded_event(self, entry?.clone())?)
-                    }
+                // Special case for NoEntryInLog. Hang this thread forever.
+                if let Err(e @ error::DesyncError::NoEntryInLog(_, _)) = entry {
+                    crate::log_rr!(Info, "Saw {:?}. Putting thread to sleep.", e);
+                    desync::sleep_until_desync();
+                    // Thread woke back up... desynced!
+                    return Err(error::DesyncError::DesynchronizedWakeup);
                 }
+
+                Ok(Self::replay_recorded_event(self, entry?.clone())?)
             }
             RRMode::NoRR => Ok(recv_message().map(|v| v.1)),
         }
@@ -104,7 +94,7 @@ pub(crate) trait RecvRR<T, E> {
 
     /// Given the determininistic thread id return the corresponding successful case
     /// of RecordedEvent for record-logging.
-    fn recorded_event_succ(dtid: Option<DetThreadId>) -> recordlog::RecordedEvent;
+    fn recorded_event_succ(dtid: DetThreadId) -> recordlog::RecordedEvent;
 
     /// Given the channel recieve error, return the corresponding successful case
     /// of RecordedEvent for record-logging. We take a reference here as there is no
@@ -121,7 +111,7 @@ pub(crate) trait RecvRR<T, E> {
 }
 
 /// Abstract over logic to send a message while recording or replaying results.
-pub(crate) trait SendRR<T, E> {
+pub(crate) trait SendRecordReplay<T, E> {
     /// RecordedEvent variant for this type.
     const EVENT_VARIANT: recordlog::RecordedEvent;
 
@@ -133,7 +123,7 @@ pub(crate) trait SendRR<T, E> {
     ///    `msg: T` value.
     /// 2) The recursive call the the channel send method for this type of channel. This is the inner
     ///    result.
-    fn rr_send(
+    fn record_replay_send(
         &self,
         msg: T,
         metadata: &recordlog::RecordMetadata,
@@ -160,48 +150,43 @@ pub(crate) trait SendRR<T, E> {
             RRMode::Record => {
                 // Note: send() must come before rr::log() as it internally increments
                 // event_id.
-                let result = self.send(forwading_id, msg);
+                let result = self.underlying_send(forwading_id, msg);
                 recordlog::record_entry(Self::EVENT_VARIANT, &metadata);
                 Ok(result)
             }
             RRMode::Replay => {
-                if let Some(det_id) = detthread::get_det_id() {
-                    // Ugh. This is ugly. I need it though. As this function moves the `T`.
-                    // If we encounter an error we need to return the `T` back up to the caller.
-                    // crossbeam_channel::send() does pretty much the same thing.
-                    match recordlog::get_log_entry_with(
-                        det_id,
-                        detthread::get_event_id(),
-                        &metadata.flavor,
-                        &metadata.id,
-                    ) {
-                        // Special case for NoEntryInLog. Hang this thread forever.
-                        Err(e @ error::DesyncError::NoEntryInLog(_, _)) => {
-                            crate::log_rr!(Info, "Saw {:?}. Putting thread to sleep.", e);
-                            desync::sleep_until_desync();
-                            // Thread woke back up... desynced!
-                            return Err((error::DesyncError::DesynchronizedWakeup, msg));
-                        }
-                        // TODO: Hmmm when does this error case happen?
-                        Err(e) => return Err((e, msg)),
-                        Ok(event) => {
-                            if let Err(e) = rr::SendRR::check_log_entry(self, event.clone()) {
-                                return Err((e, msg));
-                            }
+                let det_id = detthread::get_det_id();
+                // Ugh. This is ugly. I need it though. As this function moves the `T`.
+                // If we encounter an error we need to return the `T` back up to the caller.
+                // crossbeam_channel::send() does pretty much the same thing.
+                match recordlog::get_log_entry_with(
+                    det_id,
+                    detthread::get_event_id(),
+                    &metadata.flavor,
+                    &metadata.id,
+                ) {
+                    // Special case for NoEntryInLog. Hang this thread forever.
+                    Err(e @ error::DesyncError::NoEntryInLog(_, _)) => {
+                        crate::log_rr!(Info, "Saw {:?}. Putting thread to sleep.", e);
+                        desync::sleep_until_desync();
+                        // Thread woke back up... desynced!
+                        return Err((error::DesyncError::DesynchronizedWakeup, msg));
+                    }
+                    // TODO: Hmmm when does this error case happen?
+                    Err(e) => return Err((e, msg)),
+                    Ok(event) => {
+                        if let Err(e) = rr::SendRecordReplay::check_log_entry(self, event.clone()) {
+                            return Err((e, msg));
                         }
                     }
-                } else {
-                    crate::log_rr!(
-                        Warn,
-                        "det_id is None. This execution may be nondeterministic"
-                    );
                 }
 
-                let result = rr::SendRR::send(self, forwading_id, msg);
+
+                let result = rr::SendRecordReplay::underlying_send(self, forwading_id, msg);
                 detthread::inc_event_id();
                 Ok(result)
             }
-            RRMode::NoRR => Ok(self.send(detthread::get_det_id(), msg)),
+            RRMode::NoRR => Ok(self.underlying_send(detthread::get_det_id(), msg)),
         }
     }
 
@@ -210,15 +195,15 @@ pub(crate) trait SendRR<T, E> {
     fn check_log_entry(&self, entry: recordlog::RecordedEvent) -> desync::Result<()>;
 
     /// Call underlying channel's send function to send this message and thread_id to receiver.
-    fn send(&self, thread_id: Option<DetThreadId>, msg: T) -> Result<(), E>;
+    fn underlying_send(&self, thread_id: DetThreadId, msg: T) -> Result<(), E>;
 }
 
-/// Reads messages from `rr_timeout_recv` waiting for message to arrive from `expected_sender`.
+/// Reads messages from `receiver_with_timeout` waiting for message to arrive from `expected_sender`.
 /// This is a generic function used by different channel implementations for receiving the
 /// correct value.
-pub(crate) fn recv_from_sender<T>(
-    expected_sender: &Option<DetThreadId>,
-    rr_timeout_recv: impl Fn() -> Result<DetMessage<T>, error::RecvErrorRR>,
+pub(crate) fn recv_expected_message<T>(
+    expected_sender: &DetThreadId,
+    receiver_with_timeout: impl Fn() -> Result<DetMessage<T>, error::RecvErrorRR>,
     mut buffer: RefMut<BufferedValues<T>>,
     id: &DetChannelId,
 ) -> desync::Result<T> {
@@ -242,7 +227,7 @@ pub(crate) fn recv_from_sender<T>(
     // Loop until we get the message we're waiting for. All "wrong" messages are
     // buffered into self.buffer.
     loop {
-        let (msg_sender, msg) = rr_timeout_recv()?;
+        let (msg_sender, msg) = receiver_with_timeout()?;
         if msg_sender == *expected_sender {
             crate::log_rr!(Debug, "Recv message found through recv()");
             return Ok(msg);
