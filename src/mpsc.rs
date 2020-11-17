@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::mpsc;
 use std::time::Duration;
 
-use crate::desync;
+use crate::{desync, EventRecorder};
 use crate::detthread::{self, DetThreadId};
 use crate::error::{DesyncError, RecvErrorRR};
 use crate::recordlog::{self, ChannelLabel, RecordedEvent};
@@ -19,6 +19,7 @@ use crate::{get_generic_name, DESYNC_MODE, ENV_LOGGER, RECORD_MODE, BufferedValu
 pub struct Sender<T> {
     pub(crate) sender: RealSender<T>,
     pub(crate) metadata: recordlog::RecordMetadata,
+    event_recorder: EventRecorder,
 }
 
 #[derive(Debug)]
@@ -93,6 +94,7 @@ pub struct Receiver<T> {
     /// Refcell needed as std::sync::mpsc::Receiver API calls for receiver methods take a &self
     /// instead of &mut self (not sure why). So we need internal mutability.
     pub(crate) buffer: RefCell<BufferedValues<T>>,
+    event_recorder: EventRecorder
 }
 
 impl<T> Receiver<T> {
@@ -107,6 +109,7 @@ impl<T> Receiver<T> {
                 mode: *RECORD_MODE,
                 id,
             },
+            event_recorder: EventRecorder::new_file_recorder(),
         }
     }
 
@@ -122,25 +125,25 @@ impl<T> Receiver<T> {
         rr::recv_expected_message(
             &sender,
             rr_recv_timeout,
-            self.buffer.borrow_mut(),
-            &self.metadata.id,
+            &mut self.get_buffer(),
+            // &self.metadata.id,
         )
     }
 
     pub fn recv(&self) -> Result<T, mpsc::RecvError> {
-        self.record_replay_with(self.metadata(), || self.receiver.recv(), "channel::recv()")
+        self.record_replay_with(self.metadata(), || self.receiver.recv(), self.event_recorder.get_recordable())
             .unwrap_or_else(|e| desync::handle_desync(e, || self.receiver.recv(), self.get_buffer()))
     }
 
     pub fn try_recv(&self) -> Result<T, mpsc::TryRecvError> {
         let f = || self.receiver.try_recv();
-        self.record_replay_with(self.metadata(), f, "channel::try_recv()")
+        self.record_replay_with(self.metadata(), f, self.event_recorder.get_recordable())
             .unwrap_or_else(|e| desync::handle_desync(e, f, self.get_buffer()))
     }
 
     pub fn recv_timeout(&self, timeout: Duration) -> Result<T, mpsc::RecvTimeoutError> {
         let f = || self.receiver.recv_timeout(timeout);
-        self.record_replay_with(self.metadata(), f, "channel::recv_timeout()")
+        self.record_replay_with(self.metadata(), f, self.event_recorder.get_recordable())
             .unwrap_or_else(|e| desync::handle_desync(e, f, self.get_buffer()))
     }
 
@@ -201,7 +204,7 @@ impl<T> Sender<T> {
         match self.record_replay_send(
             msg,
             &self.metadata,
-            "Sender",
+            self.event_recorder.get_recordable(),
         ) {
             Ok(v) => v,
             // send() should never hang. No need to check if NoEntryLog.
@@ -242,6 +245,7 @@ where
         Sender {
             sender: self.sender.clone(),
             metadata: self.metadata.clone(),
+            event_recorder: EventRecorder::new_file_recorder(),
         }
     }
 }
@@ -328,7 +332,8 @@ pub fn sync_channel<T>(bound: usize) -> (Sender<T>, Receiver<T>) {
                 flavor: channel_type,
                 mode,
                 id: id.clone(),
-            }
+            },
+            event_recorder: EventRecorder::new_file_recorder(),
         },
         Receiver::new(RealReceiver::Bounded(receiver), id)
     )
@@ -358,7 +363,8 @@ pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
                 flavor: channel_type,
                 mode,
                 id: id.clone(),
-            }
+            },
+            event_recorder: EventRecorder::new_file_recorder(),
         },
         Receiver::new(RealReceiver::Unbounded(receiver), id),
     )

@@ -21,6 +21,7 @@ use std::env::var;
 use std::env::VarError;
 
 pub use crate::detthread::init_tivo_thread_root;
+use crate::recordlog::{Recordable, RecordEntry, RecordedEvent, EventId};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum RRMode {
@@ -122,6 +123,99 @@ lazy_static! {
         crate::log_rr!(Info, "Mode {:?} selected.", mode);
         mode
     };
+}
+
+use std::cell::RefCell;
+use std::io::Write;
+use crate::recordlog::ChannelLabel;
+use crate::rr::DetChannelId;
+use crate::recordlog::RECORDED_INDICES;
+
+thread_local! {
+    /// Our in-memory recorder
+    static IN_MEMORY_RECORDER: RefCell<HashMap<(DetThreadId, u32), RecordEntry>> = RefCell::new(HashMap::new());
+}
+
+/// This is a mess... Originally I wanted to use a Box<dyn Recordable> and all channel receiver
+/// and sender implementations would have a field with this type, unfortunately, this causes issues
+/// and dynamic Trait objects cannot be easily serialized/deserialized... So we use an enum instead
+/// ...
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum EventRecorder {
+    Memory(InMemoryRecorder),
+    File(FileRecorder)
+}
+
+impl EventRecorder {
+    /// Easy method for turning our current variant of our log into a Recordable.
+    fn get_recordable(&self) -> &dyn Recordable {
+        match self {
+            EventRecorder::Memory(m) => m,
+            EventRecorder::File(f) => f,
+        }
+    }
+
+    fn new_memory_recorder() -> EventRecorder {
+        EventRecorder::Memory(InMemoryRecorder::new())
+    }
+
+    fn new_file_recorder() -> EventRecorder {
+        EventRecorder::File(FileRecorder::new())
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct FileRecorder {}
+
+impl  FileRecorder {
+    fn new() -> FileRecorder {
+        FileRecorder {}
+    }
+}
+
+// TODO Test.
+impl Recordable for FileRecorder {
+    fn write_entry(&self, id: DetThreadId, event: EventId, entry: RecordEntry) {
+        use crate::recordlog::WRITE_LOG_FILE;
+
+        let serialized = serde_json::to_string(&entry).unwrap();
+
+        WRITE_LOG_FILE
+            .lock()
+            .expect("Unable to lock file.")
+            .write_fmt(format_args!("{}\n", serialized))
+            .expect("Unable to write to log file.");
+    }
+
+    fn get_record_entry(&self, key: &(DetThreadId, u32)) -> Option<RecordEntry> {
+        let (re, cl, dci) = RECORDED_INDICES.get(key)?.clone();
+        Some(RecordEntry::new(key.0.clone(), key.1, re, cl, dci, "TODO".to_string()))
+    }
+}
+
+/// Record and Replay using a memory-based recorder. Useful for unit testing channel methods.
+// These derives are needed because IpcReceiver requires Ser/Des... sigh...
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct InMemoryRecorder {}
+
+impl Recordable for InMemoryRecorder {
+    fn write_entry(&self, id: DetThreadId, event: EventId, entry: RecordEntry) {
+        IN_MEMORY_RECORDER.with(|ml| {
+            ml.borrow_mut().insert((id, event), entry);
+        })
+    }
+
+    fn get_record_entry(&self, key: &(DetThreadId, u32)) -> Option<RecordEntry> {
+        IN_MEMORY_RECORDER.with(|ml| {
+            ml.borrow().get(key).cloned()
+        })
+    }
+}
+
+impl InMemoryRecorder {
+    fn new() -> InMemoryRecorder {
+        InMemoryRecorder {}
+    }
 }
 
 #[macro_export]

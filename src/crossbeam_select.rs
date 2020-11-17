@@ -7,7 +7,7 @@ use crate::detthread::DetThreadId;
 use crate::error::DesyncError;
 use crate::recordlog::{self, ChannelLabel, RecordedEvent, SelectEvent};
 use crate::rr::DetChannelId;
-use crate::{desync, detthread};
+use crate::{desync, detthread, EventRecorder};
 use crate::{DesyncMode, RRMode, DetMessage};
 use crate::{DESYNC_MODE, RECORD_MODE};
 
@@ -44,6 +44,7 @@ pub struct Select<'a> {
     // Use existential to abstract over the `T` which may vary per receiver. We only care
     // if it has entries anyways, not the T contained within.
     receivers: HashMap<usize, &'a dyn BufferedReceiver>,
+    event_recorder: EventRecorder,
 }
 
 impl<'a> Select<'a> {
@@ -54,6 +55,7 @@ impl<'a> Select<'a> {
             mode,
             selector: rc::Select::new(),
             receivers: HashMap::new(),
+            event_recorder: EventRecorder::new_file_recorder(),
         }
     }
 
@@ -137,23 +139,25 @@ impl<'a> Select<'a> {
         match self.mode {
             RRMode::Record => {
                 let select_index = self.selector.ready();
-                recordlog::record_entry(
+                let metadata = &recordlog::RecordMetadata::new(
+                    "ready".to_string(),
+                    ChannelLabel::None,
+                    self.mode,
+                    DetChannelId::fake(), // We fake it here. We never check this value anyways.
+                );
+
+                self.event_recorder.get_recordable().write_event_to_record(
                     RecordedEvent::SelectReady { select_index },
-                    &recordlog::RecordMetadata::new(
-                        "ready".to_string(),
-                        ChannelLabel::None,
-                        self.mode,
-                        DetChannelId::fake(), // We fake it here. We never check this value anyways.
-                    )
+                    metadata
                 );
                 Ok(select_index)
             }
             RRMode::Replay => {
-                let event = recordlog::get_log_entry(detthread::get_det_id(), detthread::get_event_id())?;
+                let event = self.event_recorder.get_recordable().get_log_entry(detthread::get_det_id(), detthread::get_event_id())?;
                 detthread::inc_event_id();
 
                 match event {
-                    RecordedEvent::SelectReady { select_index } => Ok(*select_index),
+                    RecordedEvent::SelectReady { select_index } => Ok(select_index),
                     event => {
                         let dummy = RecordedEvent::SelectReady { select_index: 0 };
                         Err(DesyncError::EventMismatch(event.clone(), dummy))
@@ -173,12 +177,13 @@ impl<'a> Select<'a> {
                 // We don't know the thread_id of sender until the select is complete
                 // when user call recv() on SelectedOperation. So do nothing here.
                 // Index will be recorded there.
-                Ok(SelectedOperation::Record(self.selector.select()))
+                Ok(SelectedOperation::Record(self.selector.select(), EventRecorder::new_file_recorder()))
             }
             RRMode::Replay => {
                 // Query our log to see what index was selected!() during the replay phase.
                 // ChannelVariant type not check on Select::select() but on Select::recv()
-                let entry = recordlog::get_log_entry_ret(detthread::get_det_id(), detthread::get_event_id());
+
+                let entry = self.event_recorder.get_recordable().get_log_entry_ret(detthread::get_det_id(), detthread::get_event_id());
 
                 // Here we put this thread to sleep if the entry is missing.
                 // On record, the thread never returned from blocking...
@@ -198,15 +203,15 @@ impl<'a> Select<'a> {
                         if let SelectEvent::Success {
                             selected_index,
                             sender_thread,
-                        } = event
+                        } = event.clone()
                         {
                             crate::log_rr!(
                                 Debug,
                                 "Polling select receiver to see if message is there..."
                             );
-                            match self.receivers.get(selected_index) {
+                            match self.receivers.get(&selected_index) {
                                 Some(receiver) => {
-                                    if !receiver.poll(sender_thread) {
+                                    if !receiver.poll(&sender_thread) {
                                         crate::log_rr!(Debug, "No such message found via polling.");
                                         // We failed to find the message we were expecting
                                         // this is a desynchonization.
@@ -216,13 +221,13 @@ impl<'a> Select<'a> {
                                 }
                                 None => {
                                     crate::log_rr!(Warn, "Missing receiver.");
-                                    let i = *selected_index as u64;
+                                    let i = selected_index as u64;
                                     return Err(DesyncError::MissingReceiver(i));
                                 }
                             }
                         }
 
-                        Ok(SelectedOperation::Replay(event, *flavor, chan_id.clone()))
+                        Ok(SelectedOperation::Replay(event, flavor, chan_id.clone()))
                     }
                     e => {
                         let dummy = SelectEvent::Success {
@@ -243,11 +248,11 @@ impl<'a> Select<'a> {
 }
 
 pub enum SelectedOperation<'a> {
-    Replay(&'a SelectEvent, ChannelLabel, DetChannelId),
+    Replay(SelectEvent, ChannelLabel, DetChannelId),
     /// Desynchonization happened and receiver still has buffered entries. Index
     /// of receiver has been returned to user.
     DesyncBufferEntry(usize),
-    Record(rc::SelectedOperation<'a>),
+    Record(rc::SelectedOperation<'a>, EventRecorder),
     NoRR(rc::SelectedOperation<'a>),
     /// Desynchonization happened, no entries in buffer, we call selector.select()
     /// to have crossbeam do the work for us.
@@ -275,7 +280,7 @@ impl<'a> SelectedOperation<'a> {
             | SelectedOperation::Replay(SelectEvent::RecvError { selected_index, .. }, _, _) => {
                 *selected_index
             }
-            SelectedOperation::Record(selected)
+            SelectedOperation::Record(selected, _)
             | SelectedOperation::NoRR(selected)
             | SelectedOperation::Desync(selected) => selected.index(),
         }
@@ -349,7 +354,7 @@ impl<'a> SelectedOperation<'a> {
                 Ok(SelectedOperation::do_recv(selected, r).map(|(_, msg)| msg))
             }
             // Record value we get from direct use of Select API recv().
-            SelectedOperation::Record(selected) => {
+            SelectedOperation::Record(selected, recorder) => {
                 crate::log_rr!(Debug, "SelectedOperation::Record");
 
                 let (msg, select_event) = match SelectedOperation::do_recv(selected, r) {
@@ -364,7 +369,9 @@ impl<'a> SelectedOperation<'a> {
                     // Err(e) on the RHS is not the same type as Err(e) LHS.
                     Err(e) => (Err(e), SelectEvent::RecvError { selected_index }),
                 };
-                recordlog::record_entry(RecordedEvent::Select(select_event), &r.metadata);
+                recorder.
+                    get_recordable().
+                    write_event_to_record(RecordedEvent::Select(select_event), &r.metadata);
                 Ok(msg)
             }
             // We do not use the select API at all on replays. Wait for correct
@@ -383,7 +390,7 @@ impl<'a> SelectedOperation<'a> {
                 let retval = match event {
                     SelectEvent::Success { sender_thread, .. } => {
                         crate::log_rr!(Debug, "SelectedOperation::Replay(SelectEvent::Success");
-                        Ok(r.replay_recv(sender_thread)?)
+                        Ok(r.replay_recv(&sender_thread)?)
                     }
                     SelectEvent::RecvError { .. } => {
                         crate::log_rr!(Debug, "SelectedOperation::Replay(SelectEvent::RecvError");

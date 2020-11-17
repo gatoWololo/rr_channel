@@ -14,6 +14,7 @@ use log::Level::*;
 use serde::{Deserialize, Serialize};
 use std::cell::RefMut;
 use std::collections::VecDeque;
+use crate::recordlog::Recordable;
 
 /// Channel themselves are assigned a deterministic ID as metadata. This make it
 /// possible to ensure the message was sent from the same sender every time.
@@ -51,9 +52,12 @@ pub(crate) trait RecvRecordReplay<T, E> {
         &self,
         metadata: &recordlog::RecordMetadata,
         recv_message: impl FnOnce() -> Result<DetMessage<T>, E>,
-        function_name: &str,
+        // Ideally recordlog should be a mutable reference because, it is. But this clashes with the
+        // the channel library APIs which for some reason send and recv are not mutable. So to keep
+        // things simple here we also say the self is not mutable :grimace-emoji:
+        recordlog: &dyn Recordable,
     ) -> desync::Result<Result<T, E>> {
-        crate::log_rr!(Debug, "Receiver<{:?}>::{}", metadata.id, function_name);
+        // crate::log_rr!(Debug, "Receiver<{:?}>::{}", metadata.id, function_name);
 
         match metadata.mode {
             RRMode::Record => {
@@ -66,12 +70,13 @@ pub(crate) trait RecvRecordReplay<T, E> {
                     }
                 };
 
-                recordlog::record_entry(recorded, &metadata);
+
+                recordlog.write_event_to_record(recorded, &metadata);
                 Ok(result)
             }
             RRMode::Replay => {
                 let det_id =  detthread::get_det_id();
-                let entry = recordlog::get_log_entry_with(
+                let entry = recordlog.get_log_entry_with(
                     det_id,
                     detthread::get_event_id(),
                     &metadata.flavor,
@@ -115,7 +120,9 @@ pub(crate) trait SendRecordReplay<T, E> {
     /// RecordedEvent variant for this type.
     const EVENT_VARIANT: recordlog::RecordedEvent;
 
-    /// Attempts to send message to receiver. Handles forwading the ID for router.
+    /// In theory we shouldn't need to record send events. In practice, it is useful for debugging
+    /// and for detecting when things have gone wrong.
+    /// Attempts to send message to receiver. Handles forwarding the ID for router.
     /// On Record: Sends message and records result in log.
     /// On Replay: Checks correct message is sent and handles desynchonization errors.
     /// Two different things can fail here:
@@ -127,7 +134,9 @@ pub(crate) trait SendRecordReplay<T, E> {
         &self,
         msg: T,
         metadata: &recordlog::RecordMetadata,
-        sender_name: &str,
+        recordlog: &dyn Recordable,
+        // TODO Use tracing to give context instead of passing unused parameter.
+        // sender_name: &str,
     ) -> Result<Result<(), E>, (DesyncError, T)> {
         if desync::program_desyned() {
             return Err((error::DesyncError::Desynchronized, msg));
@@ -137,21 +146,21 @@ pub(crate) trait SendRecordReplay<T, E> {
         // thread's DetThreadId. Otherwise we will have "repeated" entries in the log
         // which look like they're coming from the same thread.
         let forwading_id = detthread::get_forwarding_id();
-        crate::log_rr!(
-            Info,
-            "{}<{:?}>::send(({:?}, {:?}))",
-            sender_name,
-            metadata.id,
-            forwading_id,
-            metadata.type_name
-        );
+        // crate::log_rr!(
+        //     Info,
+        //     "{}<{:?}>::send(({:?}, {:?}))",
+        //     sender_name,
+        //     metadata.id,
+        //     forwading_id,
+        //     metadata.type_name
+        // );
 
         match metadata.mode {
             RRMode::Record => {
                 // Note: send() must come before rr::log() as it internally increments
                 // event_id.
                 let result = self.underlying_send(forwading_id, msg);
-                recordlog::record_entry(Self::EVENT_VARIANT, &metadata);
+                recordlog.write_event_to_record(Self::EVENT_VARIANT, &metadata);
                 Ok(result)
             }
             RRMode::Replay => {
@@ -159,7 +168,7 @@ pub(crate) trait SendRecordReplay<T, E> {
                 // Ugh. This is ugly. I need it though. As this function moves the `T`.
                 // If we encounter an error we need to return the `T` back up to the caller.
                 // crossbeam_channel::send() does pretty much the same thing.
-                match recordlog::get_log_entry_with(
+                match recordlog.get_log_entry_with(
                     det_id,
                     detthread::get_event_id(),
                     &metadata.flavor,
@@ -180,8 +189,6 @@ pub(crate) trait SendRecordReplay<T, E> {
                         }
                     }
                 }
-
-
                 let result = rr::SendRecordReplay::underlying_send(self, forwading_id, msg);
                 detthread::inc_event_id();
                 Ok(result)
@@ -204,23 +211,23 @@ pub(crate) trait SendRecordReplay<T, E> {
 pub(crate) fn recv_expected_message<T>(
     expected_sender: &DetThreadId,
     receiver_with_timeout: impl Fn() -> Result<DetMessage<T>, error::RecvErrorRR>,
-    mut buffer: RefMut<BufferedValues<T>>,
-    id: &DetChannelId,
+    buffer: &mut BufferedValues<T>,
+    // id: &DetChannelId,
 ) -> desync::Result<T> {
-    crate::log_rr!(
-        Debug,
-        "recv_from_sender(sender: {:?}, id: {:?}) ...",
-        expected_sender,
-        id
-    );
+    // crate::log_rr!(
+    //     Debug,
+    //     "recv_from_sender(sender: {:?}, id: {:?}) ...",
+    //     expected_sender,
+    //     id
+    // );
 
     // Check our buffer to see if this value is already here.
-    if let Some(val) = buffer.get_mut(expected_sender).and_then(|e| e.pop_front()) {
-        crate::log_rr!(
-            Debug,
-            "replay_recv(): Recv message found in buffer. Channel id: {:?}",
-            id
-        );
+    if let Some(val) = buffer.get_mut(expected_sender).and_then(|q| q.pop_front()) {
+        // crate::log_rr!(
+        //     Debug,
+        //     "replay_recv(): Recv message found in buffer. Channel id: {:?}",
+        //     id
+        // );
         return Ok(val);
     }
 
@@ -234,11 +241,97 @@ pub(crate) fn recv_expected_message<T>(
         } else {
             // Value did no match. Buffer it. Handles both `none_buffer` and
             // regular `buffer` case.
-            crate::log_rr!(Debug, "Wrong value found, buffering it for: {:?}", id);
+            // crate::log_rr!(Debug, "Wrong value found, buffering it for: {:?}", id);
             buffer
                 .entry(msg_sender)
                 .or_insert(VecDeque::new())
                 .push_back(msg);
         }
     }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::{init_tivo_thread_root, BufferedValues};
+    use crate::rr::{DetChannelId, recv_expected_message};
+    use crate::detthread::{spawn, DetThreadId};
+    use std::collections::VecDeque;
+    use std::borrow::Borrow;
+
+    #[test]
+    fn det_chan_id() {
+        init_tivo_thread_root();
+        let chanid1 = DetChannelId::new();
+        let chanid2 = DetChannelId::new();
+
+        assert_eq!(chanid1.channel_id, 1);
+        assert_eq!(chanid2.channel_id, 2);
+        assert_eq!(chanid1.det_thread_id, chanid2.det_thread_id);
+    }
+
+    #[test]
+    fn det_chan_id2() {
+        init_tivo_thread_root();
+        let c1 = DetChannelId::new();
+        spawn(move || {
+            let c2 = DetChannelId::new();
+            // First chanid in this thread. Should have ID of one not two.
+            assert_eq!(c2.channel_id, 1);
+            assert_ne!(c1.det_thread_id, c2.det_thread_id);
+        });
+    }
+
+    // Message already in buffer.
+    #[test]
+    fn recv_expected_message_value_in_buffer(){
+        let val = 10;
+        let mut bv = BufferedValues::new();
+        let det_id = DetThreadId::from([1].borrow());
+        let mut queue = VecDeque::new();
+        queue.push_back(val);
+
+        bv.insert(DetThreadId::from([1].borrow()), queue);
+        let f = || panic!("Value was in buffer, this fn should not have been called.");
+
+        let v = recv_expected_message(&det_id, f, &mut bv).expect("Value should have been found");
+        assert_eq!(v, val);
+        // Check queue is empty.
+        assert!(bv.get(&det_id).unwrap().is_empty());
+    }
+
+    // Empty buffer. Closure will be polled for message where it will be found.
+    #[test]
+    fn recv_expected_message_empty_buffer(){
+        let val = 10;
+        let mut bv = BufferedValues::new();
+        let det_id = DetThreadId::from([1].borrow());
+        let f = || Ok((det_id.clone(), val));
+
+        let v = recv_expected_message(&det_id, f, &mut bv).expect("Value should have been found");
+        assert_eq!(v, val);
+        // Check queue is empty.
+        assert!(bv.is_empty());
+    }
+
+    // Message not in buffer. Exercises loop in recv_expected_messages.
+    #[test]
+    fn recv_expected_message_multi_poll(){
+        // Pretend this channel represents det threads sending messages.
+        let (s, r) = crossbeam_channel::unbounded::<(DetThreadId, u32)>();
+        let sender1 = DetThreadId::from([1].borrow());
+        let sender2 = DetThreadId::from([2].borrow());
+
+        s.send((sender1.clone(), 10));
+        s.send((sender2.clone(), 11));
+
+        let mut bv = BufferedValues::new();
+        let f = move || Ok(r.recv().unwrap());
+
+        let v = recv_expected_message(&sender2, f, &mut bv).expect("Value should have been found");
+        // Found correct value.
+        assert_eq!(v, 11);
+        // First value taken off channel and placed in queue.
+        assert_eq!(10, bv.get_mut(&sender1).unwrap().pop_back().unwrap());
+    }
+
 }

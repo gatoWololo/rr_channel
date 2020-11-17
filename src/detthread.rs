@@ -13,15 +13,6 @@ pub fn get_det_id() -> DetThreadId {
     DET_ID.with(|di| di.borrow().clone())
 }
 
-/// Like `get_det_id` but treats missing DetThreadId as a desynchonization error.
-/// NO LONGER NEEDED.
-// pub fn get_det_id_desync() -> DetThreadId {
-//     match get_det_id() {
-//         Some(v) => Ok(v),
-//         None => Err(error::DesyncError::UnitializedDetThreadId),
-//     }
-// }
-
 pub fn set_det_id(new_id: DetThreadId) {
     DET_ID.with(|id| {
         *id.borrow_mut() = new_id;
@@ -57,7 +48,7 @@ pub fn get_and_inc_channel_id() -> u32 {
 thread_local! {
     /// Unique ID to keep track of events. Not strictly necessary but extremely
     /// helpful for debugging and sanity.
-    static EVENT_ID: RefCell<u32> = RefCell::new(0);
+    static EVENT_ID: RefCell<u32> = RefCell::new(1);
     static DET_ID_SPAWNER: RefCell<DetIdSpawner> = RefCell::new(DetIdSpawner::starting());
     /// Unique threadID assigned at thread spawn to each thread.
     pub static DET_ID: RefCell<DetThreadId> = RefCell::new(DetThreadId::new());
@@ -67,7 +58,7 @@ thread_local! {
     /// call to DET_ID will error. This works because DET_ID is initialized lazily.
     static THREAD_INITIALIZED: RefCell<bool> = RefCell::new(false);
 
-    static CHANNEL_ID: AtomicU32 = AtomicU32::new(0);
+    static CHANNEL_ID: AtomicU32 = AtomicU32::new(1);
     /// Hack to know when we're in the router. Forwading the DetThreadId to to the callback
     /// by temporarily setting DET_ID to a different value.
     static FORWADING_ID: RefCell<bool> = RefCell::new(false);
@@ -118,6 +109,8 @@ pub fn spawn<F, T>(f: F) -> JoinHandle<T>
         DET_ID.with(|id| {
             *id.borrow_mut() = new_id;
         });
+
+        // Force evaluation since TLS is lazy.
         DET_ID_SPAWNER.with(|spawner| {
             // Initalizes DET_ID_SPAWNER based on the value just set for DET_ID.
         });
@@ -127,7 +120,10 @@ pub fn spawn<F, T>(f: F) -> JoinHandle<T>
     })
 }
 
+/// Every thread has a DET_ID which holds its current det id. We also need a per-thread det id
+/// spawner which keeps track of what ID to assign to this threads next child thread.
 pub struct DetIdSpawner {
+    /// One-based indexing. We reserve zero as an "uninitialized state"
     pub child_index: u32,
     pub thread_id: DetThreadId,
 }
@@ -135,7 +131,7 @@ pub struct DetIdSpawner {
 impl DetIdSpawner {
     pub fn starting() -> DetIdSpawner {
         DetIdSpawner {
-            child_index: 0,
+            child_index: 1,
             thread_id: DET_ID.with(|id| {
                 // This happens when the current thread was initialized without using our
                 // deterministic thread spawning API.
@@ -201,6 +197,20 @@ impl Debug for DetThreadId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
         // Only print up to channel size.
         write!(f, "ThreadId{:?}", &self.thread_id[0..self.size])
+    }
+}
+
+impl From<&[u32]> for DetThreadId {
+    fn from(slice: &[u32]) -> Self {
+        let mut dti = DetThreadId {
+            thread_id: [0; DetThreadId::MAX_SIZE],
+            size: 0,
+        };
+
+        for e in slice {
+            dti.extend_path(*e);
+        }
+        dti
     }
 }
 
@@ -270,7 +280,13 @@ pub fn get_forwarding_id() -> DetThreadId {
 }
 
 pub fn init_tivo_thread_root() {
+    // Init ENV_LOGGER.
+    *crate::ENV_LOGGER;
+
     THREAD_INITIALIZED.with(|ti| {
+        if *ti.borrow() {
+            panic!("Thread root already initialized!");
+        }
         ti.replace(true);
     });
     // Init!
@@ -281,18 +297,69 @@ mod tests {
     use std::time::Duration;
     use rand::{Rng, thread_rng};
     use crate::detthread::init_tivo_thread_root;
+    use super::{get_det_id, spawn};
+    use std::thread::JoinHandle;
+
+    // init_tivo_thread_root() should always be called before thread spawning.
+    #[test]
+    #[should_panic(expected="thread not initialized")]
+    fn failed_to_init_root() {
+        spawn(|| {});
+    }
+
+    // init_tivo_thread_root() should always be called before using the TLS get_det_id().
+    #[test]
+    #[should_panic(expected="thread not initialized")]
+    fn failed_to_init_root2() {
+        get_det_id();
+    }
 
     #[test]
-    /// TODO Add random delays to increase amount of nondeterminism.
-    /// Create a thread tree and ensure the threads are given IDs according to their index.
-    fn deterministic_ids() {
+    #[should_panic(expected="Thread root already initialized!")]
+    fn already_initialized() {
         init_tivo_thread_root();
-        use super::{get_det_id, spawn};
-        use std::thread::JoinHandle;
+        init_tivo_thread_root();
+    }
+    #[test]
+    fn thread_id_assignment() {
+        init_tivo_thread_root();
+
+        let h1 = spawn(move || {
+            assert_eq!(&[1], get_det_id().as_slice());
+
+            let h2 = spawn(move || {
+                assert_eq!(&[1, 1], get_det_id().as_slice());
+
+                let h3 = spawn(||{
+                    assert_eq!(&[1, 1, 1], get_det_id().as_slice());
+                });
+                let h4 = spawn(||{
+                    assert_eq!(&[1, 1, 2], get_det_id().as_slice());
+
+                    let h5 = spawn(||{
+                        assert_eq!(&[1, 1, 2, 1], get_det_id().as_slice());
+                    });
+                    h5.join().unwrap();
+                });
+
+                h3.join().unwrap();
+                h4.join().unwrap();
+            });
+
+            h2.join().unwrap();
+        });
+        h1.join().unwrap();
+    }
+
+    #[test]
+    /// Create a thread tree and ensure the threads are given IDs according to their index.
+    fn thread_id_assignment_random_times() {
+        init_tivo_thread_root();
 
         let mut v1: Vec<JoinHandle<_>> = vec![];
+        let number_of_threads = thread_rng().gen_range(1, 15);
 
-        for i in 0..4 {
+        for i in 1..=number_of_threads {
             let h1 = spawn(move || {
                 // Wait a random amount of time, so that threads spawned after us have a chance
                 // to spawn their children first.
@@ -303,7 +370,8 @@ mod tests {
                 assert_eq!(&a[..], get_det_id().as_slice());
 
                 let mut v2 = vec![];
-                for j in 0..4 {
+                // Threads use one-based indexing.
+                for j in 1..=4 {
                     let h2 = spawn(move || {
                         let a = [i, j];
                         assert_eq!(&a[..], get_det_id().as_slice());
@@ -323,3 +391,4 @@ mod tests {
         assert!(true);
     }
 }
+

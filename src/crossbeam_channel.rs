@@ -8,9 +8,9 @@ use std::time::{Duration, Instant};
 use crate::desync::{self, DesyncMode};
 use crate::detthread::{self, DetThreadId};
 use crate::error::DesyncError;
-use crate::recordlog::{self, ChannelLabel, RecordedEvent};
+use crate::recordlog::{self, ChannelLabel, RecordedEvent, Recordable};
 use crate::rr::{self, DetChannelId, SendRecordReplay};
-use crate::{get_generic_name, ENV_LOGGER, RECORD_MODE};
+use crate::{get_generic_name, ENV_LOGGER, RECORD_MODE, InMemoryRecorder, EventRecorder};
 use crate::{DESYNC_MODE, BufferedValues};
 
 pub use crate::crossbeam_select::{Select, SelectedOperation};
@@ -20,10 +20,14 @@ pub use crate::{select, DetMessage};
 pub use rc::RecvTimeoutError;
 pub use rc::TryRecvError;
 pub use rc::{RecvError, SendError};
+use std::ops::DerefMut;
 
 pub struct Sender<T> {
     pub(crate) sender: crossbeam_channel::Sender<DetMessage<T>>,
     pub(crate) metadata: recordlog::RecordMetadata,
+    /// Reference to logger of record/replay events. Uses dynamic trait to support multiple
+    /// logging implementations.
+    event_recorder: EventRecorder,
 }
 
 /// crossbeam_channel::Sender does not derive clone. Instead it implements it,
@@ -33,15 +37,13 @@ impl<T> Clone for Sender<T> {
         // We do not support MPSC for bounded channels as the blocking semantics are
         // more complicated to implement.
         if self.metadata.flavor == ChannelLabel::Bounded {
-            crate::log_rr!(
-                Warn,
-                "MPSC for bounded channels not supported. Blocking semantics \
-                     of bounded channels will not be preserved!"
-            );
+            panic!("MPSC for bounded channels not supported. Blocking semantics \
+                     of bounded channels will not be preserved!")
         }
         Sender {
             sender: self.sender.clone(),
             metadata: self.metadata.clone(),
+            event_recorder: self.event_recorder.clone(),
         }
     }
 }
@@ -70,7 +72,7 @@ impl<T> Sender<T> {
         match self.record_replay_send(
             msg,
             &self.metadata,
-            "CrossbeamSender",
+            self.event_recorder.get_recordable(),
         ) {
             Ok(v) => v,
             // send() should never hang. No need to check if NoEntryLog.
@@ -161,6 +163,7 @@ pub struct Receiver<T> {
     pub(crate) buffer: RefCell<BufferedValues<T>>,
     pub(crate) receiver: ChannelVariant<T>,
     pub(crate) metadata: recordlog::RecordMetadata,
+    logger: EventRecorder,
 }
 
 /// Captures template for: impl RecvRR<_, _> for Receiver<T>
@@ -220,19 +223,22 @@ impl<T> Receiver<T> {
 
     pub fn recv(&self) -> Result<T, rc::RecvError> {
         let receiver = || self.receiver.recv();
-        RecvRecordReplay::record_replay_with(self, self.metadata(), receiver, "channel::recv()")
-            .unwrap_or_else(|e| desync::handle_desync(e, receiver, self.get_buffer()))
+
+        self.record_replay_with(self.metadata(), receiver, self.logger.get_recordable())
+          .unwrap_or_else(|e| desync::handle_desync(e, receiver, self.get_buffer()))
     }
 
     pub fn try_recv(&self) -> Result<T, rc::TryRecvError> {
         let f = || self.receiver.try_recv();
-        self.record_replay_with(self.metadata(), f, "channel::try_recv()")
+
+        self.record_replay_with(self.metadata(), f, self.logger.get_recordable())
             .unwrap_or_else(|e| desync::handle_desync(e, f, self.get_buffer()))
     }
 
     pub fn recv_timeout(&self, timeout: Duration) -> Result<T, rc::RecvTimeoutError> {
         let f = || self.receiver.recv_timeout(timeout);
-        self.record_replay_with(self.metadata(), f, "channel::rect_timeout()")
+
+        self.record_replay_with(self.metadata(), f, self.logger.get_recordable())
             .unwrap_or_else(|e| desync::handle_desync(e, f, self.get_buffer()))
     }
 
@@ -245,8 +251,8 @@ impl<T> Receiver<T> {
         rr::recv_expected_message(
             &sender,
             || self.receiver.recv_timeout(Duration::from_secs(1)).map_err(|e| e.into()),
-            self.get_buffer(),
-            &self.metadata.id,
+            &mut self.get_buffer(),
+            // &self.metadata.id,
         )
     }
 
@@ -259,7 +265,8 @@ impl<T> Receiver<T> {
                 get_generic_name::<T>().to_string(),
                 flavor,
                 *RECORD_MODE,
-                id)
+                id),
+            logger: EventRecorder::new_file_recorder(),
         }
     }
 
@@ -361,7 +368,8 @@ pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
                 type_name.to_string(),
                 ChannelLabel::Unbounded,
                 *RECORD_MODE,
-                id.clone())
+                id.clone()),
+            event_recorder: EventRecorder::new_file_recorder(),
         },
         Receiver::new(ChannelVariant::Unbounded(receiver), id),
     )
@@ -382,7 +390,8 @@ pub fn bounded<T>(cap: usize) -> (Sender<T>, Receiver<T>) {
                 type_name.to_string(),
                 ChannelLabel::Bounded,
                 *RECORD_MODE,
-                id.clone())
+                id.clone()),
+            event_recorder: EventRecorder::new_file_recorder(),
         },
         Receiver::new(ChannelVariant::Bounded(receiver), id),
     )
@@ -402,5 +411,16 @@ pub fn never<T>() -> Receiver<T> {
             mode: *RECORD_MODE,
             id,
         },
+        logger: EventRecorder::new_file_recorder(),
     }
 }
+
+// #[cfg(test)]
+// mod test {
+//     use crate::crossbeam_channel::unbounded;
+//
+//     #[test]
+//     fn crossbeam() {
+//         let (s1, s2) = unbounded::<i32>();
+//     }
+// }

@@ -122,16 +122,16 @@ mod test {
         let mut handles = vec![];
         for i in 1..10 {
             let h = crate::detthread::spawn(move || {
-                println!("Putting thread {} to sleep.", i);
+                // println!("Putting thread {} to sleep.", i);
                 sleep_until_desync();
-                println!("Thread {} woke up!", i);
+                // println!("Thread {} woke up!", i);
             });
             handles.push(h);
         }
 
         //TODO Is this enough time?
         std::thread::sleep(Duration::from_millis(1));
-        println!("Main thread waking everyone up...");
+        // println!("Main thread waking everyone up...");
         wake_up_threads();
         for h in handles {
             h.join().unwrap();
