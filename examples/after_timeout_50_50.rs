@@ -21,7 +21,7 @@ fn main() {
         if thread_rng().gen_bool(0.50) {
             sleep(time::Duration::from_millis(10));
         }
-        s.send(1);
+        s.send(1).expect("failed to send message");
     });
 
     let timeout = Duration::from_millis(50);

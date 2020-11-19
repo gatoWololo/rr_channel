@@ -1,13 +1,13 @@
 use log::Level::*;
+use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
+use std::fmt::Debug;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread;
 use std::thread::JoinHandle;
 pub use std::thread::{current, panicking, park, park_timeout, sleep, yield_now};
-use std::fmt::Debug;
-use serde::{Deserialize, Serialize};
 
-use crate::{error, recordlog, desync};
+use crate::recordlog;
 
 pub fn get_det_id() -> DetThreadId {
     DET_ID.with(|di| di.borrow().clone())
@@ -88,10 +88,10 @@ pub fn stop_forwarding_id(original_id: DetThreadId) {
 /// Wrapper around thread::spawn. We will need this later to assign a deterministic thread id, and
 /// allow each thread to have access to its ID and a local dynamic select counter through TLS.
 pub fn spawn<F, T>(f: F) -> JoinHandle<T>
-    where
-        F: FnOnce() -> T,
-        F: Send + 'static,
-        T: Send + 'static,
+where
+    F: FnOnce() -> T,
+    F: Send + 'static,
+    T: Send + 'static,
 {
     let new_id = DET_ID_SPAWNER.with(|spawner| spawner.borrow_mut().new_child_det_id());
     crate::log_rr!(
@@ -111,7 +111,7 @@ pub fn spawn<F, T>(f: F) -> JoinHandle<T>
         });
 
         // Force evaluation since TLS is lazy.
-        DET_ID_SPAWNER.with(|spawner| {
+        DET_ID_SPAWNER.with(|_| {
             // Initalizes DET_ID_SPAWNER based on the value just set for DET_ID.
         });
 
@@ -135,7 +135,7 @@ impl DetIdSpawner {
             thread_id: DET_ID.with(|id| {
                 // This happens when the current thread was initialized without using our
                 // deterministic thread spawning API.
-                let e = "This thread did not have its DetThreadId initalized";
+                let _ = "This thread did not have its DetThreadId initalized";
                 id.borrow().clone()
             }),
         }
@@ -181,8 +181,7 @@ impl DetThreadId {
         if self.size < DetThreadId::MAX_SIZE {
             self.thread_id[self.size] = node;
             self.size += 1;
-        }
-        else {
+        } else {
             panic!("Cannot extend path. Thread tree too deep.");
         }
     }
@@ -214,6 +213,11 @@ impl From<&[u32]> for DetThreadId {
     }
 }
 
+impl Default for DetThreadId {
+    fn default() -> Self {
+        DetThreadId::new()
+    }
+}
 /// Wrapper around std::thread::Builder API but with deterministic ID assignment.
 pub struct Builder {
     builder: std::thread::Builder,
@@ -260,11 +264,17 @@ impl Builder {
                 *id.borrow_mut() = new_id;
             });
             // Inits!
-            DET_ID_SPAWNER;
+            //DET_ID_SPAWNER;
 
             // EVENT_ID will be initalized to zero on first usage.
             f()
         })
+    }
+}
+
+impl Default for Builder {
+    fn default() -> Self {
+        Builder::new()
     }
 }
 
@@ -290,32 +300,32 @@ pub fn init_tivo_thread_root() {
         ti.replace(true);
     });
     // Init!
-    DET_ID;
+    //DET_ID;
 }
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-    use rand::{Rng, thread_rng};
-    use crate::detthread::init_tivo_thread_root;
     use super::{get_det_id, spawn};
+    use crate::detthread::init_tivo_thread_root;
+    use rand::{thread_rng, Rng};
     use std::thread::JoinHandle;
+    use std::time::Duration;
 
     // init_tivo_thread_root() should always be called before thread spawning.
     #[test]
-    #[should_panic(expected="thread not initialized")]
+    #[should_panic(expected = "thread not initialized")]
     fn failed_to_init_root() {
         spawn(|| {});
     }
 
     // init_tivo_thread_root() should always be called before using the TLS get_det_id().
     #[test]
-    #[should_panic(expected="thread not initialized")]
+    #[should_panic(expected = "thread not initialized")]
     fn failed_to_init_root2() {
         get_det_id();
     }
 
     #[test]
-    #[should_panic(expected="Thread root already initialized!")]
+    #[should_panic(expected = "Thread root already initialized!")]
     fn already_initialized() {
         init_tivo_thread_root();
         init_tivo_thread_root();
@@ -330,13 +340,13 @@ mod tests {
             let h2 = spawn(move || {
                 assert_eq!(&[1, 1], get_det_id().as_slice());
 
-                let h3 = spawn(||{
+                let h3 = spawn(|| {
                     assert_eq!(&[1, 1, 1], get_det_id().as_slice());
                 });
-                let h4 = spawn(||{
+                let h4 = spawn(|| {
                     assert_eq!(&[1, 1, 2], get_det_id().as_slice());
 
-                    let h5 = spawn(||{
+                    let h5 = spawn(|| {
                         assert_eq!(&[1, 1, 2, 1], get_det_id().as_slice());
                     });
                     h5.join().unwrap();
@@ -387,8 +397,5 @@ mod tests {
         for handle in v1 {
             handle.join().unwrap();
         }
-
-        assert!(true);
     }
 }
-

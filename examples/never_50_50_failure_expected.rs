@@ -27,8 +27,8 @@ fn main() {
 
     // Create a channel that times out after the specified duration.
     let timeout = duration
-        .map(|d| rr_channel::crossbeam_channel::after(d))
-        .unwrap_or(rr_channel::crossbeam_channel::never());
+        .map(rr_channel::crossbeam_channel::after)
+        .unwrap_or_else(rr_channel::crossbeam_channel::never);
 
     rr_channel::select! {
         recv(r) -> msg => println!("Message: {:?}", msg),

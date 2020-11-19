@@ -1,6 +1,5 @@
 use rr_channel::crossbeam_channel::Receiver;
-use rr_channel::ipc_channel;
-use rr_channel::ipc_channel::{router, ipc};
+use rr_channel::ipc_channel::ipc;
 use rr_channel::ipc_channel::router::ROUTER;
 
 fn main() -> Result<(), std::io::Error> {
@@ -11,13 +10,13 @@ fn main() -> Result<(), std::io::Error> {
 
     rr_channel::detthread::spawn(move || {
         for _ in 1..20 {
-            sender2.send(2);
+            sender2.send(2).expect("failed to send");
         }
     });
 
     rr_channel::detthread::spawn(move || {
         for _ in 1..20 {
-            sender.send(1);
+            sender.send(1).expect("failed to send");
         }
     });
 

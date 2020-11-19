@@ -5,15 +5,15 @@
 //! type of message we expect from the type of channel we expect it. If there
 //! is ever a mismatch between the type of message we expect, and the real message,
 //! we have desynchronized.
+use crate::error::DesyncError;
+use crate::BufferedValues;
+use crate::DESYNC_MODE;
+use crate::{detthread, DetMessage};
 use log::Level::{Debug, Warn};
+use std::cell::RefMut;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::{Condvar, Mutex};
-use crate::error::DesyncError;
-use crate::{detthread, DetMessage};
-use std::cell::RefMut;
-use crate::BufferedValues;
-use crate::DESYNC_MODE;
 
 /// Wrapper around DesyncError.
 pub(crate) type Result<T> = std::result::Result<T, DesyncError>;
@@ -86,7 +86,7 @@ pub(crate) fn handle_desync<T, E>(
     desync: DesyncError,
     recv_msg: impl Fn() -> ::std::result::Result<DetMessage<T>, E>,
     mut buffer: RefMut<BufferedValues<T>>,
-) ->  ::std::result::Result<T, E> {
+) -> ::std::result::Result<T, E> {
     crate::log_rr!(Warn, "Desynchonization found: {:?}", desync);
 
     match *DESYNC_MODE {
@@ -113,14 +113,14 @@ pub(crate) fn handle_desync<T, E>(
 #[cfg(test)]
 mod test {
     use crate::desync::{sleep_until_desync, wake_up_threads};
-    use std::time::Duration;
     use crate::detthread::init_tivo_thread_root;
+    use std::time::Duration;
 
     #[test]
     fn condvar_test() {
         init_tivo_thread_root();
         let mut handles = vec![];
-        for i in 1..10 {
+        for _ in 1..10 {
             let h = crate::detthread::spawn(move || {
                 // println!("Putting thread {} to sleep.", i);
                 sleep_until_desync();
@@ -136,6 +136,5 @@ mod test {
         for h in handles {
             h.join().unwrap();
         }
-        assert!(true);
     }
 }

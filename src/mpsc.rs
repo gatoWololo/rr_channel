@@ -5,15 +5,15 @@ use std::collections::HashMap;
 use std::sync::mpsc;
 use std::time::Duration;
 
-use crate::{desync, EventRecorder};
 use crate::detthread::{self, DetThreadId};
 use crate::error::{DesyncError, RecvErrorRR};
 use crate::recordlog::{self, ChannelLabel, RecordedEvent};
 use crate::rr::RecvRecordReplay;
 use crate::rr::SendRecordReplay;
 use crate::rr::{self, DetChannelId};
+use crate::{desync, EventRecorder};
+use crate::{get_generic_name, BufferedValues, DESYNC_MODE, ENV_LOGGER, RECORD_MODE};
 use crate::{DesyncMode, DetMessage};
-use crate::{get_generic_name, DESYNC_MODE, ENV_LOGGER, RECORD_MODE, BufferedValues};
 
 #[derive(Debug)]
 pub struct Sender<T> {
@@ -38,9 +38,10 @@ pub enum RealSender<T> {
 macro_rules! impl_RR {
     ($err_type:ty, $succ: ident, $err:ident) => {
         impl<T> rr::RecvRecordReplay<T, $err_type> for Receiver<T> {
-
             fn recorded_event_succ(dtid: DetThreadId) -> recordlog::RecordedEvent {
-                RecordedEvent::$succ { sender_thread: dtid }
+                RecordedEvent::$succ {
+                    sender_thread: dtid,
+                }
             }
 
             fn recorded_event_err(e: &$err_type) -> recordlog::RecordedEvent {
@@ -70,8 +71,8 @@ macro_rules! impl_RR {
                     }
                     e => {
                         let mock_event = RecordedEvent::$succ {
-                        // TODO: Is there a better value to show this is a mock DTI?
-                        sender_thread: DetThreadId::new(),
+                            // TODO: Is there a better value to show this is a mock DTI?
+                            sender_thread: DetThreadId::new(),
                         };
                         Err(DesyncError::EventMismatch(e, mock_event))
                     }
@@ -83,7 +84,11 @@ macro_rules! impl_RR {
 
 impl_RR!(mpsc::RecvError, MpscRecvSucc, MpscRecvErr);
 impl_RR!(mpsc::TryRecvError, MpscTryRecvSucc, MpscTryRecvErr);
-impl_RR!(mpsc::RecvTimeoutError, MpscRecvTimeoutSucc, MpscRecvTimeoutErr);
+impl_RR!(
+    mpsc::RecvTimeoutError,
+    MpscRecvTimeoutSucc,
+    MpscRecvTimeoutErr
+);
 
 #[derive(Debug)]
 pub struct Receiver<T> {
@@ -94,7 +99,7 @@ pub struct Receiver<T> {
     /// Refcell needed as std::sync::mpsc::Receiver API calls for receiver methods take a &self
     /// instead of &mut self (not sure why). So we need internal mutability.
     pub(crate) buffer: RefCell<BufferedValues<T>>,
-    event_recorder: EventRecorder
+    event_recorder: EventRecorder,
 }
 
 impl<T> Receiver<T> {
@@ -131,8 +136,12 @@ impl<T> Receiver<T> {
     }
 
     pub fn recv(&self) -> Result<T, mpsc::RecvError> {
-        self.record_replay_with(self.metadata(), || self.receiver.recv(), self.event_recorder.get_recordable())
-            .unwrap_or_else(|e| desync::handle_desync(e, || self.receiver.recv(), self.get_buffer()))
+        self.record_replay_with(
+            self.metadata(),
+            || self.receiver.recv(),
+            self.event_recorder.get_recordable(),
+        )
+        .unwrap_or_else(|e| desync::handle_desync(e, || self.receiver.recv(), self.get_buffer()))
     }
 
     pub fn try_recv(&self) -> Result<T, mpsc::TryRecvError> {
@@ -201,11 +210,7 @@ impl<T> Sender<T> {
     /// Send our det thread id along with the actual message for both
     /// record and replay.
     pub fn send(&self, msg: T) -> Result<(), mpsc::SendError<T>> {
-        match self.record_replay_send(
-            msg,
-            &self.metadata,
-            self.event_recorder.get_recordable(),
-        ) {
+        match self.record_replay_send(msg, &self.metadata, self.event_recorder.get_recordable()) {
             Ok(v) => v,
             // send() should never hang. No need to check if NoEntryLog.
             Err((error, msg)) => {
@@ -215,7 +220,11 @@ impl<T> Sender<T> {
                     // TODO: One day we may want to record this alternate execution.
                     DesyncMode::KeepGoing => {
                         desync::mark_program_as_desynced();
-                        let res = rr::SendRecordReplay::underlying_send(self, detthread::get_forwarding_id(), msg);
+                        let res = rr::SendRecordReplay::underlying_send(
+                            self,
+                            detthread::get_forwarding_id(),
+                            msg,
+                        );
                         // TODO Ugh, right now we have to carefully increase the event_id
                         // in the "right places" or nothing will work correctly.
                         // How can we make this a lot less error prone?
@@ -254,7 +263,10 @@ impl<T> rr::SendRecordReplay<T, mpsc::SendError<T>> for Sender<T> {
     fn check_log_entry(&self, entry: RecordedEvent) -> desync::Result<()> {
         match entry {
             RecordedEvent::MpscSender => Ok(()),
-            log_event => Err(DesyncError::EventMismatch(log_event, RecordedEvent::MpscSender)),
+            log_event => Err(DesyncError::EventMismatch(
+                log_event,
+                RecordedEvent::MpscSender,
+            )),
         }
     }
 
@@ -335,7 +347,7 @@ pub fn sync_channel<T>(bound: usize) -> (Sender<T>, Receiver<T>) {
             },
             event_recorder: EventRecorder::new_file_recorder(),
         },
-        Receiver::new(RealReceiver::Bounded(receiver), id)
+        Receiver::new(RealReceiver::Bounded(receiver), id),
     )
 }
 

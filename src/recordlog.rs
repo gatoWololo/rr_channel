@@ -7,10 +7,10 @@ use std::io::BufRead;
 use std::sync::mpsc;
 use std::sync::Mutex;
 
-use crate::{detthread, desync};
 use crate::detthread::DetThreadId;
 use crate::error;
 use crate::rr::DetChannelId;
+use crate::{desync, detthread};
 use crate::{RRMode, LOG_FILE_NAME, RECORD_MODE};
 
 /// Record representing a successful select from a channel. Used in replay mode.
@@ -73,19 +73,24 @@ pub struct RecordEntry {
 }
 
 impl RecordEntry {
-    pub(crate) fn new(current_thread: DetThreadId,
-                      event_id: u32,
-                      event: RecordedEvent,
-                      channel_flavor: ChannelLabel,
-                      chan_id: DetChannelId,
-                      type_name: String) -> RecordEntry {
+    pub(crate) fn new(
+        current_thread: DetThreadId,
+        event_id: u32,
+        event: RecordedEvent,
+        channel_flavor: ChannelLabel,
+        chan_id: DetChannelId,
+        type_name: String,
+    ) -> RecordEntry {
         RecordEntry {
-            current_thread, event_id, event, channel_flavor, chan_id, type_name
+            current_thread,
+            event_id,
+            event,
+            channel_flavor,
+            chan_id,
+            type_name,
         }
     }
 }
-
-
 
 /// Main enum listing different types of events that our logger supports. These recorded
 /// events contain all information to replay the event. On errors, we can just return
@@ -158,7 +163,7 @@ pub enum RecordedEvent {
 pub enum IpcErrorVariants {
     Bincode,
     Io,
-    Disconnected
+    Disconnected,
 }
 
 lazy_static::lazy_static! {
@@ -184,13 +189,14 @@ lazy_static::lazy_static! {
      init_recorded_indices();
 }
 
-fn init_recorded_indices() -> HashMap<(DetThreadId, u32), (RecordedEvent, ChannelLabel, DetChannelId)> {
+fn init_recorded_indices(
+) -> HashMap<(DetThreadId, u32), (RecordedEvent, ChannelLabel, DetChannelId)> {
     crate::log_rr!(Debug, "Initializing RECORDED_INDICES lazy static.");
     use std::io::BufReader;
 
     let mut recorded_indices = HashMap::new();
-    let log = File::open(LOG_FILE_NAME.as_str()).
-        expect(& format!("Unable to open {} for replay.", LOG_FILE_NAME.as_str()));
+    let log = File::open(LOG_FILE_NAME.as_str())
+        .unwrap_or_else(|_| panic!("Unable to open {} for replay.", LOG_FILE_NAME.as_str()));
     let log = BufReader::new(log);
 
     for line in log.lines() {
@@ -199,15 +205,21 @@ fn init_recorded_indices() -> HashMap<(DetThreadId, u32), (RecordedEvent, Channe
 
         let curr_thread = entry.current_thread.clone();
         let key = (curr_thread, entry.event_id);
-        let value = (entry.event.clone(), entry.channel_flavor, entry.chan_id.clone());
+        let value = (
+            entry.event.clone(),
+            entry.channel_flavor,
+            entry.chan_id.clone(),
+        );
 
         let prev = recorded_indices.insert(key, value);
         if prev.is_some() {
-            panic!("Corrupted log file. Adding key-value ({:?}, {:?}) but previous value \
+            panic!(
+                "Corrupted log file. Adding key-value ({:?}, {:?}) but previous value \
                         {:?} already exited. Hashmap entries should be unique.",
-                   (entry.current_thread, entry.event_id),
-                   (entry.event, entry.channel_flavor, entry.chan_id),
-                   prev);
+                (entry.current_thread, entry.event_id),
+                (entry.event, entry.channel_flavor, entry.chan_id),
+                prev
+            );
         }
     }
 
@@ -223,8 +235,7 @@ pub(crate) trait Recordable {
     // things simple here we also say the self is not mutable :grimace-emoji:
     fn write_entry(&self, id: DetThreadId, event: EventId, message: RecordEntry);
 
-    fn write_event_to_record(&self, event: RecordedEvent,
-                             metadata: &RecordMetadata) {
+    fn write_event_to_record(&self, event: RecordedEvent, metadata: &RecordMetadata) {
         crate::log_rr!(Warn, "rr::log()");
 
         // Write our (DET_ID, EVENT_ID) -> index to our log file
@@ -243,11 +254,11 @@ pub(crate) trait Recordable {
         self.write_entry(current_thread, event_id, entry.clone());
 
         crate::log_rr!(
-        Warn,
-        "{:?} Logged entry: {:?}",
-        entry,
-        (detthread::get_det_id(), event_id)
-    );
+            Warn,
+            "{:?} Logged entry: {:?}",
+            entry,
+            (detthread::get_det_id(), event_id)
+        );
 
         // TODO Why does writing to the log increment the event id?
         detthread::inc_event_id();
@@ -269,11 +280,11 @@ pub(crate) trait Recordable {
         match self.get_record_entry(&key) {
             Some(record_entry) => {
                 crate::log_rr!(
-                Debug,
-                "Event fetched: {:?} for keys: {:?}",
-                record_entry,
-                key
-            );
+                    Debug,
+                    "Event fetched: {:?} for keys: {:?}",
+                    record_entry,
+                    key
+                );
 
                 if let Some(curr_flavor) = curr_flavor {
                     if record_entry.channel_flavor != *curr_flavor {
@@ -286,12 +297,16 @@ pub(crate) trait Recordable {
                 if let Some(curr_id) = curr_id {
                     if record_entry.chan_id != *curr_id {
                         return Err(error::DesyncError::ChannelMismatch(
-                            record_entry.chan_id.clone(),
+                            record_entry.chan_id,
                             curr_id.clone(),
                         ));
                     }
                 }
-                Ok((record_entry.event, record_entry.channel_flavor, record_entry.chan_id))
+                Ok((
+                    record_entry.event,
+                    record_entry.channel_flavor,
+                    record_entry.chan_id,
+                ))
             }
             None => Err(error::DesyncError::NoEntryInLog(key.0, key.1)),
         }
@@ -306,7 +321,8 @@ pub(crate) trait Recordable {
         curr_flavor: &ChannelLabel,
         curr_id: &DetChannelId,
     ) -> desync::Result<RecordedEvent> {
-        self.get_log_entry_do(our_thread, event_id, Some(curr_flavor), Some(curr_id)).map(|(r, _, _)| r)
+        self.get_log_entry_do(our_thread, event_id, Some(curr_flavor), Some(curr_id))
+            .map(|(r, _, _)| r)
     }
 
     /// Get log entry with no comparison.
@@ -315,7 +331,8 @@ pub(crate) trait Recordable {
         our_thread: DetThreadId,
         event_id: EventId,
     ) -> desync::Result<RecordedEvent> {
-        self.get_log_entry_do(our_thread, event_id, None, None).map(|(r, _, _)| r)
+        self.get_log_entry_do(our_thread, event_id, None, None)
+            .map(|(r, _, _)| r)
     }
 
     /// Get log entry returning the record, flavor, and channel id if needed.
@@ -345,10 +362,17 @@ pub(crate) struct RecordMetadata {
 }
 
 impl RecordMetadata {
-    pub fn new(type_name: String,
-               flavor: ChannelLabel,
-               mode: RRMode,
-               id: DetChannelId) -> RecordMetadata {
-        RecordMetadata { type_name, flavor, mode, id }
+    pub fn new(
+        type_name: String,
+        flavor: ChannelLabel,
+        mode: RRMode,
+        id: DetChannelId,
+    ) -> RecordMetadata {
+        RecordMetadata {
+            type_name,
+            flavor,
+            mode,
+            id,
+        }
     }
 }

@@ -10,14 +10,14 @@ fn main() {
 
     let h0 = detthread::spawn(move || {
         for _ in 0..10 {
-            if let Err(_) = s0.send(0) {
+            if s0.send(0).is_err() {
                 return;
             }
         }
     });
     let h1 = detthread::spawn(move || {
         for _ in 0..10 {
-            if let Err(_) = s1.send(1) {
+            if s1.send(1).is_err() {
                 return;
             }
         }
