@@ -1,5 +1,4 @@
 use rr_channel::detthread;
-use env_logger;
 use rr_channel::detthread::init_tivo_thread_root;
 
 fn main() {
@@ -10,7 +9,7 @@ fn main() {
 
     let h = detthread::spawn(move || {
         for _ in 0..20 {
-            if let Err(_) = s.send("Thread 1") {
+            if s.send("Thread 1").is_err() {
                 return;
             }
         }
@@ -18,7 +17,7 @@ fn main() {
 
     let h2 = detthread::spawn(move || {
         for _ in 0..20 {
-            if let Err(_) = s2.send("Thread 2") {
+            if s2.send("Thread 2").is_err() {
                 return;
             }
         }

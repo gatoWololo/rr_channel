@@ -4,13 +4,13 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 
 pub mod crossbeam_channel;
-pub mod detthread;
-pub mod ipc_channel;
-pub mod mpsc;
 mod crossbeam_select;
 mod crossbeam_select_macro;
 mod desync;
+pub mod detthread;
 mod error;
+pub mod ipc_channel;
+pub mod mpsc;
 mod recordlog;
 mod rr;
 
@@ -21,7 +21,7 @@ use std::env::var;
 use std::env::VarError;
 
 pub use crate::detthread::init_tivo_thread_root;
-use crate::recordlog::{Recordable, RecordEntry, RecordedEvent, EventId};
+use crate::recordlog::{EventId, RecordEntry, Recordable};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum RRMode {
@@ -40,8 +40,6 @@ pub type BufferedValues<T> = HashMap<DetThreadId, VecDeque<T>>;
 const RECORD_MODE_VAR: &str = "RR_CHANNEL";
 const DESYNC_MODE_VAR: &str = "RR_DESYNC_MODE";
 const RECORD_FILE_VAR: &str = "RR_RECORD_FILE";
-
-const NO_DETTHREADID: &str = "DetThreadId was None. This execution may not be deterministic.";
 
 lazy_static! {
     /// Singleton environment logger. Must be initialized somewhere, and only once.
@@ -125,11 +123,9 @@ lazy_static! {
     };
 }
 
+use crate::recordlog::RECORDED_INDICES;
 use std::cell::RefCell;
 use std::io::Write;
-use crate::recordlog::ChannelLabel;
-use crate::rr::DetChannelId;
-use crate::recordlog::RECORDED_INDICES;
 
 thread_local! {
     /// Our in-memory recorder
@@ -143,7 +139,7 @@ thread_local! {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum EventRecorder {
     Memory(InMemoryRecorder),
-    File(FileRecorder)
+    File(FileRecorder),
 }
 
 impl EventRecorder {
@@ -167,7 +163,7 @@ impl EventRecorder {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct FileRecorder {}
 
-impl  FileRecorder {
+impl FileRecorder {
     fn new() -> FileRecorder {
         FileRecorder {}
     }
@@ -175,7 +171,7 @@ impl  FileRecorder {
 
 // TODO Test.
 impl Recordable for FileRecorder {
-    fn write_entry(&self, id: DetThreadId, event: EventId, entry: RecordEntry) {
+    fn write_entry(&self, _id: DetThreadId, _event: EventId, entry: RecordEntry) {
         use crate::recordlog::WRITE_LOG_FILE;
 
         let serialized = serde_json::to_string(&entry).unwrap();
@@ -189,7 +185,14 @@ impl Recordable for FileRecorder {
 
     fn get_record_entry(&self, key: &(DetThreadId, u32)) -> Option<RecordEntry> {
         let (re, cl, dci) = RECORDED_INDICES.get(key)?.clone();
-        Some(RecordEntry::new(key.0.clone(), key.1, re, cl, dci, "TODO".to_string()))
+        Some(RecordEntry::new(
+            key.0.clone(),
+            key.1,
+            re,
+            cl,
+            dci,
+            "TODO".to_string(),
+        ))
     }
 }
 
@@ -206,9 +209,7 @@ impl Recordable for InMemoryRecorder {
     }
 
     fn get_record_entry(&self, key: &(DetThreadId, u32)) -> Option<RecordEntry> {
-        IN_MEMORY_RECORDER.with(|ml| {
-            ml.borrow().get(key).cloned()
-        })
+        IN_MEMORY_RECORDER.with(|ml| ml.borrow().get(key).cloned())
     }
 }
 

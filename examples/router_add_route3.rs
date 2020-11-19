@@ -3,45 +3,42 @@
 /// Main thread prints messages. Definetily nondeterministic.
 /// Deterministic thanks to our RR B)
 use rand::Rng;
-use rr_channel::crossbeam_channel::Receiver;
 use rr_channel::ipc_channel::ipc;
-use rr_channel::ipc_channel::router;
 use rr_channel::ipc_channel::router::ROUTER;
 use std::time;
-use std::time::Duration;
 fn main() -> Result<(), std::io::Error> {
     rr_channel::init_tivo_thread_root();
 
     let (sender, receiver) = ipc::channel::<i32>()?;
     let (sender2, receiver2) = ipc::channel::<i32>()?;
     let thread_sender1 = sender.clone();
-    let thread_sender2 = sender.clone();
+    let thread_sender2 = sender;
 
     let f = Box::new(move |result: Result<i32, _>| {
-        sender2.send(result.unwrap());
+        sender2.send(result.unwrap()).expect("failed to send");
     });
     ROUTER.add_route(receiver, f);
 
     let h1 = rr_channel::detthread::spawn(move || {
-        for i in 0..20 {
+        for _ in 0..20 {
             let delay = rand::thread_rng().gen_range(0, 5);
             std::thread::sleep(time::Duration::from_millis(delay));
-            thread_sender1.send(1);
+            thread_sender1.send(1).expect("failed to send");
         }
     });
     let h2 = rr_channel::detthread::spawn(move || {
-        for i in 0..20 {
+        for _ in 0..20 {
             let delay = rand::thread_rng().gen_range(0, 5);
             std::thread::sleep(time::Duration::from_millis(delay));
-            thread_sender2.send(2);
+            thread_sender2.send(2).expect("failed to send");
         }
     });
 
-    for i in 0..20 {
+    for _ in 0..20 {
         println!("Result: {:?}", receiver2.recv());
     }
 
-    h1.join();
-    h2.join();
+    h1.join().expect("Couldn't wait on thread 1");
+    h2.join().expect("Couldn't wait on thread 1");
     Ok(())
 }

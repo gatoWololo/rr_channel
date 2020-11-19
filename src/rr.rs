@@ -8,13 +8,12 @@ use crate::RRMode;
 use crate::detthread::{self, DetThreadId};
 use crate::error::DesyncError;
 use crate::{desync, recordlog};
-use crate::{DetMessage, NO_DETTHREADID, BufferedValues};
+use crate::{BufferedValues, DetMessage};
 
+use crate::recordlog::Recordable;
 use log::Level::*;
 use serde::{Deserialize, Serialize};
-use std::cell::RefMut;
 use std::collections::VecDeque;
-use crate::recordlog::Recordable;
 
 /// Channel themselves are assigned a deterministic ID as metadata. This make it
 /// possible to ensure the message was sent from the same sender every time.
@@ -45,6 +44,11 @@ impl DetChannelId {
     }
 }
 
+impl Default for DetChannelId {
+    fn default() -> DetChannelId {
+        DetChannelId::new()
+    }
+}
 pub(crate) trait RecvRecordReplay<T, E> {
     /// Given a channel receiver function as a closure (e.g. || receiver.try_receive())
     /// handle the recording or replaying logic for this message arrival.
@@ -62,20 +66,15 @@ pub(crate) trait RecvRecordReplay<T, E> {
         match metadata.mode {
             RRMode::Record => {
                 let (recorded, result) = match recv_message() {
-                    Ok((sender_thread, msg)) => {
-                        (Self::recorded_event_succ(sender_thread), Ok(msg))
-                    },
-                    Err(e) => {
-                        (Self::recorded_event_err(&e), Err(e))
-                    }
+                    Ok((sender_thread, msg)) => (Self::recorded_event_succ(sender_thread), Ok(msg)),
+                    Err(e) => (Self::recorded_event_err(&e), Err(e)),
                 };
-
 
                 recordlog.write_event_to_record(recorded, &metadata);
                 Ok(result)
             }
             RRMode::Replay => {
-                let det_id =  detthread::get_det_id();
+                let det_id = detthread::get_det_id();
                 let entry = recordlog.get_log_entry_with(
                     det_id,
                     detthread::get_event_id(),
@@ -91,7 +90,7 @@ pub(crate) trait RecvRecordReplay<T, E> {
                     return Err(error::DesyncError::DesynchronizedWakeup);
                 }
 
-                Ok(Self::replay_recorded_event(self, entry?.clone())?)
+                Ok(Self::replay_recorded_event(self, entry?)?)
             }
             RRMode::NoRR => Ok(recv_message().map(|v| v.1)),
         }
@@ -184,7 +183,7 @@ pub(crate) trait SendRecordReplay<T, E> {
                     // TODO: Hmmm when does this error case happen?
                     Err(e) => return Err((e, msg)),
                     Ok(event) => {
-                        if let Err(e) = rr::SendRecordReplay::check_log_entry(self, event.clone()) {
+                        if let Err(e) = rr::SendRecordReplay::check_log_entry(self, event) {
                             return Err((e, msg));
                         }
                     }
@@ -244,7 +243,7 @@ pub(crate) fn recv_expected_message<T>(
             // crate::log_rr!(Debug, "Wrong value found, buffering it for: {:?}", id);
             buffer
                 .entry(msg_sender)
-                .or_insert(VecDeque::new())
+                .or_insert_with(VecDeque::new)
                 .push_back(msg);
         }
     }
@@ -252,11 +251,11 @@ pub(crate) fn recv_expected_message<T>(
 
 #[cfg(test)]
 mod test {
-    use crate::{init_tivo_thread_root, BufferedValues};
-    use crate::rr::{DetChannelId, recv_expected_message};
     use crate::detthread::{spawn, DetThreadId};
-    use std::collections::VecDeque;
+    use crate::rr::{recv_expected_message, DetChannelId};
+    use crate::{init_tivo_thread_root, BufferedValues};
     use std::borrow::Borrow;
+    use std::collections::VecDeque;
 
     #[test]
     fn det_chan_id() {
@@ -283,7 +282,7 @@ mod test {
 
     // Message already in buffer.
     #[test]
-    fn recv_expected_message_value_in_buffer(){
+    fn recv_expected_message_value_in_buffer() {
         let val = 10;
         let mut bv = BufferedValues::new();
         let det_id = DetThreadId::from([1].borrow());
@@ -301,7 +300,7 @@ mod test {
 
     // Empty buffer. Closure will be polled for message where it will be found.
     #[test]
-    fn recv_expected_message_empty_buffer(){
+    fn recv_expected_message_empty_buffer() {
         let val = 10;
         let mut bv = BufferedValues::new();
         let det_id = DetThreadId::from([1].borrow());
@@ -315,14 +314,14 @@ mod test {
 
     // Message not in buffer. Exercises loop in recv_expected_messages.
     #[test]
-    fn recv_expected_message_multi_poll(){
+    fn recv_expected_message_multi_poll() {
         // Pretend this channel represents det threads sending messages.
         let (s, r) = crossbeam_channel::unbounded::<(DetThreadId, u32)>();
         let sender1 = DetThreadId::from([1].borrow());
         let sender2 = DetThreadId::from([2].borrow());
 
-        s.send((sender1.clone(), 10));
-        s.send((sender2.clone(), 11));
+        s.send((sender1.clone(), 10)).expect("failed to send");
+        s.send((sender2.clone(), 11)).expect("failed to send");
 
         let mut bv = BufferedValues::new();
         let f = move || Ok(r.recv().unwrap());
@@ -333,5 +332,4 @@ mod test {
         // First value taken off channel and placed in queue.
         assert_eq!(10, bv.get_mut(&sender1).unwrap().pop_back().unwrap());
     }
-
 }

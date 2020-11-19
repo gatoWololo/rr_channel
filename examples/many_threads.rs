@@ -4,7 +4,6 @@ use rr_channel::detthread;
 /// We spawn 100 threads which share the sencer end of those 10 threads for a total
 /// of 100 senders.
 /// A single thread selects 1000 messages from the 10 receiver ends.
-use rr_channel;
 
 fn main() {
     rr_channel::init_tivo_thread_root();

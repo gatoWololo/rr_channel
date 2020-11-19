@@ -1,4 +1,3 @@
-use rr_channel::ipc_channel;
 use rr_channel::ipc_channel::ipc;
 
 fn main() {
@@ -7,18 +6,18 @@ fn main() {
     let tx2 = tx.clone();
 
     rr_channel::detthread::spawn(move || {
-        for i in 0..30 {
+        for _ in 0..30 {
             tx.send(1).unwrap();
         }
     });
 
     rr_channel::detthread::spawn(move || {
-        for i in 0..30 {
+        for _ in 0..30 {
             tx2.send(2).unwrap();
         }
     });
 
-    for i in 0..60 {
+    for _ in 0..60 {
         let response = rx.recv().unwrap();
         println!("Thread {}", response);
     }

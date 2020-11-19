@@ -1,6 +1,4 @@
-use rr_channel::crossbeam_channel::Receiver;
 use rr_channel::ipc_channel::ipc;
-use rr_channel::ipc_channel::router;
 use rr_channel::ipc_channel::router::ROUTER;
 /// Send messages to the router and have router send us back our messages
 /// through callback with sender.
@@ -12,11 +10,11 @@ fn main() -> Result<(), std::io::Error> {
     let (sender2, receiver2) = ipc::channel::<i32>()?;
 
     let f = Box::new(move |result: Result<i32, _>| {
-        sender2.send(result.unwrap());
+        sender2.send(result.unwrap()).expect("failed to send");
     });
     ROUTER.add_route(receiver, f);
     for i in 0..20 {
-        sender.send(i);
+        sender.send(i).expect("failed to send");
         println!("Result: {:?}", receiver2.recv());
     }
 

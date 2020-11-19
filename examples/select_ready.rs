@@ -9,8 +9,8 @@ fn main() {
 
     // Keep copies around to avoid disconnecting channel.
     // Else we end up getting spurious RecvError from channel.
-    let s1c = s1.clone();
-    let s2c = s2.clone();
+    let s1c = s1;
+    let s2c = s2;
 
     thread::spawn(move || {
         for _ in 0..30 {

@@ -13,7 +13,7 @@ fn main() {
     spawn_sender(3, tx3);
     spawn_sender(4, tx4);
 
-    for i in 0..120 {
+    for _ in 0..120 {
         let response = rx.recv().unwrap();
         println!("Thread {}", response);
     }
@@ -21,7 +21,7 @@ fn main() {
 
 fn spawn_sender(v: i32, tx: ipc_channel::ipc::IpcSender<i32>) {
     rr_channel::detthread::spawn(move || {
-        for i in 0..30 {
+        for _ in 0..30 {
             tx.send(v).unwrap();
         }
     });

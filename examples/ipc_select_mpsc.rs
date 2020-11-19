@@ -1,8 +1,7 @@
 use rand::Rng;
-use rr_channel::ipc_channel;
+use rr_channel::ipc_channel::ipc;
 use rr_channel::ipc_channel::ipc::IpcSelectionResult;
 use std::time;
-use rr_channel::ipc_channel::ipc;
 
 fn main() {
     rr_channel::init_tivo_thread_root();
@@ -15,21 +14,21 @@ fn main() {
     rr_channel::detthread::spawn(move || loop {
         let delay = rand::thread_rng().gen_range(0, 3);
         std::thread::sleep(time::Duration::from_millis(delay));
-        s.send(1);
+        s.send(1).expect("failed to send message");
     });
     rr_channel::detthread::spawn(move || loop {
         let delay = rand::thread_rng().gen_range(0, 5);
         std::thread::sleep(time::Duration::from_millis(delay));
-        s2.send(2);
+        s2.send(2).expect("failed to send message");
     });
     rr_channel::detthread::spawn(move || loop {
         let delay = rand::thread_rng().gen_range(0, 5);
         std::thread::sleep(time::Duration::from_millis(delay));
-        s3.send(3);
+        s3.send(3).expect("failed to send message");
     });
 
-    set.add(r);
-    set.add(r2);
+    set.add(r).expect("failed to add to set");
+    set.add(r2).expect("failed to add to set");
 
     for _ in 0..20 {
         println!("Select Results: ");

@@ -17,7 +17,7 @@ fn main() {
     let s1 = s.clone();
     detthread::spawn(move || {
         for _ in 0..20 {
-            if let Err(_) = s1.send("Thread 1") {
+            if s1.send("Thread 1").is_err() {
                 return;
             }
             let delay = rand::thread_rng().gen_range(0, 30);
@@ -28,7 +28,7 @@ fn main() {
     let s2 = s.clone();
     detthread::spawn(move || {
         for _ in 0..20 {
-            if let Err(_) = s2.send("Thread 2") {
+            if s2.send("Thread 2").is_err() {
                 return;
             }
             let delay = rand::thread_rng().gen_range(0, 30);

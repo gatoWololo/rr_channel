@@ -1,14 +1,10 @@
 //The test creates two channels. The first and the second rr channels are both waiting
 //for the first event to occur, thus they are blocking the thread.
-use rr_channel;
-use rr_channel::detthread;
-use std::thread;
-use std::time::Duration;
 
 fn main() {
     rr_channel::init_tivo_thread_root();
-    let (s, r) = rr_channel::crossbeam_channel::unbounded::<i32>();
-    let (s2, r2) = rr_channel::crossbeam_channel::unbounded::<i32>();
+    let (_, _) = rr_channel::crossbeam_channel::unbounded::<i32>();
+    let (_, _) = rr_channel::crossbeam_channel::unbounded::<i32>();
 
     // detthread::spawn(move || {
     //     rr_channel::select! {

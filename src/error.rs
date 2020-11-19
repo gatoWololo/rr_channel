@@ -15,7 +15,7 @@ pub enum RecvErrorRR {
     Disconnected,
 }
 
-impl From<RecvTimeoutError> for RecvErrorRR  {
+impl From<RecvTimeoutError> for RecvErrorRR {
     fn from(e: RecvTimeoutError) -> RecvErrorRR {
         match e {
             RecvTimeoutError::Timeout => RecvErrorRR::Timeout,

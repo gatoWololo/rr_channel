@@ -1,4 +1,3 @@
-use rr_channel::ipc_channel;
 use rr_channel::ipc_channel::ipc;
 
 fn main() {

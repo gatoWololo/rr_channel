@@ -8,10 +8,10 @@ use std::time::{Duration, Instant};
 use crate::desync::{self, DesyncMode};
 use crate::detthread::{self, DetThreadId};
 use crate::error::DesyncError;
-use crate::recordlog::{self, ChannelLabel, RecordedEvent, Recordable};
+use crate::recordlog::{self, ChannelLabel, RecordedEvent};
 use crate::rr::{self, DetChannelId, SendRecordReplay};
-use crate::{get_generic_name, ENV_LOGGER, RECORD_MODE, InMemoryRecorder, EventRecorder};
-use crate::{DESYNC_MODE, BufferedValues};
+use crate::{get_generic_name, EventRecorder, ENV_LOGGER, RECORD_MODE};
+use crate::{BufferedValues, DESYNC_MODE};
 
 pub use crate::crossbeam_select::{Select, SelectedOperation};
 use crate::rr::RecvRecordReplay;
@@ -20,7 +20,6 @@ pub use crate::{select, DetMessage};
 pub use rc::RecvTimeoutError;
 pub use rc::TryRecvError;
 pub use rc::{RecvError, SendError};
-use std::ops::DerefMut;
 
 pub struct Sender<T> {
     pub(crate) sender: crossbeam_channel::Sender<DetMessage<T>>,
@@ -37,8 +36,10 @@ impl<T> Clone for Sender<T> {
         // We do not support MPSC for bounded channels as the blocking semantics are
         // more complicated to implement.
         if self.metadata.flavor == ChannelLabel::Bounded {
-            panic!("MPSC for bounded channels not supported. Blocking semantics \
-                     of bounded channels will not be preserved!")
+            panic!(
+                "MPSC for bounded channels not supported. Blocking semantics \
+                     of bounded channels will not be preserved!"
+            )
         }
         Sender {
             sender: self.sender.clone(),
@@ -69,11 +70,7 @@ impl<T> SendRecordReplay<T, rc::SendError<T>> for Sender<T> {
 impl<T> Sender<T> {
     /// crossbeam_channel::send implementation.
     pub fn send(&self, msg: T) -> Result<(), rc::SendError<T>> {
-        match self.record_replay_send(
-            msg,
-            &self.metadata,
-            self.event_recorder.get_recordable(),
-        ) {
+        match self.record_replay_send(msg, &self.metadata, self.event_recorder.get_recordable()) {
             Ok(v) => v,
             // send() should never hang. No need to check if NoEntryLog.
             Err((error, msg)) => {
@@ -86,7 +83,11 @@ impl<T> Sender<T> {
                     DesyncMode::KeepGoing => {
                         desync::mark_program_as_desynced();
 
-                        let res = rr::SendRecordReplay::underlying_send(self, detthread::get_forwarding_id(), msg);
+                        let res = rr::SendRecordReplay::underlying_send(
+                            self,
+                            detthread::get_forwarding_id(),
+                            msg,
+                        );
                         // TODO Ugh, right now we have to carefully increase the event_id
                         // in the "right places" or nothing will work correctly.
                         // How can we make this a lot less error prone?
@@ -111,34 +112,34 @@ pub(crate) enum ChannelVariant<T> {
 
 impl<T> ChannelVariant<T> {
     pub(crate) fn try_recv(&self) -> Result<DetMessage<T>, rc::TryRecvError> {
-            match self {
-                ChannelVariant::After(receiver) => {
-                    match receiver.try_recv() {
-                        Ok(msg) => Ok((detthread::get_det_id(), msg)),
-                        // TODO: Why is this unreachable?
-                        e => e.map(|_| unreachable!()),
-                    }
+        match self {
+            ChannelVariant::After(receiver) => {
+                match receiver.try_recv() {
+                    Ok(msg) => Ok((detthread::get_det_id(), msg)),
+                    // TODO: Why is this unreachable?
+                    e => e.map(|_| unreachable!()),
                 }
-                ChannelVariant::Bounded(receiver)
-                | ChannelVariant::Unbounded(receiver)
-                | ChannelVariant::Never(receiver) => receiver.try_recv(),
             }
+            ChannelVariant::Bounded(receiver)
+            | ChannelVariant::Unbounded(receiver)
+            | ChannelVariant::Never(receiver) => receiver.try_recv(),
+        }
     }
 
     pub(crate) fn recv(&self) -> Result<DetMessage<T>, rc::RecvError> {
-            match self {
-                ChannelVariant::After(receiver) => {
-                    match receiver.recv() {
-                        Ok(msg) => Ok((detthread::get_det_id(), msg)),
-                        // TODO: Why is this unreachable?
-                        e => e.map(|_| unreachable!()),
-                    }
+        match self {
+            ChannelVariant::After(receiver) => {
+                match receiver.recv() {
+                    Ok(msg) => Ok((detthread::get_det_id(), msg)),
+                    // TODO: Why is this unreachable?
+                    e => e.map(|_| unreachable!()),
                 }
-                ChannelVariant::Bounded(receiver)
-                | ChannelVariant::Unbounded(receiver)
-                | ChannelVariant::Never(receiver) => receiver.recv(),
             }
+            ChannelVariant::Bounded(receiver)
+            | ChannelVariant::Unbounded(receiver)
+            | ChannelVariant::Never(receiver) => receiver.recv(),
         }
+    }
 
     pub(crate) fn recv_timeout(
         &self,
@@ -169,11 +170,11 @@ pub struct Receiver<T> {
 /// Captures template for: impl RecvRR<_, _> for Receiver<T>
 macro_rules! impl_recvrr {
     ($err_type:ty, $succ: ident, $err:ident) => {
-
         impl<T> rr::RecvRecordReplay<T, $err_type> for Receiver<T> {
-
             fn recorded_event_succ(dtid: DetThreadId) -> recordlog::RecordedEvent {
-                RecordedEvent::$succ { sender_thread: dtid }
+                RecordedEvent::$succ {
+                    sender_thread: dtid,
+                }
             }
 
             fn recorded_event_err(e: &$err_type) -> recordlog::RecordedEvent {
@@ -225,7 +226,7 @@ impl<T> Receiver<T> {
         let receiver = || self.receiver.recv();
 
         self.record_replay_with(self.metadata(), receiver, self.logger.get_recordable())
-          .unwrap_or_else(|e| desync::handle_desync(e, receiver, self.get_buffer()))
+            .unwrap_or_else(|e| desync::handle_desync(e, receiver, self.get_buffer()))
     }
 
     pub fn try_recv(&self) -> Result<T, rc::TryRecvError> {
@@ -250,7 +251,11 @@ impl<T> Receiver<T> {
     pub(crate) fn replay_recv(&self, sender: &DetThreadId) -> desync::Result<T> {
         rr::recv_expected_message(
             &sender,
-            || self.receiver.recv_timeout(Duration::from_secs(1)).map_err(|e| e.into()),
+            || {
+                self.receiver
+                    .recv_timeout(Duration::from_secs(1))
+                    .map_err(|e| e.into())
+            },
             &mut self.get_buffer(),
             // &self.metadata.id,
         )
@@ -265,7 +270,8 @@ impl<T> Receiver<T> {
                 get_generic_name::<T>().to_string(),
                 flavor,
                 *RECORD_MODE,
-                id),
+                id,
+            ),
             logger: EventRecorder::new_file_recorder(),
         }
     }
@@ -324,7 +330,7 @@ impl<T> Receiver<T> {
                 self.buffer
                     .borrow_mut()
                     .entry(sender.clone())
-                    .or_insert(VecDeque::new())
+                    .or_insert_with(VecDeque::new)
                     .push_back(msg);
                 true
             }
@@ -368,7 +374,8 @@ pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
                 type_name.to_string(),
                 ChannelLabel::Unbounded,
                 *RECORD_MODE,
-                id.clone()),
+                id.clone(),
+            ),
             event_recorder: EventRecorder::new_file_recorder(),
         },
         Receiver::new(ChannelVariant::Unbounded(receiver), id),
@@ -390,7 +397,8 @@ pub fn bounded<T>(cap: usize) -> (Sender<T>, Receiver<T>) {
                 type_name.to_string(),
                 ChannelLabel::Bounded,
                 *RECORD_MODE,
-                id.clone()),
+                id.clone(),
+            ),
             event_recorder: EventRecorder::new_file_recorder(),
         },
         Receiver::new(ChannelVariant::Bounded(receiver), id),

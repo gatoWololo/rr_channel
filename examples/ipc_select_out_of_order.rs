@@ -4,8 +4,6 @@ use rand::Rng;
 /// race on being added to the IpcReceiverSet.
 use rr_channel::ipc_channel;
 use rr_channel::ipc_channel::ipc::IpcReceiverSet;
-use rr_channel::ipc_channel::ipc::IpcSelectionResult;
-use rr_channel::ipc_channel::router::ROUTER;
 use std::sync::{Arc, Mutex};
 use std::time;
 
@@ -26,17 +24,20 @@ fn main() {
         add_receiver(3, set3);
     });
 
-    h1.join();
-    h2.join();
-    h3.join();
+    h1.join().expect("Couldn't wait on thread 1");
+    h2.join().expect("Couldn't wait on thread 2");
+    h3.join().expect("Couldn't wait on thread 3");
 }
 
 fn add_receiver(i: i32, set: Arc<Mutex<IpcReceiverSet>>) {
-    for _ in 1..5 {
+    for _ in 1..i {
         let delay = rand::thread_rng().gen_range(0, 3);
         std::thread::sleep(time::Duration::from_millis(delay));
 
         let (_, r) = ipc_channel::ipc::channel::<u32>().unwrap();
-        set.lock().expect("Unable to acquire lock").add(r);
+        set.lock()
+            .expect("Unable to acquire lock")
+            .add(r)
+            .expect("failed to add to set");
     }
 }

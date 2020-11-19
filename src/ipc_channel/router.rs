@@ -4,10 +4,13 @@ use std::sync::Mutex;
 
 use crate::crossbeam_channel::{Receiver, Sender};
 use crate::detthread;
-use crate::ipc_channel::ipc::{self, IpcReceiver, IpcReceiverSet, IpcSelectionResult, IpcSender, OpaqueIpcMessage, OpaqueIpcReceiver};
+use crate::ipc_channel::ipc::{
+    self, IpcReceiver, IpcReceiverSet, IpcSelectionResult, IpcSender, OpaqueIpcMessage,
+    OpaqueIpcReceiver,
+};
+use crate::DetMessage;
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
-use crate::DetMessage;
 
 lazy_static! {
     pub static ref ROUTER: RouterProxy = RouterProxy::new();
@@ -49,12 +52,11 @@ impl RouterProxy {
         let _ = comm
             .wakeup_sender
             .send(())
-            .and_then(|_| {
+            .map(|_| {
                 comm.msg_sender
                     .send(RouterMsg::Shutdown(ack_sender))
                     .unwrap();
                 ack_receiver.recv().unwrap();
-                Ok(())
             })
             .unwrap();
     }
@@ -94,7 +96,10 @@ impl RouterProxy {
         });
 
         comm.msg_sender
-            .send(RouterMsg::AddRoute(receiver.to_opaque(), callback_wrapper))
+            .send(RouterMsg::AddRoute(
+                receiver.into_opaque(),
+                callback_wrapper,
+            ))
             .unwrap();
         comm.wakeup_sender.send(()).unwrap();
     }
@@ -142,6 +147,12 @@ impl RouterProxy {
     }
 }
 
+impl Default for RouterProxy {
+    fn default() -> Self {
+        RouterProxy::new()
+    }
+}
+
 /// OMAR: Must wrap since we need it to use our rr channels.
 struct RouterProxyComm {
     msg_sender: Sender<RouterMsg>,
@@ -162,19 +173,15 @@ impl Router {
         let mut ipc_receiver_set = IpcReceiverSet::new().unwrap();
         let msg_wakeup_id = ipc_receiver_set.add(wakeup_receiver).unwrap();
         Router {
-            msg_receiver: msg_receiver,
-            msg_wakeup_id: msg_wakeup_id,
-            ipc_receiver_set: ipc_receiver_set,
+            msg_receiver,
+            msg_wakeup_id,
+            ipc_receiver_set,
             handlers: HashMap::new(),
         }
     }
 
     fn run(&mut self) {
-        loop {
-            let results = match self.ipc_receiver_set.select() {
-                Ok(results) => results,
-                Err(_) => break,
-            };
+        while let Ok(results) = self.ipc_receiver_set.select() {
             for result in results.into_iter() {
                 match result {
                     IpcSelectionResult::MessageReceived(id, _) if id == self.msg_wakeup_id => {
@@ -191,17 +198,17 @@ impl Router {
                                 self.handlers.insert(new_receiver_id, handler);
                                 // println!("Added receiver {:?} at {:?} for handler", id, new_receiver_id);
                             }
-                            RouterMsg::Shutdown(_) => { panic!("Shutdown in router! unimplemented!")}
+                            RouterMsg::Shutdown(_) => panic!("Shutdown in router! unimplemented!"),
                         }
                     }
                     IpcSelectionResult::MessageReceived(id, message) => {
                         let handler = self.handlers.get_mut(&id).
-                            expect(&format!("rr_channel:: RouterProxy::run(): MessageReceived, No such handler: {:?}", id));
+                            unwrap_or_else(|| panic!("rr_channel:: RouterProxy::run(): MessageReceived, No such handler: {:?}", id));
                         handler(message)
                     }
                     IpcSelectionResult::ChannelClosed(id) => {
                         let _handler = self.handlers.remove(&id).
-                            expect(&format!("rr_channel:: RouterProxy::run(): Channel Closed, No such handler: {:?}", id));
+                            unwrap_or_else(|| panic!("rr_channel:: RouterProxy::run(): Channel Closed, No such handler: {:?}", id));
                     }
                 }
             }
