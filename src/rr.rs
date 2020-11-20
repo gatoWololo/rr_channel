@@ -19,8 +19,8 @@ use std::collections::VecDeque;
 /// possible to ensure the message was sent from the same sender every time.
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub struct DetChannelId {
-    det_thread_id: DetThreadId,
-    channel_id: u32,
+    pub(crate) det_thread_id: DetThreadId,
+    pub(crate) channel_id: u32,
 }
 
 impl DetChannelId {

@@ -14,7 +14,7 @@ use crate::{desync, detthread};
 use crate::{RRMode, LOG_FILE_NAME, RECORD_MODE};
 
 /// Record representing a successful select from a channel. Used in replay mode.
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq)]
 pub enum SelectEvent {
     Success {
         /// For multiple producer channels we need to diffentiate who the sender was.
@@ -31,7 +31,7 @@ pub enum SelectEvent {
     },
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq)]
 pub enum IpcSelectEvent {
     MessageReceived(/*index:*/ u64, DetThreadId),
     ChannelClosed(/*index:*/ u64),
@@ -57,7 +57,7 @@ pub enum ChannelLabel {
 /// Represents a single entry in our log. Technically all that is needed is the current_thread_id,
 /// event_id, and event. Everything else is metadata used for checks to ensure we're reading from
 /// the right channel.
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct RecordEntry {
     /// Thread performing the operation's unique ID.
     /// (current_thread, event_id) form a unique key per entry in our map and log.
@@ -96,7 +96,7 @@ impl RecordEntry {
 /// events contain all information to replay the event. On errors, we can just return
 /// the error that was witnessed during record. On successful read, the variant contains
 /// the index or sender_thread_id where we should expect the message to arrive from.
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum RecordedEvent {
     // Crossbeam select.
     SelectReady {
@@ -159,7 +159,7 @@ pub enum RecordedEvent {
     },
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq)]
 pub enum IpcErrorVariants {
     Bincode,
     Io,

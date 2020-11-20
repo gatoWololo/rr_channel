@@ -10,7 +10,7 @@ use crate::detthread::{self, DetThreadId};
 use crate::error::DesyncError;
 use crate::recordlog::{self, ChannelLabel, RecordedEvent};
 use crate::rr::{self, DetChannelId, SendRecordReplay};
-use crate::{get_generic_name, EventRecorder, ENV_LOGGER, RECORD_MODE};
+use crate::{get_generic_name, EventRecorder, ENV_LOGGER, RECORD_MODE, RRMode};
 use crate::{BufferedValues, DESYNC_MODE};
 
 pub use crate::crossbeam_select::{Select, SelectedOperation};
@@ -360,6 +360,14 @@ pub fn after(duration: Duration) -> Receiver<Instant> {
 
 // Chanel constructors provided by crossbeam API:
 pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
+    do_unbounded(EventRecorder::new_file_recorder(), *RECORD_MODE)
+}
+
+fn unbounded_in_memory<T>(rr_mode: RRMode) -> (Sender<T>, Receiver<T>) {
+    do_unbounded(EventRecorder::new_memory_recorder(), rr_mode)
+}
+
+fn do_unbounded<T>(event_recorder: EventRecorder, rr_mode: RRMode) -> (Sender<T>, Receiver<T>) {
     *ENV_LOGGER;
 
     let (sender, receiver) = crossbeam_channel::unbounded();
@@ -373,10 +381,10 @@ pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
             metadata: recordlog::RecordMetadata::new(
                 type_name.to_string(),
                 ChannelLabel::Unbounded,
-                *RECORD_MODE,
+                rr_mode,
                 id.clone(),
             ),
-            event_recorder: EventRecorder::new_file_recorder(),
+            event_recorder,
         },
         Receiver::new(ChannelVariant::Unbounded(receiver), id),
     )
@@ -423,12 +431,58 @@ pub fn never<T>() -> Receiver<T> {
     }
 }
 
-// #[cfg(test)]
-// mod test {
-//     use crate::crossbeam_channel::unbounded;
-//
-//     #[test]
-//     fn crossbeam() {
-//         let (s1, s2) = unbounded::<i32>();
-//     }
-// }
+
+#[cfg(test)]
+mod test {
+    use crate::crossbeam_channel::{unbounded, unbounded_in_memory};
+    use crate::{IN_MEMORY_RECORDER, init_tivo_thread_root, RRMode};
+    use std::collections::HashMap;
+    use crate::detthread::{DetThreadId, get_det_id};
+    use crate::recordlog::{RecordEntry, RecordedEvent, ChannelLabel};
+    use crate::rr::DetChannelId;
+
+    #[test]
+    fn crossbeam() {
+        init_tivo_thread_root();
+        let (_s, _r) = unbounded::<i32>();
+    }
+
+    #[test]
+    fn test_rr() {
+        init_tivo_thread_root();
+
+        let (s, r) = unbounded_in_memory::<i32>(RRMode::Record);
+        let dti = get_det_id();
+        s.send(1).unwrap();
+        s.send(3).unwrap();
+        s.send(5).unwrap();
+        r.recv().unwrap();
+        r.recv().unwrap();
+        r.recv().unwrap();
+
+        let channel_id = DetChannelId {
+            det_thread_id: dti.clone(),
+            channel_id: 1,
+        };
+        let re1 = RecordEntry::new(dti.clone(),
+                         1,
+                         RecordedEvent::Sender,
+                         ChannelLabel::Unbounded,
+                         channel_id,
+                         "".to_string());
+
+        let re2 = RecordEntry { event_id: 2, .. re1.clone()};
+        let re3 = RecordEntry { event_id: 3, .. re1.clone()};
+
+        let mut reference: HashMap<(DetThreadId, u32), RecordEntry> = HashMap::new();
+        reference.insert((dti.clone(), 1), re1);
+        reference.insert((dti.clone(), 2), re2);
+        reference.insert((dti.clone(), 3), re3);
+
+        IN_MEMORY_RECORDER.with(|imr|{
+           let hm = imr.borrow();
+            assert_eq!(reference, *hm);
+
+        });
+    }
+}
