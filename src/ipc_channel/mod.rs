@@ -31,14 +31,15 @@ pub mod ipc {
     use crate::desync::DesyncMode;
     use crate::detthread::DetThreadId;
     use crate::error::{DesyncError, RecvErrorRR};
-    use crate::recordlog::{self, ChannelLabel, IpcSelectEvent};
+    use crate::recordlog::{self, ChannelVariant, IpcSelectEvent};
     use crate::recordlog::{IpcErrorVariants, RecordMetadata, RecordedEvent};
     use crate::rr::RecvRecordReplay;
     use crate::rr::SendRecordReplay;
     use crate::rr::{self, DetChannelId};
     use crate::{desync, detthread, log_rr, EventRecorder};
-    use crate::{get_generic_name, BufferedValues, DetMessage, RRMode, DESYNC_MODE, RECORD_MODE};
+    use crate::{BufferedValues, DetMessage, RRMode, DESYNC_MODE, RECORD_MODE};
     use std::io::ErrorKind;
+    use std::any::type_name;
 
     type OsIpcReceiverResults = (Vec<u8>, Vec<OsOpaqueIpcChannel>, Vec<OsIpcSharedMemory>);
 
@@ -48,6 +49,7 @@ pub mod ipc {
         buffer: RefCell<BufferedValues<T>>,
         pub(crate) metadata: recordlog::RecordMetadata,
         event_recorder: EventRecorder,
+        mode: RRMode,
     }
 
     impl<T> IpcReceiver<T> {
@@ -55,17 +57,18 @@ pub mod ipc {
             receiver: ripc::IpcReceiver<DetMessage<T>>,
             id: DetChannelId,
             recorder: EventRecorder,
+            mode: RRMode,
         ) -> IpcReceiver<T> {
             IpcReceiver {
                 receiver,
                 buffer: RefCell::new(HashMap::new()),
                 metadata: recordlog::RecordMetadata {
-                    type_name: get_generic_name::<T>().to_string(),
-                    flavor: ChannelLabel::Ipc,
-                    mode: *RECORD_MODE,
+                    type_name: type_name::<T>().to_string(),
+                    channel_variant: ChannelVariant::Ipc,
                     id,
                 },
                 event_recorder: recorder,
+                mode,
             }
         }
 
@@ -228,16 +231,14 @@ pub mod ipc {
 
         pub fn recv(&self) -> Result<T, ipc_channel::ipc::IpcError> {
             let f = || self.receiver.recv();
-            let recorder = self.event_recorder.get_recordable();
-            self.record_replay_with(&self.metadata, f, recorder)
+            self.record_replay(f)
                 .unwrap_or_else(|e| desync::handle_desync(e, f, self.get_buffer()))
         }
 
         pub fn try_recv(&self) -> Result<T, TryRecvError> {
             let f = || self.receiver.try_recv();
-            let recorder = self.event_recorder.get_recordable();
-            let res = self.record_replay_with(&self.metadata, f, recorder);
-            res.unwrap_or_else(|e| desync::handle_desync(e, f, self.get_buffer()))
+             self.record_replay(f)
+                .unwrap_or_else(|e| desync::handle_desync(e, f, self.get_buffer()))
         }
 
         pub fn into_opaque(self) -> OpaqueIpcReceiver {
@@ -247,6 +248,11 @@ pub mod ipc {
                 metadata,
                 closed: false,
             }
+        }
+
+        fn record_replay<E>(&self, g: impl FnOnce() -> Result<DetMessage<T>, E>) -> desync::Result<Result<T, E>>
+            where Self: RecvRecordReplay<T, E> {
+            self.record_replay_with(&self.mode, &self.metadata, g, self.event_recorder.get_recordable())
         }
 
         pub(crate) fn get_buffer(&self) -> RefMut<BufferedValues<T>> {
@@ -259,6 +265,7 @@ pub mod ipc {
         sender: ripc::IpcSender<DetMessage<T>>,
         pub(crate) metadata: recordlog::RecordMetadata,
         recorder: EventRecorder,
+        mode: RRMode,
     }
 
     /// We derive our own instance of Clone to avoid the Constraint that T: Clone
@@ -271,6 +278,7 @@ pub mod ipc {
                 sender: self.sender.clone(),
                 metadata: self.metadata.clone(),
                 recorder: self.recorder.clone(),
+                mode: *RECORD_MODE,
             }
         }
     }
@@ -304,17 +312,19 @@ pub mod ipc {
             sender: ripc::IpcSender<(DetThreadId, T)>,
             metadata: RecordMetadata,
             recorder: EventRecorder,
+            mode: RRMode,
         ) -> IpcSender<T> {
             IpcSender {
                 sender,
                 metadata,
                 recorder,
+                mode
             }
         }
         /// Send our det thread id along with the actual message for both
         /// record and replay.
         pub fn send(&self, data: T) -> Result<(), ipc_channel::Error> {
-            match self.record_replay_send(data, &self.metadata, self.recorder.get_recordable()) {
+            match self.record_replay_send(data, &self.mode, &self.metadata, self.recorder.get_recordable()) {
                 Ok(v) => v,
                 Err((error, msg)) => {
                     log_rr!(Warn, "IpcSend::Desynchronization detected: {:?}", error);
@@ -348,19 +358,19 @@ pub mod ipc {
         pub fn connect(name: String) -> Result<IpcSender<T>, std::io::Error> {
             let id = DetChannelId::new();
 
-            let type_name = get_generic_name::<T>();
+            let type_name = type_name::<T>().to_string();
             log_rr!(Info, "Sender connected created: {:?} {:?}", id, type_name);
 
             let metadata = recordlog::RecordMetadata {
                 type_name: type_name.to_string(),
-                flavor: ChannelLabel::Ipc,
-                mode: *RECORD_MODE,
+                channel_variant: ChannelVariant::Ipc,
                 id,
             };
             ipc_channel::ipc::IpcSender::connect(name).map(|sender| IpcSender {
                 sender,
                 metadata,
                 recorder: todo!(),
+                mode: todo!(),
             })
         }
     }
@@ -375,38 +385,37 @@ pub mod ipc {
 
     /// Allows us to test IPC channels using a inmemory recorder.
     pub(crate) fn in_memory_channel<T>(
-        rr_mode: RRMode,
+        mode: RRMode,
     ) -> Result<(IpcSender<T>, IpcReceiver<T>), std::io::Error>
     where
         T: for<'de> Deserialize<'de> + Serialize,
     {
-        spawn_ipc_channels(EventRecorder::new_memory_recorder(), rr_mode)
+        spawn_ipc_channels(EventRecorder::new_memory_recorder(), mode)
     }
 
     /// Encapsulate all logic for properly setting up channels. Called by channel() function. Useful
     /// for testing channels directly.
     fn spawn_ipc_channels<T>(
         recorder: EventRecorder,
-        record_mode: RRMode,
+        mode: RRMode,
     ) -> Result<(IpcSender<T>, IpcReceiver<T>), std::io::Error>
     where
         T: for<'de> Deserialize<'de> + Serialize,
     {
         let (sender, receiver) = ripc::channel()?;
         let id = DetChannelId::new();
-        let type_name = get_generic_name::<T>();
+        let type_name = type_name::<T>().to_string();
         log_rr!(Info, "IPC channel created: {:?} {:?}", id, type_name);
 
         let metadata = recordlog::RecordMetadata {
             type_name: type_name.to_string(),
-            flavor: ChannelLabel::Ipc,
-            mode: record_mode,
+            channel_variant: ChannelVariant::Ipc,
             id: id.clone(),
         };
 
         Ok((
-            IpcSender::new(sender, metadata, recorder.clone()),
-            IpcReceiver::new(receiver, id, recorder),
+            IpcSender::new(sender, metadata, recorder.clone(), mode),
+            IpcReceiver::new(receiver, id, recorder, mode),
         ))
     }
 
@@ -637,8 +646,7 @@ pub mod ipc {
                         event,
                         &recordlog::RecordMetadata::new(
                             "IpcSelect".to_string(),
-                            ChannelLabel::IpcSelect,
-                            self.mode,
+                            ChannelVariant::IpcSelect,
                             DetChannelId::fake(),
                         ),
                     );
@@ -863,7 +871,7 @@ pub mod ipc {
                 return Err((DesyncError::Desynchronized, receiver));
             }
             let metadata = receiver.metadata.clone();
-            let flavor = metadata.flavor;
+            let flavor = metadata.channel_variant;
             let id = &metadata.id;
             log_rr!(Debug, "IpcSelect::rr_add<{:?}>()", id);
 

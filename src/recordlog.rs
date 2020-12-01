@@ -41,13 +41,13 @@ pub enum IpcSelectEvent {
 /// their channel-type to ensure it is what we expect between record and replay. Just one more
 /// sanity check for robustness.
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Copy, Clone)]
-pub enum ChannelLabel {
+pub enum ChannelVariant {
     MpscBounded,
     MpscUnbounded,
-    Unbounded,
-    After,
-    Bounded,
-    Never,
+    CbUnbounded,
+    CbAfter,
+    CbBounded,
+    CbNever,
     None,
     Ipc,
     IpcSelect,
@@ -67,7 +67,10 @@ pub struct RecordEntry {
     pub event_id: u32,
     /// Actual event and all information needed to replay this event.
     pub event: RecordedEvent,
-    pub channel_flavor: ChannelLabel,
+
+    // TODO Replace this field with RecordMetadata type.
+    pub channel_variant: ChannelVariant,
+    /// Identifier of the channel who this entry was recorded for.
     pub chan_id: DetChannelId,
     pub type_name: String,
 }
@@ -77,7 +80,7 @@ impl RecordEntry {
         current_thread: DetThreadId,
         event_id: u32,
         event: RecordedEvent,
-        channel_flavor: ChannelLabel,
+        channel_variant: ChannelVariant,
         chan_id: DetChannelId,
         type_name: String,
     ) -> RecordEntry {
@@ -85,7 +88,7 @@ impl RecordEntry {
             current_thread,
             event_id,
             event,
-            channel_flavor,
+            channel_variant,
             chan_id,
             type_name,
         }
@@ -185,12 +188,12 @@ lazy_static::lazy_static! {
 
     /// Global map holding all indexes from the record phase. Lazily initialized on replay
     /// mode.
-    pub static ref RECORDED_INDICES: HashMap<(DetThreadId, u32), (RecordedEvent, ChannelLabel, DetChannelId)> =
+    pub static ref RECORDED_INDICES: HashMap<(DetThreadId, u32), (RecordedEvent, ChannelVariant, DetChannelId)> =
      init_recorded_indices();
 }
 
 fn init_recorded_indices(
-) -> HashMap<(DetThreadId, u32), (RecordedEvent, ChannelLabel, DetChannelId)> {
+) -> HashMap<(DetThreadId, u32), (RecordedEvent, ChannelVariant, DetChannelId)> {
     crate::log_rr!(Debug, "Initializing RECORDED_INDICES lazy static.");
     use std::io::BufReader;
 
@@ -207,7 +210,7 @@ fn init_recorded_indices(
         let key = (curr_thread, entry.event_id);
         let value = (
             entry.event.clone(),
-            entry.channel_flavor,
+            entry.channel_variant,
             entry.chan_id.clone(),
         );
 
@@ -217,7 +220,7 @@ fn init_recorded_indices(
                 "Corrupted log file. Adding key-value ({:?}, {:?}) but previous value \
                         {:?} already exited. Hashmap entries should be unique.",
                 (entry.current_thread, entry.event_id),
-                (entry.event, entry.channel_flavor, entry.chan_id),
+                (entry.event, entry.channel_variant, entry.chan_id),
                 prev
             );
         }
@@ -246,7 +249,7 @@ pub(crate) trait Recordable {
             current_thread: current_thread.clone(),
             event_id,
             event,
-            channel_flavor: metadata.flavor,
+            channel_variant: metadata.channel_variant,
             chan_id: metadata.id.clone(),
             type_name: metadata.type_name.clone(),
         };
@@ -272,9 +275,9 @@ pub(crate) trait Recordable {
         &self,
         our_thread: DetThreadId,
         event_id: EventId,
-        curr_flavor: Option<&ChannelLabel>,
+        curr_flavor: Option<&ChannelVariant>,
         curr_id: Option<&DetChannelId>,
-    ) -> desync::Result<(RecordedEvent, ChannelLabel, DetChannelId)> {
+    ) -> desync::Result<(RecordedEvent, ChannelVariant, DetChannelId)> {
         let key = (our_thread, event_id);
 
         match self.get_record_entry(&key) {
@@ -287,9 +290,9 @@ pub(crate) trait Recordable {
                 );
 
                 if let Some(curr_flavor) = curr_flavor {
-                    if record_entry.channel_flavor != *curr_flavor {
+                    if record_entry.channel_variant != *curr_flavor {
                         return Err(error::DesyncError::ChannelVariantMismatch(
-                            record_entry.channel_flavor,
+                            record_entry.channel_variant,
                             *curr_flavor,
                         ));
                     }
@@ -304,7 +307,7 @@ pub(crate) trait Recordable {
                 }
                 Ok((
                     record_entry.event,
-                    record_entry.channel_flavor,
+                    record_entry.channel_variant,
                     record_entry.chan_id,
                 ))
             }
@@ -318,7 +321,7 @@ pub(crate) trait Recordable {
         &self,
         our_thread: DetThreadId,
         event_id: EventId,
-        curr_flavor: &ChannelLabel,
+        curr_flavor: &ChannelVariant,
         curr_id: &DetChannelId,
     ) -> desync::Result<RecordedEvent> {
         self.get_log_entry_do(our_thread, event_id, Some(curr_flavor), Some(curr_id))
@@ -340,7 +343,7 @@ pub(crate) trait Recordable {
         &self,
         our_thread: DetThreadId,
         event_id: EventId,
-    ) -> desync::Result<(RecordedEvent, ChannelLabel, DetChannelId)> {
+    ) -> desync::Result<(RecordedEvent, ChannelVariant, DetChannelId)> {
         self.get_log_entry_do(our_thread, event_id, None, None)
     }
 }
@@ -353,8 +356,7 @@ pub type EventId = u32;
 pub(crate) struct RecordMetadata {
     /// Owned for EZ serialize, deserialize.
     pub(crate) type_name: String,
-    pub(crate) flavor: ChannelLabel,
-    pub(crate) mode: RRMode,
+    pub(crate) channel_variant: ChannelVariant,
     /// Unique identifier assigned to every channel. Deterministic and unique even with
     /// racing thread creation. DetThreadId refers to the original creator of this thread.
     /// The partner Receiver and Sender shares the same id.
@@ -364,14 +366,12 @@ pub(crate) struct RecordMetadata {
 impl RecordMetadata {
     pub fn new(
         type_name: String,
-        flavor: ChannelLabel,
-        mode: RRMode,
+        flavor: ChannelVariant,
         id: DetChannelId,
     ) -> RecordMetadata {
         RecordMetadata {
             type_name,
-            flavor,
-            mode,
+            channel_variant: flavor,
             id,
         }
     }

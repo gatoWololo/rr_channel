@@ -7,18 +7,20 @@ use std::time::Duration;
 
 use crate::detthread::{self, DetThreadId};
 use crate::error::{DesyncError, RecvErrorRR};
-use crate::recordlog::{self, ChannelLabel, RecordedEvent};
+use crate::recordlog::{self, ChannelVariant, RecordedEvent};
 use crate::rr::RecvRecordReplay;
 use crate::rr::SendRecordReplay;
 use crate::rr::{self, DetChannelId};
-use crate::{desync, EventRecorder};
-use crate::{get_generic_name, BufferedValues, DESYNC_MODE, ENV_LOGGER, RECORD_MODE};
+use crate::{desync, EventRecorder, RRMode};
+use crate::{BufferedValues, DESYNC_MODE, ENV_LOGGER, RECORD_MODE};
 use crate::{DesyncMode, DetMessage};
+use std::any::type_name;
 
 #[derive(Debug)]
 pub struct Sender<T> {
     pub(crate) sender: RealSender<T>,
     pub(crate) metadata: recordlog::RecordMetadata,
+    mode: RRMode,
     event_recorder: EventRecorder,
 }
 
@@ -100,6 +102,7 @@ pub struct Receiver<T> {
     /// instead of &mut self (not sure why). So we need internal mutability.
     pub(crate) buffer: RefCell<BufferedValues<T>>,
     event_recorder: EventRecorder,
+    mode: RRMode,
 }
 
 impl<T> Receiver<T> {
@@ -109,12 +112,12 @@ impl<T> Receiver<T> {
             buffer: RefCell::new(HashMap::new()),
             receiver: real_receiver,
             metadata: recordlog::RecordMetadata {
-                type_name: get_generic_name::<T>().to_string(),
-                flavor,
-                mode: *RECORD_MODE,
+                type_name: type_name::<T>().to_string(),
+                channel_variant: flavor,
                 id,
             },
             event_recorder: EventRecorder::new_file_recorder(),
+            mode: *RECORD_MODE,
         }
     }
 
@@ -136,35 +139,33 @@ impl<T> Receiver<T> {
     }
 
     pub fn recv(&self) -> Result<T, mpsc::RecvError> {
-        self.record_replay_with(
-            self.metadata(),
-            || self.receiver.recv(),
-            self.event_recorder.get_recordable(),
-        )
-        .unwrap_or_else(|e| desync::handle_desync(e, || self.receiver.recv(), self.get_buffer()))
+        let f = || self.receiver.recv();
+        self.record_replay(f)
+            .unwrap_or_else(|e| desync::handle_desync(e, f, self.get_buffer()))
     }
 
     pub fn try_recv(&self) -> Result<T, mpsc::TryRecvError> {
         let f = || self.receiver.try_recv();
-        self.record_replay_with(self.metadata(), f, self.event_recorder.get_recordable())
+        self.record_replay(f)
             .unwrap_or_else(|e| desync::handle_desync(e, f, self.get_buffer()))
     }
 
     pub fn recv_timeout(&self, timeout: Duration) -> Result<T, mpsc::RecvTimeoutError> {
         let f = || self.receiver.recv_timeout(timeout);
-        self.record_replay_with(self.metadata(), f, self.event_recorder.get_recordable())
+        self.record_replay(f)
             .unwrap_or_else(|e| desync::handle_desync(e, f, self.get_buffer()))
     }
 
-    pub(crate) fn metadata(&self) -> &recordlog::RecordMetadata {
-        &self.metadata
+    fn record_replay<E>(&self, g: impl FnOnce() -> Result<DetMessage<T>, E>) -> desync::Result<Result<T, E>>
+        where Self: RecvRecordReplay<T, E> {
+        self.record_replay_with(&self.mode, &self.metadata, g, self.event_recorder.get_recordable())
     }
 
     /// Get label by looking at the type of channel.
-    fn get_marker(receiver: &RealReceiver<T>) -> ChannelLabel {
+    fn get_marker(receiver: &RealReceiver<T>) -> ChannelVariant {
         match receiver {
-            RealReceiver::Unbounded(_) => ChannelLabel::MpscUnbounded,
-            RealReceiver::Bounded(_) => ChannelLabel::MpscBounded,
+            RealReceiver::Unbounded(_) => ChannelVariant::MpscUnbounded,
+            RealReceiver::Bounded(_) => ChannelVariant::MpscBounded,
         }
     }
 
@@ -210,7 +211,7 @@ impl<T> Sender<T> {
     /// Send our det thread id along with the actual message for both
     /// record and replay.
     pub fn send(&self, msg: T) -> Result<(), mpsc::SendError<T>> {
-        match self.record_replay_send(msg, &self.metadata, self.event_recorder.get_recordable()) {
+        match self.record_replay_send(msg, &self.mode, &self.metadata, self.event_recorder.get_recordable()) {
             Ok(v) => v,
             // send() should never hang. No need to check if NoEntryLog.
             Err((error, msg)) => {
@@ -244,7 +245,7 @@ where
     fn clone(&self) -> Self {
         // following implementation for crossbeam, we do not support MPSC for bounded channels as the blocking semantics are
         // more complicated to implement.
-        if self.metadata.flavor == ChannelLabel::MpscBounded {
+        if self.metadata.channel_variant == ChannelVariant::MpscBounded {
             crate::log_rr!(
                 Warn,
                 "MPSC for bounded channels not supported. Blocking semantics \
@@ -254,6 +255,7 @@ where
         Sender {
             sender: self.sender.clone(),
             metadata: self.metadata.clone(),
+            mode: self.mode.clone(),
             event_recorder: EventRecorder::new_file_recorder(),
         }
     }
@@ -326,8 +328,8 @@ pub fn sync_channel<T>(bound: usize) -> (Sender<T>, Receiver<T>) {
 
     let (sender, receiver) = mpsc::sync_channel(bound);
     let mode = *RECORD_MODE;
-    let channel_type = ChannelLabel::MpscBounded;
-    let type_name = get_generic_name::<T>();
+    let channel_type = ChannelVariant::MpscBounded;
+    let type_name = type_name::<T>().to_string();
     let id = DetChannelId::new();
 
     crate::log_rr!(
@@ -341,10 +343,10 @@ pub fn sync_channel<T>(bound: usize) -> (Sender<T>, Receiver<T>) {
             sender: RealSender::Bounded(sender),
             metadata: recordlog::RecordMetadata {
                 type_name: type_name.to_string(),
-                flavor: channel_type,
-                mode,
+                channel_variant: channel_type,
                 id: id.clone(),
             },
+            mode,
             event_recorder: EventRecorder::new_file_recorder(),
         },
         Receiver::new(RealReceiver::Bounded(receiver), id),
@@ -356,8 +358,8 @@ pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
 
     let (sender, receiver) = mpsc::channel();
     let mode = *RECORD_MODE;
-    let channel_type = ChannelLabel::MpscUnbounded;
-    let type_name = get_generic_name::<T>();
+    let channel_type = ChannelVariant::MpscUnbounded;
+    let type_name = type_name::<T>().to_string();
     let id = DetChannelId::new();
 
     crate::log_rr!(
@@ -372,10 +374,10 @@ pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
             sender: RealSender::Unbounded(sender),
             metadata: recordlog::RecordMetadata {
                 type_name: type_name.to_string(),
-                flavor: channel_type,
-                mode,
+                channel_variant: channel_type,
                 id: id.clone(),
             },
+            mode,
             event_recorder: EventRecorder::new_file_recorder(),
         },
         Receiver::new(RealReceiver::Unbounded(receiver), id),

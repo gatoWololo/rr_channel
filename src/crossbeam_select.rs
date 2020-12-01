@@ -2,10 +2,10 @@ use ::crossbeam_channel as rc; // rc = real_channel
 use log::Level::*;
 use std::collections::HashMap;
 
-use crate::crossbeam_channel::{self, ChannelVariant};
+use crate::crossbeam_channel::{self, ChannelKind};
 use crate::detthread::DetThreadId;
 use crate::error::DesyncError;
-use crate::recordlog::{self, ChannelLabel, RecordedEvent, SelectEvent};
+use crate::recordlog::{self, ChannelVariant, RecordedEvent, SelectEvent};
 use crate::rr::DetChannelId;
 use crate::{desync, detthread, EventRecorder};
 use crate::{DesyncMode, DetMessage, RRMode};
@@ -75,9 +75,9 @@ impl<'a> Select<'a> {
         // We still register all receivers with selector, even on replay. As on
         // desynchonization we will have to select on the real selector.
         let index = match &r.receiver {
-            ChannelVariant::After(r) => self.selector.recv(&r),
-            ChannelVariant::Bounded(r) | ChannelVariant::Unbounded(r) => self.selector.recv(&r),
-            ChannelVariant::Never(r) => self.selector.recv(&r),
+            ChannelKind::After(r) => self.selector.recv(&r),
+            ChannelKind::Bounded(r) | ChannelKind::Unbounded(r) => self.selector.recv(&r),
+            ChannelKind::Never(r) => self.selector.recv(&r),
         };
         if self.receivers.insert(index, r).is_some() {
             panic!(
@@ -141,8 +141,7 @@ impl<'a> Select<'a> {
                 let select_index = self.selector.ready();
                 let metadata = &recordlog::RecordMetadata::new(
                     "ready".to_string(),
-                    ChannelLabel::None,
-                    self.mode,
+                    ChannelVariant::None,
                     DetChannelId::fake(), // We fake it here. We never check this value anyways.
                 );
 
@@ -258,7 +257,7 @@ impl<'a> Default for Select<'a> {
     }
 }
 pub enum SelectedOperation<'a> {
-    Replay(SelectEvent, ChannelLabel, DetChannelId),
+    Replay(SelectEvent, ChannelVariant, DetChannelId),
     /// Desynchonization happened and receiver still has buffered entries. Index
     /// of receiver has been returned to user.
     DesyncBufferEntry(usize),
@@ -394,10 +393,10 @@ impl<'a> SelectedOperation<'a> {
             SelectedOperation::Replay(event, flavor, chan_id) => {
                 // We cannot check these in `Select::select()` since we do not have
                 // the receiver until this function to compare values against.
-                if flavor != r.metadata.flavor {
+                if flavor != r.metadata.channel_variant {
                     return Err(DesyncError::ChannelVariantMismatch(
                         flavor,
-                        r.metadata.flavor,
+                        r.metadata.channel_variant,
                     ));
                 }
                 if chan_id != r.metadata.id {
@@ -431,12 +430,12 @@ impl<'a> SelectedOperation<'a> {
         r: &crossbeam_channel::Receiver<T>,
     ) -> Result<DetMessage<T>, rc::RecvError> {
         match &r.receiver {
-            ChannelVariant::After(receiver) => selected
+            ChannelKind::After(receiver) => selected
                 .recv(receiver)
                 .map(|msg| (detthread::get_det_id(), msg)),
-            ChannelVariant::Bounded(receiver)
-            | ChannelVariant::Unbounded(receiver)
-            | ChannelVariant::Never(receiver) => selected.recv(receiver),
+            ChannelKind::Bounded(receiver)
+            | ChannelKind::Unbounded(receiver)
+            | ChannelKind::Never(receiver) => selected.recv(receiver),
         }
     }
 }

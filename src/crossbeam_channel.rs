@@ -8,9 +8,9 @@ use std::time::{Duration, Instant};
 use crate::desync::{self, DesyncMode};
 use crate::detthread::{self, DetThreadId};
 use crate::error::DesyncError;
-use crate::recordlog::{self, ChannelLabel, RecordedEvent};
+use crate::recordlog::{self, ChannelVariant, RecordedEvent};
 use crate::rr::{self, DetChannelId, SendRecordReplay};
-use crate::{get_generic_name, EventRecorder, ENV_LOGGER, RECORD_MODE, RRMode};
+use crate::{ EventRecorder, ENV_LOGGER, RECORD_MODE, RRMode};
 use crate::{BufferedValues, DESYNC_MODE};
 
 pub use crate::crossbeam_select::{Select, SelectedOperation};
@@ -20,10 +20,12 @@ pub use crate::{select, DetMessage};
 pub use rc::RecvTimeoutError;
 pub use rc::TryRecvError;
 pub use rc::{RecvError, SendError};
+use std::any::type_name;
 
 pub struct Sender<T> {
     pub(crate) sender: crossbeam_channel::Sender<DetMessage<T>>,
     pub(crate) metadata: recordlog::RecordMetadata,
+    mode: RRMode,
     /// Reference to logger of record/replay events. Uses dynamic trait to support multiple
     /// logging implementations.
     event_recorder: EventRecorder,
@@ -35,7 +37,7 @@ impl<T> Clone for Sender<T> {
     fn clone(&self) -> Self {
         // We do not support MPSC for bounded channels as the blocking semantics are
         // more complicated to implement.
-        if self.metadata.flavor == ChannelLabel::Bounded {
+        if self.metadata.channel_variant == ChannelVariant::CbBounded {
             panic!(
                 "MPSC for bounded channels not supported. Blocking semantics \
                      of bounded channels will not be preserved!"
@@ -43,6 +45,7 @@ impl<T> Clone for Sender<T> {
         }
         Sender {
             sender: self.sender.clone(),
+            mode: self.mode.clone(),
             metadata: self.metadata.clone(),
             event_recorder: self.event_recorder.clone(),
         }
@@ -70,7 +73,7 @@ impl<T> SendRecordReplay<T, rc::SendError<T>> for Sender<T> {
 impl<T> Sender<T> {
     /// crossbeam_channel::send implementation.
     pub fn send(&self, msg: T) -> Result<(), rc::SendError<T>> {
-        match self.record_replay_send(msg, &self.metadata, self.event_recorder.get_recordable()) {
+        match self.record_replay_send(msg, &self.mode, &self.metadata, self.event_recorder.get_recordable()) {
             Ok(v) => v,
             // send() should never hang. No need to check if NoEntryLog.
             Err((error, msg)) => {
@@ -103,41 +106,41 @@ impl<T> Sender<T> {
 /// Holds different channels types which may have slightly different types. This is how
 /// crossbeam wraps different types of channels all under the `Receiver<T>` type. So we
 /// must do the same to match their API.
-pub(crate) enum ChannelVariant<T> {
+pub(crate) enum ChannelKind<T> {
     After(crossbeam_channel::Receiver<T>),
     Bounded(crossbeam_channel::Receiver<DetMessage<T>>),
     Never(crossbeam_channel::Receiver<DetMessage<T>>),
     Unbounded(crossbeam_channel::Receiver<DetMessage<T>>),
 }
 
-impl<T> ChannelVariant<T> {
+impl<T> ChannelKind<T> {
     pub(crate) fn try_recv(&self) -> Result<DetMessage<T>, rc::TryRecvError> {
         match self {
-            ChannelVariant::After(receiver) => {
+            ChannelKind::After(receiver) => {
                 match receiver.try_recv() {
                     Ok(msg) => Ok((detthread::get_det_id(), msg)),
                     // TODO: Why is this unreachable?
                     e => e.map(|_| unreachable!()),
                 }
             }
-            ChannelVariant::Bounded(receiver)
-            | ChannelVariant::Unbounded(receiver)
-            | ChannelVariant::Never(receiver) => receiver.try_recv(),
+            ChannelKind::Bounded(receiver)
+            | ChannelKind::Unbounded(receiver)
+            | ChannelKind::Never(receiver) => receiver.try_recv(),
         }
     }
 
     pub(crate) fn recv(&self) -> Result<DetMessage<T>, rc::RecvError> {
         match self {
-            ChannelVariant::After(receiver) => {
+            ChannelKind::After(receiver) => {
                 match receiver.recv() {
                     Ok(msg) => Ok((detthread::get_det_id(), msg)),
                     // TODO: Why is this unreachable?
                     e => e.map(|_| unreachable!()),
                 }
             }
-            ChannelVariant::Bounded(receiver)
-            | ChannelVariant::Unbounded(receiver)
-            | ChannelVariant::Never(receiver) => receiver.recv(),
+            ChannelKind::Bounded(receiver)
+            | ChannelKind::Unbounded(receiver)
+            | ChannelKind::Never(receiver) => receiver.recv(),
         }
     }
 
@@ -146,13 +149,13 @@ impl<T> ChannelVariant<T> {
         duration: Duration,
     ) -> Result<DetMessage<T>, rc::RecvTimeoutError> {
         match self {
-            ChannelVariant::After(receiver) => match receiver.recv_timeout(duration) {
+            ChannelKind::After(receiver) => match receiver.recv_timeout(duration) {
                 Ok(msg) => Ok((detthread::get_det_id(), msg)),
                 e => e.map(|_| unreachable!()),
             },
-            ChannelVariant::Bounded(receiver)
-            | ChannelVariant::Never(receiver)
-            | ChannelVariant::Unbounded(receiver) => receiver.recv_timeout(duration),
+            ChannelKind::Bounded(receiver)
+            | ChannelKind::Never(receiver)
+            | ChannelKind::Unbounded(receiver) => receiver.recv_timeout(duration),
         }
     }
 }
@@ -162,9 +165,10 @@ pub struct Receiver<T> {
     /// Crossbeam works with inmutable references, so we wrap in a RefCell
     /// to hide our mutation.
     pub(crate) buffer: RefCell<BufferedValues<T>>,
-    pub(crate) receiver: ChannelVariant<T>,
+    pub(crate) receiver: ChannelKind<T>,
     pub(crate) metadata: recordlog::RecordMetadata,
-    logger: EventRecorder,
+    recorder: EventRecorder,
+    mode: RRMode,
 }
 
 /// Captures template for: impl RecvRR<_, _> for Receiver<T>
@@ -223,31 +227,34 @@ impl<T> Receiver<T> {
     // Implementation of crossbeam_channel public API.
 
     pub fn recv(&self) -> Result<T, rc::RecvError> {
-        let receiver = || self.receiver.recv();
+        let f = || self.receiver.recv();
 
-        self.record_replay_with(self.metadata(), receiver, self.logger.get_recordable())
-            .unwrap_or_else(|e| desync::handle_desync(e, receiver, self.get_buffer()))
+        self.record_replay(f)
+            .unwrap_or_else(|e| desync::handle_desync(e, f, self.get_buffer()))
     }
 
     pub fn try_recv(&self) -> Result<T, rc::TryRecvError> {
         let f = || self.receiver.try_recv();
-
-        self.record_replay_with(self.metadata(), f, self.logger.get_recordable())
+        self.record_replay(f)
             .unwrap_or_else(|e| desync::handle_desync(e, f, self.get_buffer()))
     }
 
     pub fn recv_timeout(&self, timeout: Duration) -> Result<T, rc::RecvTimeoutError> {
         let f = || self.receiver.recv_timeout(timeout);
 
-        self.record_replay_with(self.metadata(), f, self.logger.get_recordable())
+        // self.record_replay_with(&self.mode, &self.metadata, f, self.logger.get_recordable())
+        self.record_replay(f)
             .unwrap_or_else(|e| desync::handle_desync(e, f, self.get_buffer()))
     }
 
-    // Internal methods necessary for record and replaying.
+    fn record_replay<E>(&self, g: impl FnOnce() -> Result<DetMessage<T>, E>) -> desync::Result<Result<T, E>>
+        where Self: RecvRecordReplay<T, E> {
+        self.record_replay_with(&self.mode, &self.metadata, g, self.recorder.get_recordable())
+    }
 
-    /// Receives messages from `sender` buffering all other messages which it gets.
-    /// Times out after 1 second (this value can easily be changed).
-    /// Used by crossbeam select function, and implementing ReceiverRR for this type.
+    /// Receives messages from `sender` buffering all other messages which it gets. Times out after
+    /// 1 second (this value can easily be changed). Used by crossbeam select function, and
+    /// implementing ReceiverRR for this type.
     pub(crate) fn replay_recv(&self, sender: &DetThreadId) -> desync::Result<T> {
         rr::recv_expected_message(
             &sender,
@@ -261,18 +268,18 @@ impl<T> Receiver<T> {
         )
     }
 
-    pub(crate) fn new(real_receiver: ChannelVariant<T>, id: DetChannelId) -> Receiver<T> {
+    pub(crate) fn new(real_receiver: ChannelKind<T>, id: DetChannelId) -> Receiver<T> {
         let flavor = Receiver::get_marker(&real_receiver);
         Receiver {
             buffer: RefCell::new(HashMap::new()),
             receiver: real_receiver,
             metadata: recordlog::RecordMetadata::new(
-                get_generic_name::<T>().to_string(),
+                type_name::<T>().to_string(),
                 flavor,
-                *RECORD_MODE,
                 id,
             ),
-            logger: EventRecorder::new_file_recorder(),
+            recorder: EventRecorder::new_file_recorder(),
+            mode: *RECORD_MODE
         }
     }
 
@@ -284,12 +291,12 @@ impl<T> Receiver<T> {
         &self.metadata
     }
 
-    pub(crate) fn get_marker(receiver: &ChannelVariant<T>) -> ChannelLabel {
+    pub(crate) fn get_marker(receiver: &ChannelKind<T>) -> ChannelVariant {
         match receiver {
-            ChannelVariant::Unbounded(_) => ChannelLabel::Unbounded,
-            ChannelVariant::After(_) => ChannelLabel::After,
-            ChannelVariant::Bounded(_) => ChannelLabel::Bounded,
-            ChannelVariant::Never(_) => ChannelLabel::Never,
+            ChannelKind::Unbounded(_) => ChannelVariant::CbUnbounded,
+            ChannelKind::After(_) => ChannelVariant::CbAfter,
+            ChannelKind::Bounded(_) => ChannelVariant::CbBounded,
+            ChannelKind::Never(_) => ChannelVariant::CbNever,
         }
     }
 
@@ -353,7 +360,7 @@ pub fn after(duration: Duration) -> Receiver<Instant> {
     let id = DetChannelId::new();
     crate::log_rr!(Info, "After channel receiver created: {:?}", id);
     Receiver::new(
-        ChannelVariant::After(crossbeam_channel::after(duration)),
+        ChannelKind::After(crossbeam_channel::after(duration)),
         id,
     )
 }
@@ -367,11 +374,11 @@ fn unbounded_in_memory<T>(rr_mode: RRMode) -> (Sender<T>, Receiver<T>) {
     do_unbounded(EventRecorder::new_memory_recorder(), rr_mode)
 }
 
-fn do_unbounded<T>(event_recorder: EventRecorder, rr_mode: RRMode) -> (Sender<T>, Receiver<T>) {
+fn do_unbounded<T>(event_recorder: EventRecorder, mode: RRMode) -> (Sender<T>, Receiver<T>) {
     *ENV_LOGGER;
 
     let (sender, receiver) = crossbeam_channel::unbounded();
-    let type_name = get_generic_name::<T>();
+    let type_name = type_name::<T>().to_string();
     let id = rr::DetChannelId::new();
 
     crate::log_rr!(Info, "Unbounded channel created: {:?} {:?}", id, type_name);
@@ -380,13 +387,13 @@ fn do_unbounded<T>(event_recorder: EventRecorder, rr_mode: RRMode) -> (Sender<T>
             sender,
             metadata: recordlog::RecordMetadata::new(
                 type_name.to_string(),
-                ChannelLabel::Unbounded,
-                rr_mode,
+                ChannelVariant::CbUnbounded,
                 id.clone(),
             ),
             event_recorder,
+            mode
         },
-        Receiver::new(ChannelVariant::Unbounded(receiver), id),
+        Receiver::new(ChannelKind::Unbounded(receiver), id),
     )
 }
 
@@ -395,7 +402,7 @@ pub fn bounded<T>(cap: usize) -> (Sender<T>, Receiver<T>) {
 
     let (sender, receiver) = crossbeam_channel::bounded(cap);
     let id = DetChannelId::new();
-    let type_name = get_generic_name::<T>();
+    let type_name = type_name::<T>().to_string();
 
     crate::log_rr!(Info, "Bounded channel created: {:?} {:?}", id, type_name);
     (
@@ -403,31 +410,31 @@ pub fn bounded<T>(cap: usize) -> (Sender<T>, Receiver<T>) {
             sender,
             metadata: recordlog::RecordMetadata::new(
                 type_name.to_string(),
-                ChannelLabel::Bounded,
-                *RECORD_MODE,
+                ChannelVariant::CbBounded,
                 id.clone(),
             ),
+            mode: *RECORD_MODE,
             event_recorder: EventRecorder::new_file_recorder(),
         },
-        Receiver::new(ChannelVariant::Bounded(receiver), id),
+        Receiver::new(ChannelKind::Bounded(receiver), id),
     )
 }
 
 pub fn never<T>() -> Receiver<T> {
     *ENV_LOGGER;
-    let type_name = get_generic_name::<T>().to_string();
+    let type_name = type_name::<T>().to_string();
     let id = DetChannelId::new();
 
     Receiver {
         buffer: RefCell::new(HashMap::new()),
-        receiver: ChannelVariant::Never(crossbeam_channel::never()),
+        receiver: ChannelKind::Never(crossbeam_channel::never()),
         metadata: recordlog::RecordMetadata {
             type_name,
-            flavor: ChannelLabel::Never,
-            mode: *RECORD_MODE,
+            channel_variant: ChannelVariant::CbNever,
             id,
         },
-        logger: EventRecorder::new_file_recorder(),
+        recorder: EventRecorder::new_file_recorder(),
+        mode: *RECORD_MODE,
     }
 }
 
@@ -438,7 +445,7 @@ mod test {
     use crate::{IN_MEMORY_RECORDER, init_tivo_thread_root, RRMode};
     use std::collections::HashMap;
     use crate::detthread::{DetThreadId, get_det_id};
-    use crate::recordlog::{RecordEntry, RecordedEvent, ChannelLabel};
+    use crate::recordlog::{RecordEntry, RecordedEvent, ChannelVariant};
     use crate::rr::DetChannelId;
 
     #[test]
@@ -447,10 +454,12 @@ mod test {
         let (_s, _r) = unbounded::<i32>();
     }
 
+    ///
     #[test]
-    fn test_rr() {
+    fn test_record() {
         init_tivo_thread_root();
 
+        // Program which we'll compare logger for.
         let (s, r) = unbounded_in_memory::<i32>(RRMode::Record);
         let dti = get_det_id();
         s.send(1).unwrap();
@@ -460,16 +469,15 @@ mod test {
         r.recv().unwrap();
         r.recv().unwrap();
 
-        let channel_id = DetChannelId {
-            det_thread_id: dti.clone(),
-            channel_id: 1,
-        };
+        let channel_id = DetChannelId::from_raw(dti.clone(), 1);
+
+        let tn = std::any::type_name::<i32>();
         let re1 = RecordEntry::new(dti.clone(),
-                         1,
-                         RecordedEvent::Sender,
-                         ChannelLabel::Unbounded,
-                         channel_id,
-                         "".to_string());
+                                   1,
+                                   RecordedEvent::Sender,
+                                   ChannelVariant::CbUnbounded,
+                                   channel_id,
+                                   tn.to_string());
 
         let re2 = RecordEntry { event_id: 2, .. re1.clone()};
         let re3 = RecordEntry { event_id: 3, .. re1.clone()};
@@ -482,7 +490,6 @@ mod test {
         IN_MEMORY_RECORDER.with(|imr|{
            let hm = imr.borrow();
             assert_eq!(reference, *hm);
-
         });
     }
 }

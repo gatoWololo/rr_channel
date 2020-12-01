@@ -248,11 +248,3 @@ fn event_name() -> String {
         format!("{:?}", (detthread::get_det_id(), detthread::get_event_id()))
     }
 }
-
-/// Prints name of type based on <T> by reaching into compiler intrinsics. NIGHTLY ONLY.
-fn get_generic_name<T>() -> &'static str {
-    ""
-    // "nightly-only"
-    // Nightly only TODO: Set as optional Cargo.toml attribute?
-    // unsafe { std::intrinsics::type_name::<T>() };
-}

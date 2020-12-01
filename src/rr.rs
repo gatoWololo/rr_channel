@@ -33,6 +33,13 @@ impl DetChannelId {
         }
     }
 
+    pub(crate) fn from_raw(dti: DetThreadId, channel_id: u32) -> DetChannelId {
+        DetChannelId {
+            det_thread_id: dti,
+            channel_id
+        }
+    }
+
     /// Sometimes we need a DetChannelId to fulfill an API, but it won't be used at all.
     /// Create a fake one here. Later we might get rid of this an use a Option instead...
     pub fn fake() -> DetChannelId {
@@ -44,16 +51,12 @@ impl DetChannelId {
     }
 }
 
-impl Default for DetChannelId {
-    fn default() -> DetChannelId {
-        DetChannelId::new()
-    }
-}
 pub(crate) trait RecvRecordReplay<T, E> {
     /// Given a channel receiver function as a closure (e.g. || receiver.try_receive())
     /// handle the recording or replaying logic for this message arrival.
     fn record_replay_with(
         &self,
+        mode: &RRMode,
         metadata: &recordlog::RecordMetadata,
         recv_message: impl FnOnce() -> Result<DetMessage<T>, E>,
         // Ideally recordlog should be a mutable reference because, it is. But this clashes with the
@@ -63,7 +66,7 @@ pub(crate) trait RecvRecordReplay<T, E> {
     ) -> desync::Result<Result<T, E>> {
         // crate::log_rr!(Debug, "Receiver<{:?}>::{}", metadata.id, function_name);
 
-        match metadata.mode {
+        match mode {
             RRMode::Record => {
                 let (recorded, result) = match recv_message() {
                     Ok((sender_thread, msg)) => (Self::recorded_event_succ(sender_thread), Ok(msg)),
@@ -78,7 +81,7 @@ pub(crate) trait RecvRecordReplay<T, E> {
                 let entry = recordlog.get_log_entry_with(
                     det_id,
                     detthread::get_event_id(),
-                    &metadata.flavor,
+                    &metadata.channel_variant,
                     &metadata.id,
                 );
 
@@ -132,6 +135,7 @@ pub(crate) trait SendRecordReplay<T, E> {
     fn record_replay_send(
         &self,
         msg: T,
+        mode: &RRMode,
         metadata: &recordlog::RecordMetadata,
         recordlog: &dyn Recordable,
         // TODO Use tracing to give context instead of passing unused parameter.
@@ -154,7 +158,7 @@ pub(crate) trait SendRecordReplay<T, E> {
         //     metadata.type_name
         // );
 
-        match metadata.mode {
+        match mode {
             RRMode::Record => {
                 // Note: send() must come before rr::log() as it internally increments
                 // event_id.
@@ -170,7 +174,7 @@ pub(crate) trait SendRecordReplay<T, E> {
                 match recordlog.get_log_entry_with(
                     det_id,
                     detthread::get_event_id(),
-                    &metadata.flavor,
+                    &metadata.channel_variant,
                     &metadata.id,
                 ) {
                     // Special case for NoEntryInLog. Hang this thread forever.
