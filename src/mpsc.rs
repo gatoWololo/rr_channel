@@ -156,9 +156,19 @@ impl<T> Receiver<T> {
             .unwrap_or_else(|e| desync::handle_desync(e, f, self.get_buffer()))
     }
 
-    fn record_replay<E>(&self, g: impl FnOnce() -> Result<DetMessage<T>, E>) -> desync::Result<Result<T, E>>
-        where Self: RecvRecordReplay<T, E> {
-        self.record_replay_with(&self.mode, &self.metadata, g, self.event_recorder.get_recordable())
+    fn record_replay<E>(
+        &self,
+        g: impl FnOnce() -> Result<DetMessage<T>, E>,
+    ) -> desync::Result<Result<T, E>>
+    where
+        Self: RecvRecordReplay<T, E>,
+    {
+        self.record_replay_with(
+            &self.mode,
+            &self.metadata,
+            g,
+            self.event_recorder.get_recordable(),
+        )
     }
 
     /// Get label by looking at the type of channel.
@@ -211,7 +221,12 @@ impl<T> Sender<T> {
     /// Send our det thread id along with the actual message for both
     /// record and replay.
     pub fn send(&self, msg: T) -> Result<(), mpsc::SendError<T>> {
-        match self.record_replay_send(msg, &self.mode, &self.metadata, self.event_recorder.get_recordable()) {
+        match self.record_replay_send(
+            msg,
+            &self.mode,
+            &self.metadata,
+            self.event_recorder.get_recordable(),
+        ) {
             Ok(v) => v,
             // send() should never hang. No need to check if NoEntryLog.
             Err((error, msg)) => {

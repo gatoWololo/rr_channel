@@ -10,8 +10,8 @@ use crate::detthread::{self, DetThreadId};
 use crate::error::DesyncError;
 use crate::recordlog::{self, ChannelVariant, RecordedEvent};
 use crate::rr::{self, DetChannelId, SendRecordReplay};
-use crate::{ EventRecorder, ENV_LOGGER, RECORD_MODE, RRMode};
 use crate::{BufferedValues, DESYNC_MODE};
+use crate::{EventRecorder, RRMode, ENV_LOGGER, RECORD_MODE};
 
 pub use crate::crossbeam_select::{Select, SelectedOperation};
 use crate::rr::RecvRecordReplay;
@@ -73,7 +73,12 @@ impl<T> SendRecordReplay<T, rc::SendError<T>> for Sender<T> {
 impl<T> Sender<T> {
     /// crossbeam_channel::send implementation.
     pub fn send(&self, msg: T) -> Result<(), rc::SendError<T>> {
-        match self.record_replay_send(msg, &self.mode, &self.metadata, self.event_recorder.get_recordable()) {
+        match self.record_replay_send(
+            msg,
+            &self.mode,
+            &self.metadata,
+            self.event_recorder.get_recordable(),
+        ) {
             Ok(v) => v,
             // send() should never hang. No need to check if NoEntryLog.
             Err((error, msg)) => {
@@ -247,9 +252,19 @@ impl<T> Receiver<T> {
             .unwrap_or_else(|e| desync::handle_desync(e, f, self.get_buffer()))
     }
 
-    fn record_replay<E>(&self, g: impl FnOnce() -> Result<DetMessage<T>, E>) -> desync::Result<Result<T, E>>
-        where Self: RecvRecordReplay<T, E> {
-        self.record_replay_with(&self.mode, &self.metadata, g, self.recorder.get_recordable())
+    fn record_replay<E>(
+        &self,
+        g: impl FnOnce() -> Result<DetMessage<T>, E>,
+    ) -> desync::Result<Result<T, E>>
+    where
+        Self: RecvRecordReplay<T, E>,
+    {
+        self.record_replay_with(
+            &self.mode,
+            &self.metadata,
+            g,
+            self.recorder.get_recordable(),
+        )
     }
 
     /// Receives messages from `sender` buffering all other messages which it gets. Times out after
@@ -273,13 +288,9 @@ impl<T> Receiver<T> {
         Receiver {
             buffer: RefCell::new(HashMap::new()),
             receiver: real_receiver,
-            metadata: recordlog::RecordMetadata::new(
-                type_name::<T>().to_string(),
-                flavor,
-                id,
-            ),
+            metadata: recordlog::RecordMetadata::new(type_name::<T>().to_string(), flavor, id),
             recorder: EventRecorder::new_file_recorder(),
-            mode: *RECORD_MODE
+            mode: *RECORD_MODE,
         }
     }
 
@@ -359,10 +370,7 @@ pub fn after(duration: Duration) -> Receiver<Instant> {
 
     let id = DetChannelId::new();
     crate::log_rr!(Info, "After channel receiver created: {:?}", id);
-    Receiver::new(
-        ChannelKind::After(crossbeam_channel::after(duration)),
-        id,
-    )
+    Receiver::new(ChannelKind::After(crossbeam_channel::after(duration)), id)
 }
 
 // Chanel constructors provided by crossbeam API:
@@ -391,7 +399,7 @@ fn do_unbounded<T>(event_recorder: EventRecorder, mode: RRMode) -> (Sender<T>, R
                 id.clone(),
             ),
             event_recorder,
-            mode
+            mode,
         },
         Receiver::new(ChannelKind::Unbounded(receiver), id),
     )
@@ -438,15 +446,14 @@ pub fn never<T>() -> Receiver<T> {
     }
 }
 
-
 #[cfg(test)]
 mod test {
     use crate::crossbeam_channel::{unbounded, unbounded_in_memory};
-    use crate::{IN_MEMORY_RECORDER, init_tivo_thread_root, RRMode};
-    use std::collections::HashMap;
-    use crate::detthread::{DetThreadId, get_det_id};
-    use crate::recordlog::{RecordEntry, RecordedEvent, ChannelVariant};
+    use crate::detthread::{get_det_id, DetThreadId};
+    use crate::recordlog::{ChannelVariant, RecordEntry, RecordedEvent};
     use crate::rr::DetChannelId;
+    use crate::{init_tivo_thread_root, RRMode, IN_MEMORY_RECORDER};
+    use std::collections::HashMap;
 
     #[test]
     fn crossbeam() {
@@ -472,23 +479,31 @@ mod test {
         let channel_id = DetChannelId::from_raw(dti.clone(), 1);
 
         let tn = std::any::type_name::<i32>();
-        let re1 = RecordEntry::new(dti.clone(),
-                                   1,
-                                   RecordedEvent::Sender,
-                                   ChannelVariant::CbUnbounded,
-                                   channel_id,
-                                   tn.to_string());
+        let re1 = RecordEntry::new(
+            dti.clone(),
+            1,
+            RecordedEvent::Sender,
+            ChannelVariant::CbUnbounded,
+            channel_id,
+            tn.to_string(),
+        );
 
-        let re2 = RecordEntry { event_id: 2, .. re1.clone()};
-        let re3 = RecordEntry { event_id: 3, .. re1.clone()};
+        let re2 = RecordEntry {
+            event_id: 2,
+            ..re1.clone()
+        };
+        let re3 = RecordEntry {
+            event_id: 3,
+            ..re1.clone()
+        };
 
         let mut reference: HashMap<(DetThreadId, u32), RecordEntry> = HashMap::new();
         reference.insert((dti.clone(), 1), re1);
         reference.insert((dti.clone(), 2), re2);
         reference.insert((dti.clone(), 3), re3);
 
-        IN_MEMORY_RECORDER.with(|imr|{
-           let hm = imr.borrow();
+        IN_MEMORY_RECORDER.with(|imr| {
+            let hm = imr.borrow();
             assert_eq!(reference, *hm);
         });
     }

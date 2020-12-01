@@ -38,8 +38,8 @@ pub mod ipc {
     use crate::rr::{self, DetChannelId};
     use crate::{desync, detthread, log_rr, EventRecorder};
     use crate::{BufferedValues, DetMessage, RRMode, DESYNC_MODE, RECORD_MODE};
-    use std::io::ErrorKind;
     use std::any::type_name;
+    use std::io::ErrorKind;
 
     type OsIpcReceiverResults = (Vec<u8>, Vec<OsOpaqueIpcChannel>, Vec<OsIpcSharedMemory>);
 
@@ -237,7 +237,7 @@ pub mod ipc {
 
         pub fn try_recv(&self) -> Result<T, TryRecvError> {
             let f = || self.receiver.try_recv();
-             self.record_replay(f)
+            self.record_replay(f)
                 .unwrap_or_else(|e| desync::handle_desync(e, f, self.get_buffer()))
         }
 
@@ -250,9 +250,19 @@ pub mod ipc {
             }
         }
 
-        fn record_replay<E>(&self, g: impl FnOnce() -> Result<DetMessage<T>, E>) -> desync::Result<Result<T, E>>
-            where Self: RecvRecordReplay<T, E> {
-            self.record_replay_with(&self.mode, &self.metadata, g, self.event_recorder.get_recordable())
+        fn record_replay<E>(
+            &self,
+            g: impl FnOnce() -> Result<DetMessage<T>, E>,
+        ) -> desync::Result<Result<T, E>>
+        where
+            Self: RecvRecordReplay<T, E>,
+        {
+            self.record_replay_with(
+                &self.mode,
+                &self.metadata,
+                g,
+                self.event_recorder.get_recordable(),
+            )
         }
 
         pub(crate) fn get_buffer(&self) -> RefMut<BufferedValues<T>> {
@@ -318,13 +328,18 @@ pub mod ipc {
                 sender,
                 metadata,
                 recorder,
-                mode
+                mode,
             }
         }
         /// Send our det thread id along with the actual message for both
         /// record and replay.
         pub fn send(&self, data: T) -> Result<(), ipc_channel::Error> {
-            match self.record_replay_send(data, &self.mode, &self.metadata, self.recorder.get_recordable()) {
+            match self.record_replay_send(
+                data,
+                &self.mode,
+                &self.metadata,
+                self.recorder.get_recordable(),
+            ) {
                 Ok(v) => v,
                 Err((error, msg)) => {
                     log_rr!(Warn, "IpcSend::Desynchronization detected: {:?}", error);

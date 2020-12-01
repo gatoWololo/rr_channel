@@ -364,11 +364,7 @@ pub(crate) struct RecordMetadata {
 }
 
 impl RecordMetadata {
-    pub fn new(
-        type_name: String,
-        flavor: ChannelVariant,
-        id: DetChannelId,
-    ) -> RecordMetadata {
+    pub fn new(type_name: String, flavor: ChannelVariant, id: DetChannelId) -> RecordMetadata {
         RecordMetadata {
             type_name,
             channel_variant: flavor,
