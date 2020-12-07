@@ -125,7 +125,6 @@ impl<'a> Select<'a> {
                 DesyncMode::Panic => panic!("Desynchronization detected: {:?}", error),
                 DesyncMode::KeepGoing => {
                     desync::mark_program_as_desynced();
-                    detthread::inc_event_id();
                     self.selector.ready()
                 }
             }
@@ -147,20 +146,16 @@ impl<'a> Select<'a> {
 
                 self.event_recorder
                     .get_recordable()
-                    .write_event_to_record(RecordedEvent::SelectReady { select_index }, metadata);
+                    .write_event_to_record(RecordedEvent::CbSelectReady { select_index }, metadata);
                 Ok(select_index)
             }
             RRMode::Replay => {
-                let event = self
-                    .event_recorder
-                    .get_recordable()
-                    .get_log_entry(detthread::get_det_id(), detthread::get_event_id())?;
-                detthread::inc_event_id();
+                let event = self.event_recorder.get_recordable().get_log_entry()?;
 
                 match event {
-                    RecordedEvent::SelectReady { select_index } => Ok(select_index),
+                    RecordedEvent::CbSelectReady { select_index } => Ok(select_index),
                     event => {
-                        let dummy = RecordedEvent::SelectReady { select_index: 0 };
+                        let dummy = RecordedEvent::CbSelectReady { select_index: 0 };
                         Err(DesyncError::EventMismatch(event, dummy))
                     }
                 }
@@ -187,14 +182,11 @@ impl<'a> Select<'a> {
                 // Query our log to see what index was selected!() during the replay phase.
                 // ChannelVariant type not check on Select::select() but on Select::recv()
 
-                let entry = self
-                    .event_recorder
-                    .get_recordable()
-                    .get_log_entry_ret(detthread::get_det_id(), detthread::get_event_id());
+                let entry = self.event_recorder.get_recordable().get_log_entry_ret();
 
                 // Here we put this thread to sleep if the entry is missing.
                 // On record, the thread never returned from blocking...
-                if let Err(e @ DesyncError::NoEntryInLog(_, _)) = entry {
+                if let Err(e @ DesyncError::NoEntryInLog) = entry {
                     crate::log_rr!(Info, "Saw {:?}. Putting thread to sleep.", e);
                     desync::sleep_until_desync();
                     // Thread woke back up... desynced!
@@ -203,7 +195,7 @@ impl<'a> Select<'a> {
 
                 let (event, flavor, chan_id) = entry?;
                 match event {
-                    RecordedEvent::Select(event) => {
+                    RecordedEvent::CbSelect(event) => {
                         // Verify the receiver has the entry. We check now, since
                         // once we return the SelectedOperation it is too late if it turns
                         // out the message is not there => "unrecoverable error".
@@ -242,7 +234,10 @@ impl<'a> Select<'a> {
                             sender_thread: DetThreadId::new(),
                             selected_index: (0 - 1) as usize,
                         };
-                        Err(DesyncError::EventMismatch(e, RecordedEvent::Select(dummy)))
+                        Err(DesyncError::EventMismatch(
+                            e,
+                            RecordedEvent::CbSelect(dummy),
+                        ))
                     }
                 }
             }
@@ -356,14 +351,12 @@ impl<'a> SelectedOperation<'a> {
         match self {
             SelectedOperation::DesyncBufferEntry(_) => {
                 crate::log_rr!(Debug, "SelectedOperation::DesyncBufferEntry");
-                detthread::inc_event_id();
                 Ok(Ok(r.get_buffered_value().expect(
                     "Expected buffer value to be there. This is a bug.",
                 )))
             }
             SelectedOperation::Desync(selected) => {
                 crate::log_rr!(Debug, "SelectedOperation::Desync");
-                detthread::inc_event_id();
                 Ok(SelectedOperation::do_recv(selected, r).map(|(_, msg)| msg))
             }
             // Record value we get from direct use of Select API recv().
@@ -384,7 +377,7 @@ impl<'a> SelectedOperation<'a> {
                 };
                 recorder
                     .get_recordable()
-                    .write_event_to_record(RecordedEvent::Select(select_event), &r.metadata);
+                    .write_event_to_record(RecordedEvent::CbSelect(select_event), &r.metadata);
                 Ok(msg)
             }
             // We do not use the select API at all on replays. Wait for correct
@@ -413,8 +406,6 @@ impl<'a> SelectedOperation<'a> {
                         Err(rc::RecvError)
                     }
                 };
-
-                detthread::inc_event_id();
                 Ok(retval)
             }
             SelectedOperation::NoRR(selected) => {

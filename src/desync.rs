@@ -7,8 +7,8 @@
 //! we have desynchronized.
 use crate::error::DesyncError;
 use crate::BufferedValues;
+use crate::DetMessage;
 use crate::DESYNC_MODE;
-use crate::{detthread, DetMessage};
 use log::Level::{Debug, Warn};
 use std::cell::RefMut;
 use std::sync::atomic::AtomicBool;
@@ -92,7 +92,6 @@ pub(crate) fn handle_desync<T, E>(
     match *DESYNC_MODE {
         DesyncMode::KeepGoing => {
             mark_program_as_desynced();
-            detthread::inc_event_id();
 
             // Try using entry from buffer before recv()-ing directly from receiver. We don't
             // care who the expected sender was. Any value will do.

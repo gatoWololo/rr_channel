@@ -7,8 +7,6 @@ use std::thread;
 use std::thread::JoinHandle;
 pub use std::thread::{current, panicking, park, park_timeout, sleep, yield_now};
 
-use crate::recordlog;
-
 pub fn get_det_id() -> DetThreadId {
     DET_ID.with(|di| di.borrow().clone())
 }
@@ -29,26 +27,11 @@ pub fn set_temp_det_id(new_id: DetThreadId) {
     });
 }
 
-pub fn get_event_id() -> recordlog::EventId {
-    EVENT_ID.with(|id| *id.borrow())
-}
-
-/// TODO I want to express that this is mutable somehow.
-pub fn inc_event_id() {
-    EVENT_ID.with(|id| {
-        *id.borrow_mut() += 1;
-        crate::log_rr!(Debug, "Incremented TLS event_id: {:?}", *id.borrow());
-    });
-}
-
 pub fn get_and_inc_channel_id() -> u32 {
     CHANNEL_ID.with(|ci| ci.fetch_add(1, Ordering::SeqCst))
 }
 
 thread_local! {
-    /// Unique ID to keep track of events. Not strictly necessary but extremely
-    /// helpful for debugging and sanity.
-    static EVENT_ID: RefCell<u32> = RefCell::new(1);
     static DET_ID_SPAWNER: RefCell<DetIdSpawner> = RefCell::new(DetIdSpawner::starting());
     /// Unique threadID assigned at thread spawn to each thread.
     pub static DET_ID: RefCell<DetThreadId> = RefCell::new(DetThreadId::new());
@@ -115,7 +98,6 @@ where
             // Initalizes DET_ID_SPAWNER based on the value just set for DET_ID.
         });
 
-        // EVENT_ID will be initalized to zero on first usage.
         f()
     })
 }

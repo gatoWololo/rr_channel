@@ -14,14 +14,18 @@ pub mod mpsc;
 mod recordlog;
 mod rr;
 
+use std::cell::RefCell;
+use std::io::Write;
+
 use desync::DesyncMode;
 use detthread::DetThreadId;
 use log::Level::*;
 use std::env::var;
 use std::env::VarError;
 
+use crate::detthread::get_det_id;
 pub use crate::detthread::init_tivo_thread_root;
-use crate::recordlog::{EventId, RecordEntry, Recordable};
+use crate::recordlog::{RecordEntry, Recordable};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum RRMode {
@@ -86,15 +90,15 @@ lazy_static! {
                     "panic" => DesyncMode::Panic,
                     "keep_going" => DesyncMode::KeepGoing,
                     e => {
-                        warn!("Unkown DESYNC mode: {}. Assuming keep_going.", e);
-                        DesyncMode::KeepGoing
+                        warn!("Unkown DESYNC mode: {}. Assuming panic.", e);
+                        DesyncMode::Panic
                     }
                 }
             }
-            Err(VarError::NotPresent) => DesyncMode::KeepGoing,
+            Err(VarError::NotPresent) => DesyncMode::Panic,
             Err(e @ VarError::NotUnicode(_)) => {
-                warn!("DESYNC_MODE value is not valid unicode: {}, assuming keep_going.", e);
-                DesyncMode::KeepGoing
+                warn!("DESYNC_MODE value is not valid unicode: {}, assuming panic.", e);
+                DesyncMode::Panic
             }
         };
 
@@ -123,13 +127,79 @@ lazy_static! {
     };
 }
 
-use crate::recordlog::RECORDED_INDICES;
-use std::cell::RefCell;
-use std::io::Write;
+/// Record and Replay using a memory-based recorder. Useful for unit testing channel methods.
+// These derives are needed because IpcReceiver requires Ser/Des... sigh...
+#[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq)]
+pub struct InMemoryRecorder {
+    queue: VecDeque<RecordEntry>,
+    /// The ID is the same for all events as this is a thread local record.
+    dti: DetThreadId,
+}
+
+impl InMemoryRecorder {
+    fn new(dti: DetThreadId) -> InMemoryRecorder {
+        InMemoryRecorder {
+            dti,
+            queue: VecDeque::new(),
+        }
+    }
+
+    fn add_entry(&mut self, r: RecordEntry) {
+        self.queue.push_back(r);
+    }
+
+    fn get_next_entry(&mut self) -> Option<RecordEntry> {
+        self.queue.pop_front()
+    }
+}
 
 thread_local! {
     /// Our in-memory recorder
-    static IN_MEMORY_RECORDER: RefCell<HashMap<(DetThreadId, u32), RecordEntry>> = RefCell::new(HashMap::new());
+    static IN_MEMORY_RECORDER: ThreadLocalImr = ThreadLocalImr::new();
+}
+
+// Thread local in memory recorder. We have this "extra" struct for this because we want to
+// implement the Recordable Trait for this type but not for InMemoryRecorder (since that would
+// required all InMemoryRecorders to carry a refcell to get the types to match. We only want the
+// refcell at the top level.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ThreadLocalImr {
+    imr: RefCell<InMemoryRecorder>,
+}
+
+impl ThreadLocalImr {
+    fn new() -> ThreadLocalImr {
+        ThreadLocalImr {
+            imr: RefCell::new(InMemoryRecorder::new(get_det_id())),
+        }
+    }
+
+    fn add_entry(&self, r: RecordEntry) {
+        self.imr.borrow_mut().add_entry(r);
+    }
+}
+
+impl Recordable for ThreadLocalImr {
+    fn write_entry(&self, entry: RecordEntry) {
+        IN_MEMORY_RECORDER.with(|imr| {
+            imr.add_entry(entry);
+        })
+    }
+
+    fn next_record_entry(&self) -> Option<RecordEntry> {
+        IN_MEMORY_RECORDER.with(|imr| imr.imr.borrow_mut().get_next_entry())
+    }
+}
+
+/// Returns a cloned copy of the TLS in memory recorder as it looked when this function was called.
+pub(crate) fn get_tl_memory_recorder() -> InMemoryRecorder {
+    IN_MEMORY_RECORDER.with(|imr| imr.imr.borrow().clone())
+}
+
+pub(crate) fn set_tl_memory_recorder(imr: InMemoryRecorder) {
+    IN_MEMORY_RECORDER.with(|tlimr| {
+        *tlimr.imr.borrow_mut() = imr;
+    })
 }
 
 /// This is a mess... Originally I wanted to use a Box<dyn Recordable> and all channel receiver
@@ -138,7 +208,7 @@ thread_local! {
 /// ...
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum EventRecorder {
-    Memory(InMemoryRecorder),
+    Memory(ThreadLocalImr),
     File(FileRecorder),
 }
 
@@ -151,8 +221,9 @@ impl EventRecorder {
         }
     }
 
+    // Note: Accesses global state!
     fn new_memory_recorder() -> EventRecorder {
-        EventRecorder::Memory(InMemoryRecorder::new())
+        EventRecorder::Memory(ThreadLocalImr::new())
     }
 
     fn new_file_recorder() -> EventRecorder {
@@ -171,7 +242,7 @@ impl FileRecorder {
 
 // TODO Test.
 impl Recordable for FileRecorder {
-    fn write_entry(&self, _id: DetThreadId, _event: EventId, entry: RecordEntry) {
+    fn write_entry(&self, entry: RecordEntry) {
         use crate::recordlog::WRITE_LOG_FILE;
 
         let serialized = serde_json::to_string(&entry).unwrap();
@@ -183,39 +254,17 @@ impl Recordable for FileRecorder {
             .expect("Unable to write to log file.");
     }
 
-    fn get_record_entry(&self, key: &(DetThreadId, u32)) -> Option<RecordEntry> {
-        let (re, cl, dci) = RECORDED_INDICES.get(key)?.clone();
-        Some(RecordEntry::new(
-            key.0.clone(),
-            key.1,
-            re,
-            cl,
-            dci,
-            "TODO".to_string(),
-        ))
-    }
-}
-
-/// Record and Replay using a memory-based recorder. Useful for unit testing channel methods.
-// These derives are needed because IpcReceiver requires Ser/Des... sigh...
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct InMemoryRecorder {}
-
-impl Recordable for InMemoryRecorder {
-    fn write_entry(&self, id: DetThreadId, event: EventId, entry: RecordEntry) {
-        IN_MEMORY_RECORDER.with(|ml| {
-            ml.borrow_mut().insert((id, event), entry);
-        })
-    }
-
-    fn get_record_entry(&self, key: &(DetThreadId, u32)) -> Option<RecordEntry> {
-        IN_MEMORY_RECORDER.with(|ml| ml.borrow().get(key).cloned())
-    }
-}
-
-impl InMemoryRecorder {
-    fn new() -> InMemoryRecorder {
-        InMemoryRecorder {}
+    fn next_record_entry(&self) -> Option<RecordEntry> {
+        todo!()
+        // let (re, cl, dci) = RECORDED_INDICES.get(key)?.clone();
+        // Some(RecordEntry::new(
+        //     key.0.clone(),
+        //     key.1,
+        //     re,
+        //     cl,
+        //     dci,
+        //     "TODO".to_string(),
+        // ))
     }
 }
 
@@ -228,10 +277,9 @@ macro_rules! log_rr {
         let thread = std::thread::current();
         let formatted_msg = format!($msg, $($arg),*);
         log::log!($log_level,
-             "thread: {:?} | event# {:?} {} | {}",
+             "thread: {:?} | event# {:?} | {}",
              thread.name(),
              crate::event_name(),
-             crate::detthread::get_event_id(),
              formatted_msg);
     };
     ($log_level:expr, $msg:expr) => {
@@ -245,6 +293,6 @@ fn event_name() -> String {
     if crate::detthread::in_forwarding() {
         "ROUTER".to_string()
     } else {
-        format!("{:?}", (detthread::get_det_id(), detthread::get_event_id()))
+        format!("{:?}", detthread::get_det_id())
     }
 }

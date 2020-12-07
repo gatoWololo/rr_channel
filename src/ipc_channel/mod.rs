@@ -120,11 +120,9 @@ pub mod ipc {
             match event {
                 RecordedEvent::IpcRecvSucc { sender_thread } => {
                     let retval = self.replay_recv(&sender_thread)?;
-                    detthread::inc_event_id();
                     Ok(Ok(retval))
                 }
                 RecordedEvent::IpcError(variant) => {
-                    detthread::inc_event_id();
                     Ok(Err(<IpcReceiver<T>>::recorded_event_to_ipc_error(variant)))
                 }
                 e => {
@@ -164,19 +162,12 @@ pub mod ipc {
             match event {
                 RecordedEvent::IpcRecvSucc { sender_thread } => {
                     let retval = self.replay_recv(&sender_thread)?;
-                    detthread::inc_event_id();
                     Ok(Ok(retval))
                 }
-                RecordedEvent::IpcTryRecvIpcError(variant) => {
-                    detthread::inc_event_id();
-                    Ok(Err(TryRecvError::IpcError(
-                        <IpcReceiver<T>>::recorded_event_to_ipc_error(variant),
-                    )))
-                }
-                RecordedEvent::IpcTryRecvErrorEmpty => {
-                    detthread::inc_event_id();
-                    Ok(Err(TryRecvError::Empty))
-                }
+                RecordedEvent::IpcTryRecvIpcError(variant) => Ok(Err(TryRecvError::IpcError(
+                    <IpcReceiver<T>>::recorded_event_to_ipc_error(variant),
+                ))),
+                RecordedEvent::IpcTryRecvErrorEmpty => Ok(Err(TryRecvError::Empty)),
                 e => {
                     let mock_event = RecordedEvent::IpcRecvSucc {
                         // TODO: Is there a better value to show this is a mock DTI?
@@ -355,10 +346,6 @@ pub mod ipc {
                                 detthread::get_forwarding_id(),
                                 msg,
                             );
-                            // TODO Ugh, right now we have to carefully increase the event_id
-                            // in the "right places" or nothing will work correctly.
-                            // How can we make this a lot less error prone?
-                            detthread::inc_event_id();
                             res
                         }
                     }
@@ -377,7 +364,7 @@ pub mod ipc {
             log_rr!(Info, "Sender connected created: {:?} {:?}", id, type_name);
 
             let metadata = recordlog::RecordMetadata {
-                type_name: type_name.to_string(),
+                type_name,
                 channel_variant: ChannelVariant::Ipc,
                 id,
             };
@@ -423,7 +410,7 @@ pub mod ipc {
         log_rr!(Info, "IPC channel created: {:?} {:?}", id, type_name);
 
         let metadata = recordlog::RecordMetadata {
-            type_name: type_name.to_string(),
+            type_name,
             channel_variant: ChannelVariant::Ipc,
             id: id.clone(),
         };
@@ -567,7 +554,6 @@ pub mod ipc {
                     DesyncMode::KeepGoing => {
                         desync::mark_program_as_desynced();
                         self.move_receivers_to_set();
-                        detthread::inc_event_id();
                         self.receiver_set.add_opaque(receiver.opaque_receiver)
                     }
                 }
@@ -596,12 +582,10 @@ pub mod ipc {
                         match self.get_buffered_entries() {
                             None => {
                                 log_rr!(Debug, "Doing direct do_select()");
-                                detthread::inc_event_id();
                                 self.do_select()
                             }
                             Some(be) => {
                                 log_rr!(Debug, "Using buffered entries.");
-                                detthread::inc_event_id();
                                 Ok(be)
                             }
                         }
@@ -674,16 +658,11 @@ pub mod ipc {
                     if self.desynced {
                         return Err((DesyncError::Desynchronized, vec![]));
                     }
-                    let det_id = detthread::get_det_id();
-
                     // Here we put this thread to sleep if the entry is missing.
                     // On record, the thread never returned from blocking...
-                    let entry = self
-                        .recorder
-                        .get_recordable()
-                        .get_log_entry(det_id, detthread::get_event_id());
+                    let entry = self.recorder.get_recordable().get_log_entry();
 
-                    if let Err(e @ DesyncError::NoEntryInLog(_, _)) = entry {
+                    if let Err(e @ DesyncError::NoEntryInLog) = entry {
                         log_rr!(Info, "Saw {:?}. Putting thread to sleep.", e);
                         desync::sleep_until_desync();
                         // Thread woke back up... desynced!
@@ -706,7 +685,6 @@ pub mod ipc {
                                 }
                             }
 
-                            detthread::inc_event_id();
                             Ok(Ok(events))
                         }
                         event => {
@@ -913,14 +891,11 @@ pub mod ipc {
                 // to our own `receivers` hashmap where the index returned here is
                 // the key.
                 RRMode::Replay => {
-                    let det_id = detthread::get_det_id();
-
-                    let log_entry = match self.recorder.get_recordable().get_log_entry_with(
-                        det_id,
-                        detthread::get_event_id(),
-                        &flavor,
-                        &id,
-                    ) {
+                    let log_entry = match self
+                        .recorder
+                        .get_recordable()
+                        .get_log_entry_with(&flavor, &id)
+                    {
                         Err(e) => return Err((e, receiver)),
                         Ok(v) => v,
                     };
@@ -939,7 +914,6 @@ pub mod ipc {
                             self.receivers.insert(self.index, receiver);
 
                             self.index += 1;
-                            detthread::inc_event_id();
                             Ok(Ok(index))
                         }
                         event => {
@@ -1061,7 +1035,7 @@ mod test {
     #[test]
     fn ipc_channel() {
         init_tivo_thread_root();
-        let (s, r) = ipc::in_memory_channel::<i32>(RRMode::Replay).unwrap();
+        let (s, r) = ipc::in_memory_channel::<i32>(RRMode::Record).unwrap();
 
         s.send(5).unwrap();
         let v = r.recv().unwrap();

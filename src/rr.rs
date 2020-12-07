@@ -51,6 +51,12 @@ impl DetChannelId {
     }
 }
 
+impl Default for rr::DetChannelId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub(crate) trait RecvRecordReplay<T, E> {
     /// Given a channel receiver function as a closure (e.g. || receiver.try_receive())
     /// handle the recording or replaying logic for this message arrival.
@@ -77,16 +83,10 @@ pub(crate) trait RecvRecordReplay<T, E> {
                 Ok(result)
             }
             RRMode::Replay => {
-                let det_id = detthread::get_det_id();
-                let entry = recordlog.get_log_entry_with(
-                    det_id,
-                    detthread::get_event_id(),
-                    &metadata.channel_variant,
-                    &metadata.id,
-                );
+                let entry = recordlog.get_log_entry_with(&metadata.channel_variant, &metadata.id);
 
                 // Special case for NoEntryInLog. Hang this thread forever.
-                if let Err(e @ error::DesyncError::NoEntryInLog(_, _)) = entry {
+                if let Err(e @ error::DesyncError::NoEntryInLog) = entry {
                     crate::log_rr!(Info, "Saw {:?}. Putting thread to sleep.", e);
                     desync::sleep_until_desync();
                     // Thread woke back up... desynced!
@@ -167,18 +167,12 @@ pub(crate) trait SendRecordReplay<T, E> {
                 Ok(result)
             }
             RRMode::Replay => {
-                let det_id = detthread::get_det_id();
                 // Ugh. This is ugly. I need it though. As this function moves the `T`.
                 // If we encounter an error we need to return the `T` back up to the caller.
                 // crossbeam_channel::send() does pretty much the same thing.
-                match recordlog.get_log_entry_with(
-                    det_id,
-                    detthread::get_event_id(),
-                    &metadata.channel_variant,
-                    &metadata.id,
-                ) {
+                match recordlog.get_log_entry_with(&metadata.channel_variant, &metadata.id) {
                     // Special case for NoEntryInLog. Hang this thread forever.
-                    Err(e @ error::DesyncError::NoEntryInLog(_, _)) => {
+                    Err(e @ error::DesyncError::NoEntryInLog) => {
                         crate::log_rr!(Info, "Saw {:?}. Putting thread to sleep.", e);
                         desync::sleep_until_desync();
                         // Thread woke back up... desynced!
@@ -193,7 +187,6 @@ pub(crate) trait SendRecordReplay<T, E> {
                     }
                 }
                 let result = rr::SendRecordReplay::underlying_send(self, forwading_id, msg);
-                detthread::inc_event_id();
                 Ok(result)
             }
             RRMode::NoRR => Ok(self.underlying_send(detthread::get_det_id(), msg)),

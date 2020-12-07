@@ -45,7 +45,7 @@ impl<T> Clone for Sender<T> {
         }
         Sender {
             sender: self.sender.clone(),
-            mode: self.mode.clone(),
+            mode: self.mode,
             metadata: self.metadata.clone(),
             event_recorder: self.event_recorder.clone(),
         }
@@ -53,12 +53,15 @@ impl<T> Clone for Sender<T> {
 }
 
 impl<T> SendRecordReplay<T, rc::SendError<T>> for Sender<T> {
-    const EVENT_VARIANT: RecordedEvent = RecordedEvent::Sender;
+    const EVENT_VARIANT: RecordedEvent = RecordedEvent::CbSender;
 
     fn check_log_entry(&self, entry: RecordedEvent) -> desync::Result<()> {
         match entry {
-            RecordedEvent::Sender => Ok(()),
-            log_event => Err(DesyncError::EventMismatch(log_event, RecordedEvent::Sender)),
+            RecordedEvent::CbSender => Ok(()),
+            log_event => Err(DesyncError::EventMismatch(
+                log_event,
+                RecordedEvent::CbSender,
+            )),
         }
     }
 
@@ -96,10 +99,6 @@ impl<T> Sender<T> {
                             detthread::get_forwarding_id(),
                             msg,
                         );
-                        // TODO Ugh, right now we have to carefully increase the event_id
-                        // in the "right places" or nothing will work correctly.
-                        // How can we make this a lot less error prone?
-                        detthread::inc_event_id();
                         res
                     }
                 }
@@ -197,7 +196,6 @@ macro_rules! impl_recvrr {
                 match event {
                     RecordedEvent::$succ { sender_thread } => {
                         let retval = self.replay_recv(&sender_thread)?;
-                        detthread::inc_event_id();
                         Ok(Ok(retval))
                     }
                     RecordedEvent::$err(e) => {
@@ -206,8 +204,6 @@ macro_rules! impl_recvrr {
                             "Creating error event for: {:?}",
                             RecordedEvent::$err(e)
                         );
-                        // Here is where we explictly increment our event_id!
-                        detthread::inc_event_id();
                         Ok(Err(e))
                     }
                     e => {
@@ -224,9 +220,9 @@ macro_rules! impl_recvrr {
     };
 }
 
-impl_recvrr!(rc::RecvError, RecvSucc, RecvErr);
-impl_recvrr!(rc::TryRecvError, TryRecvSucc, TryRecvErr);
-impl_recvrr!(rc::RecvTimeoutError, RecvTimeoutSucc, RecvTimeoutErr);
+impl_recvrr!(rc::RecvError, CbRecvSucc, CbRecvErr);
+impl_recvrr!(rc::TryRecvError, CbTryRecvSucc, CbTryRecvErr);
+impl_recvrr!(rc::RecvTimeoutError, CbRecvTimeoutSucc, CbRecvTimeoutErr);
 
 impl<T> Receiver<T> {
     // Implementation of crossbeam_channel public API.
@@ -394,7 +390,7 @@ fn do_unbounded<T>(event_recorder: EventRecorder, mode: RRMode) -> (Sender<T>, R
         Sender {
             sender,
             metadata: recordlog::RecordMetadata::new(
-                type_name.to_string(),
+                type_name,
                 ChannelVariant::CbUnbounded,
                 id.clone(),
             ),
@@ -417,7 +413,7 @@ pub fn bounded<T>(cap: usize) -> (Sender<T>, Receiver<T>) {
         Sender {
             sender,
             metadata: recordlog::RecordMetadata::new(
-                type_name.to_string(),
+                type_name,
                 ChannelVariant::CbBounded,
                 id.clone(),
             ),
@@ -446,14 +442,19 @@ pub fn never<T>() -> Receiver<T> {
     }
 }
 
+/// The tests use thread-local-state. So they should "clash" but for some reason they don't.
+/// This might be a problem later. We could use the rusty-fork crate to have every test run on a
+/// process instead of thread. We will do this if this ends up being an issue late.
 #[cfg(test)]
 mod test {
     use crate::crossbeam_channel::{unbounded, unbounded_in_memory};
-    use crate::detthread::{get_det_id, DetThreadId};
+    use crate::detthread::get_det_id;
     use crate::recordlog::{ChannelVariant, RecordEntry, RecordedEvent};
     use crate::rr::DetChannelId;
-    use crate::{init_tivo_thread_root, RRMode, IN_MEMORY_RECORDER};
-    use std::collections::HashMap;
+    use crate::{
+        get_tl_memory_recorder, init_tivo_thread_root, set_tl_memory_recorder, InMemoryRecorder,
+        RRMode,
+    };
 
     #[test]
     fn crossbeam() {
@@ -461,9 +462,8 @@ mod test {
         let (_s, _r) = unbounded::<i32>();
     }
 
-    ///
     #[test]
-    fn test_record() {
+    fn crossbeam_test_record() {
         init_tivo_thread_root();
 
         // Program which we'll compare logger for.
@@ -476,35 +476,66 @@ mod test {
         r.recv().unwrap();
         r.recv().unwrap();
 
+        // Compare results against log:
+        // TODO: A separate test should probably be testing this functionality. So we can just
+        // spawn chan ids and have confidence they're correct? I.e. this test functionality does
+        // not belong here >:(
         let channel_id = DetChannelId::from_raw(dti.clone(), 1);
 
         let tn = std::any::type_name::<i32>();
-        let re1 = RecordEntry::new(
-            dti.clone(),
-            1,
-            RecordedEvent::Sender,
+        let re = RecordEntry::new(
+            RecordedEvent::CbSender,
             ChannelVariant::CbUnbounded,
             channel_id,
             tn.to_string(),
         );
 
-        let re2 = RecordEntry {
-            event_id: 2,
-            ..re1.clone()
-        };
-        let re3 = RecordEntry {
-            event_id: 3,
-            ..re1.clone()
-        };
+        let mut reference: InMemoryRecorder = InMemoryRecorder::new(dti);
+        reference.add_entry(re.clone());
+        reference.add_entry(re.clone());
+        reference.add_entry(re);
 
-        let mut reference: HashMap<(DetThreadId, u32), RecordEntry> = HashMap::new();
-        reference.insert((dti.clone(), 1), re1);
-        reference.insert((dti.clone(), 2), re2);
-        reference.insert((dti.clone(), 3), re3);
+        assert_eq!(reference, get_tl_memory_recorder());
+    }
 
-        IN_MEMORY_RECORDER.with(|imr| {
-            let hm = imr.borrow();
-            assert_eq!(reference, *hm);
-        });
+    #[test]
+    fn crossbeam_test_replay() {
+        fn program() {
+            let (s, r) = unbounded_in_memory::<i32>(RRMode::Replay);
+            s.send(1).unwrap();
+            s.send(3).unwrap();
+            s.send(5).unwrap();
+            r.recv().unwrap();
+            r.recv().unwrap();
+            r.recv().unwrap();
+        }
+
+        fn set_record_log() {
+            let dti = get_det_id();
+            let channel_id = DetChannelId::from_raw(dti.clone(), 1);
+
+            let tn = std::any::type_name::<i32>();
+            let re1 = RecordEntry::new(
+                RecordedEvent::CbSender,
+                ChannelVariant::CbUnbounded,
+                channel_id,
+                tn.to_string(),
+            );
+
+            let re2 = RecordEntry { ..re1.clone() };
+            let re3 = RecordEntry { ..re1.clone() };
+
+            let mut reference: InMemoryRecorder = InMemoryRecorder::new(dti);
+            reference.add_entry(re1);
+            reference.add_entry(re2);
+            reference.add_entry(re3);
+            set_tl_memory_recorder(reference);
+        }
+
+        init_tivo_thread_root();
+        set_record_log();
+        program();
+
+        // Not crashing is the goal!
     }
 }

@@ -57,8 +57,6 @@ macro_rules! impl_RR {
                 match event {
                     RecordedEvent::$succ { sender_thread } => {
                         let retval = self.replay_recv(&sender_thread)?;
-                        // Here is where we explictly increment our event_id!
-                        detthread::inc_event_id();
                         Ok(Ok(retval))
                     }
                     RecordedEvent::$err(e) => {
@@ -67,8 +65,6 @@ macro_rules! impl_RR {
                             "Creating error event for: {:?}",
                             RecordedEvent::$err(e)
                         );
-                        // Here is where we explictly increment our event_id!
-                        detthread::inc_event_id();
                         Ok(Err(e))
                     }
                     e => {
@@ -241,10 +237,6 @@ impl<T> Sender<T> {
                             detthread::get_forwarding_id(),
                             msg,
                         );
-                        // TODO Ugh, right now we have to carefully increase the event_id
-                        // in the "right places" or nothing will work correctly.
-                        // How can we make this a lot less error prone?
-                        detthread::inc_event_id();
                         res
                     }
                 }
@@ -270,7 +262,7 @@ where
         Sender {
             sender: self.sender.clone(),
             metadata: self.metadata.clone(),
-            mode: self.mode.clone(),
+            mode: self.mode,
             event_recorder: EventRecorder::new_file_recorder(),
         }
     }
@@ -357,7 +349,7 @@ pub fn sync_channel<T>(bound: usize) -> (Sender<T>, Receiver<T>) {
         Sender {
             sender: RealSender::Bounded(sender),
             metadata: recordlog::RecordMetadata {
-                type_name: type_name.to_string(),
+                type_name,
                 channel_variant: channel_type,
                 id: id.clone(),
             },
@@ -388,7 +380,7 @@ pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
         Sender {
             sender: RealSender::Unbounded(sender),
             metadata: recordlog::RecordMetadata {
-                type_name: type_name.to_string(),
+                type_name,
                 channel_variant: channel_type,
                 id: id.clone(),
             },

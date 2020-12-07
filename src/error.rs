@@ -1,7 +1,6 @@
 //! Error Module
 
-use crate::detthread::DetThreadId;
-use crate::recordlog::{ChannelVariant, EventId, RecordedEvent};
+use crate::recordlog::{ChannelVariant, RecordedEvent};
 use crate::rr::DetChannelId;
 use crossbeam_channel::{RecvError, RecvTimeoutError, TryRecvError};
 use serde::{Deserialize, Serialize};
@@ -38,7 +37,7 @@ impl From<RecvErrorRR> for DesyncError {
 #[derive(Debug)]
 pub enum DesyncError {
     /// Missing entry for specified (DetThreadId, EventIt) pair.
-    NoEntryInLog(DetThreadId, EventId),
+    NoEntryInLog,
     /// ChannelVariants don't match. log flavor, vs current flavor.
     ChannelVariantMismatch(ChannelVariant, ChannelVariant),
     /// Channel ids don't match. log channel, vs current flavor.
