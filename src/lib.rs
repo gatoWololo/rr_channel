@@ -13,6 +13,7 @@ pub mod ipc_channel;
 pub mod mpsc;
 mod recordlog;
 mod rr;
+mod test;
 
 use std::cell::RefCell;
 use std::io::Write;
