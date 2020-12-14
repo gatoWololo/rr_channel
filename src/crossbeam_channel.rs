@@ -225,6 +225,17 @@ impl_recvrr!(rc::TryRecvError, CbTryRecvSucc, CbTryRecvErr);
 impl_recvrr!(rc::RecvTimeoutError, CbRecvTimeoutSucc, CbRecvTimeoutErr);
 
 impl<T> Receiver<T> {
+    pub(crate) fn new(real_receiver: ChannelKind<T>, id: DetChannelId) -> Receiver<T> {
+        let flavor = Receiver::get_marker(&real_receiver);
+        Receiver {
+            buffer: RefCell::new(HashMap::new()),
+            receiver: real_receiver,
+            metadata: recordlog::RecordMetadata::new(type_name::<T>().to_string(), flavor, id),
+            recorder: EventRecorder::new_file_recorder(),
+            mode: *RECORD_MODE,
+        }
+    }
+
     // Implementation of crossbeam_channel public API.
 
     pub fn recv(&self) -> Result<T, rc::RecvError> {
@@ -236,6 +247,7 @@ impl<T> Receiver<T> {
 
     pub fn try_recv(&self) -> Result<T, rc::TryRecvError> {
         let f = || self.receiver.try_recv();
+
         self.record_replay(f)
             .unwrap_or_else(|e| desync::handle_desync(e, f, self.get_buffer()))
     }
@@ -243,7 +255,6 @@ impl<T> Receiver<T> {
     pub fn recv_timeout(&self, timeout: Duration) -> Result<T, rc::RecvTimeoutError> {
         let f = || self.receiver.recv_timeout(timeout);
 
-        // self.record_replay_with(&self.mode, &self.metadata, f, self.logger.get_recordable())
         self.record_replay(f)
             .unwrap_or_else(|e| desync::handle_desync(e, f, self.get_buffer()))
     }
@@ -255,7 +266,7 @@ impl<T> Receiver<T> {
     where
         Self: RecvRecordReplay<T, E>,
     {
-        self.record_replay_with(
+        self.record_replay_recv(
             &self.mode,
             &self.metadata,
             g,
@@ -275,19 +286,7 @@ impl<T> Receiver<T> {
                     .map_err(|e| e.into())
             },
             &mut self.get_buffer(),
-            // &self.metadata.id,
         )
-    }
-
-    pub(crate) fn new(real_receiver: ChannelKind<T>, id: DetChannelId) -> Receiver<T> {
-        let flavor = Receiver::get_marker(&real_receiver);
-        Receiver {
-            buffer: RefCell::new(HashMap::new()),
-            receiver: real_receiver,
-            metadata: recordlog::RecordMetadata::new(type_name::<T>().to_string(), flavor, id),
-            recorder: EventRecorder::new_file_recorder(),
-            mode: *RECORD_MODE,
-        }
     }
 
     pub(crate) fn get_buffer(&self) -> RefMut<BufferedValues<T>> {
@@ -374,7 +373,7 @@ pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
     do_unbounded(EventRecorder::new_file_recorder(), *RECORD_MODE)
 }
 
-fn unbounded_in_memory<T>(rr_mode: RRMode) -> (Sender<T>, Receiver<T>) {
+pub(crate) fn unbounded_in_memory<T>(rr_mode: RRMode) -> (Sender<T>, Receiver<T>) {
     do_unbounded(EventRecorder::new_memory_recorder(), rr_mode)
 }
 
@@ -445,6 +444,8 @@ pub fn never<T>() -> Receiver<T> {
 /// The tests use thread-local-state. So they should "clash" but for some reason they don't.
 /// This might be a problem later. We could use the rusty-fork crate to have every test run on a
 /// process instead of thread. We will do this if this ends up being an issue late.
+/// My best guess is that every test gets its own brand new thread, which seems very unlikely...
+/// but how else?
 #[cfg(test)]
 mod test {
     use crate::crossbeam_channel::{unbounded, unbounded_in_memory};
@@ -455,31 +456,83 @@ mod test {
         get_tl_memory_recorder, init_tivo_thread_root, set_tl_memory_recorder, InMemoryRecorder,
         RRMode,
     };
+    use anyhow::Result;
+    use crossbeam_channel::{RecvTimeoutError, TryRecvError};
+    use std::thread;
+    use std::time::Duration;
+
+    fn simple_program(r: RRMode) -> Result<()> {
+        // Program which we'll compare logger for.
+        let (s, r) = unbounded_in_memory::<i32>(r);
+        s.send(1)?;
+        s.send(3)?;
+        s.send(5)?;
+        r.recv()?;
+        r.recv()?;
+        r.recv()?;
+        Ok(())
+    }
+
+    fn recv_program(r: RRMode) -> Result<()> {
+        let (s, r) = unbounded_in_memory::<i32>(RRMode::Record);
+        let _ = s.send(1)?;
+        let _ = s.send(2)?;
+
+        assert_eq!(r.recv(), Ok(1));
+        assert_eq!(r.recv(), Ok(2));
+        Ok(())
+    }
+
+    fn try_recv_program(r: RRMode) -> Result<()> {
+        let (s, r) = unbounded_in_memory::<i32>(r);
+        assert_eq!(r.try_recv(), Err(TryRecvError::Empty));
+
+        s.send(5)?;
+        drop(s);
+
+        assert_eq!(r.try_recv(), Ok(5));
+        assert_eq!(r.try_recv(), Err(TryRecvError::Disconnected));
+        Ok(())
+    }
+
+    fn recv_timeout_program(r: RRMode) -> Result<()> {
+        let (s, r) = unbounded_in_memory::<i32>(RRMode::Record);
+
+        let h = crate::detthread::spawn::<_, Result<()>>(move || {
+            thread::sleep(Duration::from_millis(1));
+            s.send(5)?;
+            drop(s);
+            Ok(())
+        });
+
+        assert_eq!(
+            r.recv_timeout(Duration::from_micros(500)),
+            Err(RecvTimeoutError::Timeout),
+        );
+        assert_eq!(r.recv_timeout(Duration::from_millis(1)), Ok(5));
+        assert_eq!(
+            r.recv_timeout(Duration::from_millis(1)),
+            Err(RecvTimeoutError::Disconnected),
+        );
+
+        // "Unlike with normal errors, this value doesn't implement the Error trait." So we unwrap
+        // instead. Not sure why std::thread::Result doesn't impl Result...
+        h.join().unwrap()?;
+        Ok(())
+    }
 
     #[test]
     fn crossbeam() {
         init_tivo_thread_root();
-        let (_s, _r) = unbounded::<i32>();
+        let (_s, _r) = unbounded_in_memory::<i32>(RRMode::NoRR);
     }
 
     #[test]
     fn crossbeam_test_record() {
         init_tivo_thread_root();
+        simple_program(RRMode::Record);
 
-        // Program which we'll compare logger for.
-        let (s, r) = unbounded_in_memory::<i32>(RRMode::Record);
         let dti = get_det_id();
-        s.send(1).unwrap();
-        s.send(3).unwrap();
-        s.send(5).unwrap();
-        r.recv().unwrap();
-        r.recv().unwrap();
-        r.recv().unwrap();
-
-        // Compare results against log:
-        // TODO: A separate test should probably be testing this functionality. So we can just
-        // spawn chan ids and have confidence they're correct? I.e. this test functionality does
-        // not belong here >:(
         let channel_id = DetChannelId::from_raw(dti.clone(), 1);
 
         let tn = std::any::type_name::<i32>();
@@ -490,7 +543,7 @@ mod test {
             tn.to_string(),
         );
 
-        let mut reference: InMemoryRecorder = InMemoryRecorder::new(dti);
+        let mut reference = InMemoryRecorder::new(dti);
         reference.add_entry(re.clone());
         reference.add_entry(re.clone());
         reference.add_entry(re);
@@ -500,42 +553,97 @@ mod test {
 
     #[test]
     fn crossbeam_test_replay() {
-        fn program() {
-            let (s, r) = unbounded_in_memory::<i32>(RRMode::Replay);
-            s.send(1).unwrap();
-            s.send(3).unwrap();
-            s.send(5).unwrap();
-            r.recv().unwrap();
-            r.recv().unwrap();
-            r.recv().unwrap();
-        }
-
         fn set_record_log() {
             let dti = get_det_id();
             let channel_id = DetChannelId::from_raw(dti.clone(), 1);
 
             let tn = std::any::type_name::<i32>();
-            let re1 = RecordEntry::new(
+            let re = RecordEntry::new(
                 RecordedEvent::CbSender,
                 ChannelVariant::CbUnbounded,
                 channel_id,
                 tn.to_string(),
             );
 
-            let re2 = RecordEntry { ..re1.clone() };
-            let re3 = RecordEntry { ..re1.clone() };
-
-            let mut reference: InMemoryRecorder = InMemoryRecorder::new(dti);
-            reference.add_entry(re1);
-            reference.add_entry(re2);
-            reference.add_entry(re3);
-            set_tl_memory_recorder(reference);
+            let mut rf: InMemoryRecorder = InMemoryRecorder::new(dti);
+            rf.add_entry(re.clone());
+            rf.add_entry(re.clone());
+            rf.add_entry(re);
+            set_tl_memory_recorder(rf);
         }
 
         init_tivo_thread_root();
         set_record_log();
-        program();
+        simple_program(RRMode::Replay);
 
-        // Not crashing is the goal!
+        // Not crashing is the goal, e.g. faithful replay.
+    }
+
+    // Many of these tests were copied from Crossbeam docs!
+    #[test]
+    fn crossbeam_test_recv_passthrough() -> Result<()> {
+        init_tivo_thread_root();
+        recv_program(RRMode::NoRR)?;
+        Ok(())
+    }
+
+    #[test]
+    fn crossbeam_test_recv_record() -> Result<()> {
+        init_tivo_thread_root();
+        recv_program(RRMode::Record)?;
+        Ok(())
+    }
+
+    #[test]
+    fn crossbeam_test_recv_replay() -> Result<()> {
+        init_tivo_thread_root();
+        // Record first to fill in-memory recorder.
+        recv_program(RRMode::Record)?;
+        recv_program(RRMode::Replay)?;
+        Ok(())
+    }
+
+    #[test]
+    fn crossbeam_test_try_recv_record() -> Result<()> {
+        init_tivo_thread_root();
+        try_recv_program(RRMode::Record)?;
+        Ok(())
+    }
+
+    #[test]
+    fn crossbeam_test_try_recv_passthrough() -> Result<()> {
+        init_tivo_thread_root();
+        try_recv_program(RRMode::NoRR)?;
+        Ok(())
+    }
+
+    #[test]
+    fn crossbeam_test_try_recv_replay() -> Result<()> {
+        init_tivo_thread_root();
+        try_recv_program(RRMode::Record)?;
+        try_recv_program(RRMode::Replay)?;
+        Ok(())
+    }
+
+    #[test]
+    fn crossbeam_test_recv_timeout_passthrough() -> Result<()> {
+        init_tivo_thread_root();
+        recv_timeout_program(RRMode::Record)?;
+        Ok(())
+    }
+
+    #[test]
+    fn crossbeam_test_recv_timeout_record() -> Result<()> {
+        init_tivo_thread_root();
+        recv_timeout_program(RRMode::Record)?;
+        Ok(())
+    }
+
+    #[test]
+    fn crossbeam_test_recv_timeout_replay() -> Result<()> {
+        init_tivo_thread_root();
+        recv_timeout_program(RRMode::Record)?;
+        recv_timeout_program(RRMode::Replay)?;
+        Ok(())
     }
 }

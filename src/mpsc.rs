@@ -159,7 +159,7 @@ impl<T> Receiver<T> {
     where
         Self: RecvRecordReplay<T, E>,
     {
-        self.record_replay_with(
+        self.record_replay_recv(
             &self.mode,
             &self.metadata,
             g,
@@ -269,6 +269,8 @@ where
 }
 
 impl<T> rr::SendRecordReplay<T, mpsc::SendError<T>> for Sender<T> {
+    const EVENT_VARIANT: RecordedEvent = RecordedEvent::MpscSender;
+
     fn check_log_entry(&self, entry: RecordedEvent) -> desync::Result<()> {
         match entry {
             RecordedEvent::MpscSender => Ok(()),
@@ -282,8 +284,6 @@ impl<T> rr::SendRecordReplay<T, mpsc::SendError<T>> for Sender<T> {
     fn underlying_send(&self, thread_id: DetThreadId, msg: T) -> Result<(), mpsc::SendError<T>> {
         self.sender.send((thread_id, msg))
     }
-
-    const EVENT_VARIANT: RecordedEvent = RecordedEvent::MpscSender;
 }
 
 macro_rules! generate_try_send {
@@ -361,10 +361,16 @@ pub fn sync_channel<T>(bound: usize) -> (Sender<T>, Receiver<T>) {
 }
 
 pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
-    *ENV_LOGGER;
-
-    let (sender, receiver) = mpsc::channel();
     let mode = *RECORD_MODE;
+    do_channel(mode, EventRecorder::new_file_recorder())
+}
+
+fn channel_in_memory<T>(mode: RRMode) -> (Sender<T>, Receiver<T>) {
+    do_channel(mode, EventRecorder::new_memory_recorder())
+}
+
+fn do_channel<T>(mode: RRMode, recorder: EventRecorder) -> (Sender<T>, Receiver<T>) {
+    let (sender, receiver) = mpsc::channel();
     let channel_type = ChannelVariant::MpscUnbounded;
     let type_name = type_name::<T>().to_string();
     let id = DetChannelId::new();
@@ -385,8 +391,93 @@ pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
                 id: id.clone(),
             },
             mode,
-            event_recorder: EventRecorder::new_file_recorder(),
+            event_recorder: recorder,
         },
         Receiver::new(RealReceiver::Unbounded(receiver), id),
     )
+}
+
+#[cfg(test)]
+mod test {
+    use crate::detthread::get_det_id;
+    use crate::mpsc::channel_in_memory;
+    use crate::recordlog::{ChannelVariant, RecordEntry, RecordedEvent};
+    use crate::rr::DetChannelId;
+    use crate::{
+        get_tl_memory_recorder, init_tivo_thread_root, set_tl_memory_recorder, InMemoryRecorder,
+        RRMode,
+    };
+    use anyhow::Result;
+
+    #[test]
+    fn mpsc() -> Result<()> {
+        init_tivo_thread_root();
+        let (s, r) = channel_in_memory::<i32>(RRMode::Record);
+        Ok(())
+    }
+
+    fn simple_program(r: RRMode) -> Result<()> {
+        // Program which we'll compare logger for.
+        let (s, r) = channel_in_memory::<i32>(r);
+        s.send(1)?;
+        s.send(3)?;
+        s.send(5)?;
+        r.recv()?;
+        r.recv()?;
+        r.recv()?;
+        Ok(())
+    }
+
+    #[test]
+    fn mpsc_test_record() -> anyhow::Result<()> {
+        init_tivo_thread_root();
+        simple_program(RRMode::Record)?;
+
+        let dti = get_det_id();
+        let channel_id = DetChannelId::from_raw(dti.clone(), 1);
+
+        let tn = std::any::type_name::<i32>();
+        let re = RecordEntry::new(
+            RecordedEvent::MpscSender,
+            ChannelVariant::MpscUnbounded,
+            channel_id,
+            tn.to_string(),
+        );
+
+        let mut reference = InMemoryRecorder::new(dti);
+        reference.add_entry(re.clone());
+        reference.add_entry(re.clone());
+        reference.add_entry(re);
+
+        assert_eq!(reference, get_tl_memory_recorder());
+        Ok(())
+    }
+
+    #[test]
+    fn crossbeam_test_replay() {
+        fn set_record_log() {
+            let dti = get_det_id();
+            let channel_id = DetChannelId::from_raw(dti.clone(), 1);
+
+            let tn = std::any::type_name::<i32>();
+            let re = RecordEntry::new(
+                RecordedEvent::MpscSender,
+                ChannelVariant::MpscUnbounded,
+                channel_id,
+                tn.to_string(),
+            );
+
+            let mut rf: InMemoryRecorder = InMemoryRecorder::new(dti);
+            rf.add_entry(re.clone());
+            rf.add_entry(re.clone());
+            rf.add_entry(re);
+            set_tl_memory_recorder(rf);
+        }
+
+        init_tivo_thread_root();
+        set_record_log();
+        simple_program(RRMode::Replay);
+
+        // Not crashing is the goal, e.g. faithful replay.
+    }
 }

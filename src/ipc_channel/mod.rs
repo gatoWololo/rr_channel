@@ -52,7 +52,10 @@ pub mod ipc {
         mode: RRMode,
     }
 
-    impl<T> IpcReceiver<T> {
+    impl<T> IpcReceiver<T>
+    where
+        T: for<'de> Deserialize<'de> + Serialize,
+    {
         pub(crate) fn new(
             receiver: ripc::IpcReceiver<DetMessage<T>>,
             id: DetChannelId,
@@ -85,15 +88,80 @@ pub mod ipc {
                 IpcErrorVariants::Disconnected => ipc_channel::ipc::IpcError::Disconnected,
                 IpcErrorVariants::Io => {
                     let err = "Unknown IpcError::IO";
-                    ipc_channel::ipc::IpcError::Io(std::io::Error::new(ErrorKind::Other, err))
+                    IpcError::Io(std::io::Error::new(ErrorKind::Other, err))
                 }
                 IpcErrorVariants::Bincode => {
                     let err = "Unknown IpcError::Bincode".to_string();
-                    ipc_channel::ipc::IpcError::Bincode(Box::new(ipc_channel::ErrorKind::Custom(
-                        err,
-                    )))
+                    IpcError::Bincode(Box::new(ipc_channel::ErrorKind::Custom(err)))
                 }
             }
+        }
+
+        fn rr_try_recv(&self) -> Result<DetMessage<T>, RecvErrorRR> {
+            for _ in 0..10 {
+                match self.receiver.try_recv() {
+                    Ok(v) => return Ok(v),
+                    Err(_) => {
+                        // TODO FIX!!!!
+                        // Divide timeout by power of two 1 million
+                        // power of two.
+                        thread::sleep(Duration::from_millis(100))
+                    }
+                }
+            }
+            Err(RecvErrorRR::Timeout)
+        }
+
+        /// Deterministic receiver which loops until event comes from `sender`.
+        /// All other entries are buffer is `self.buffer`. Buffer is always
+        /// checked before entries.
+        fn replay_recv(&self, sender: &DetThreadId) -> desync::Result<T> {
+            rr::recv_expected_message(
+                sender,
+                || self.rr_try_recv(),
+                &mut self.get_buffer(),
+                // &self.metadata.id,
+            )
+        }
+
+        pub fn recv(&self) -> Result<T, ipc_channel::ipc::IpcError> {
+            let f = || self.receiver.recv();
+            self.record_replay(f)
+                .unwrap_or_else(|e| desync::handle_desync(e, f, self.get_buffer()))
+        }
+
+        pub fn try_recv(&self) -> Result<T, TryRecvError> {
+            let f = || self.receiver.try_recv();
+            self.record_replay(f)
+                .unwrap_or_else(|e| desync::handle_desync(e, f, self.get_buffer()))
+        }
+
+        pub fn into_opaque(self) -> OpaqueIpcReceiver {
+            let metadata = self.metadata;
+            OpaqueIpcReceiver {
+                opaque_receiver: self.receiver.to_opaque(),
+                metadata,
+                closed: false,
+            }
+        }
+
+        fn record_replay<E>(
+            &self,
+            g: impl FnOnce() -> Result<DetMessage<T>, E>,
+        ) -> desync::Result<Result<T, E>>
+        where
+            Self: RecvRecordReplay<T, E>,
+        {
+            self.record_replay_recv(
+                &self.mode,
+                &self.metadata,
+                g,
+                self.event_recorder.get_recordable(),
+            )
+        }
+
+        pub(crate) fn get_buffer(&self) -> RefMut<BufferedValues<T>> {
+            self.buffer.borrow_mut()
         }
     }
 
@@ -168,12 +236,12 @@ pub mod ipc {
                     <IpcReceiver<T>>::recorded_event_to_ipc_error(variant),
                 ))),
                 RecordedEvent::IpcTryRecvErrorEmpty => Ok(Err(TryRecvError::Empty)),
-                e => {
+                event => {
                     let mock_event = RecordedEvent::IpcRecvSucc {
                         // TODO: Is there a better value to show this is a mock DTI?
                         sender_thread: DetThreadId::new(),
                     };
-                    Err(DesyncError::EventMismatch(e, mock_event))
+                    Err(DesyncError::EventMismatch(event, mock_event))
                 }
             }
         }
@@ -187,78 +255,6 @@ pub mod ipc {
         /// of receivers when we desync. We track this information here.
         /// See: https://github.com/gatoWololo/rr_channel/issues/28
         closed: bool,
-    }
-
-    impl<T> IpcReceiver<T>
-    where
-        T: for<'de> Deserialize<'de> + Serialize,
-    {
-        fn rr_try_recv(&self) -> Result<DetMessage<T>, RecvErrorRR> {
-            for _ in 0..10 {
-                match self.receiver.try_recv() {
-                    Ok(v) => return Ok(v),
-                    Err(_) => {
-                        // TODO FIX!!!!
-                        // Divide timeout by power of two 1 million
-                        // power of two.
-                        thread::sleep(Duration::from_millis(100))
-                    }
-                }
-            }
-            Err(RecvErrorRR::Timeout)
-        }
-
-        /// Deterministic receiver which loops until event comes from `sender`.
-        /// All other entries are buffer is `self.buffer`. Buffer is always
-        /// checked before entries.
-        fn replay_recv(&self, sender: &DetThreadId) -> desync::Result<T> {
-            rr::recv_expected_message(
-                sender,
-                || self.rr_try_recv(),
-                &mut self.get_buffer(),
-                // &self.metadata.id,
-            )
-        }
-
-        pub fn recv(&self) -> Result<T, ipc_channel::ipc::IpcError> {
-            let f = || self.receiver.recv();
-            self.record_replay(f)
-                .unwrap_or_else(|e| desync::handle_desync(e, f, self.get_buffer()))
-        }
-
-        pub fn try_recv(&self) -> Result<T, TryRecvError> {
-            let f = || self.receiver.try_recv();
-            self.record_replay(f)
-                .unwrap_or_else(|e| desync::handle_desync(e, f, self.get_buffer()))
-        }
-
-        pub fn into_opaque(self) -> OpaqueIpcReceiver {
-            let metadata = self.metadata;
-            OpaqueIpcReceiver {
-                opaque_receiver: self.receiver.to_opaque(),
-                metadata,
-                closed: false,
-            }
-        }
-
-        fn record_replay<E>(
-            &self,
-            g: impl FnOnce() -> Result<DetMessage<T>, E>,
-        ) -> desync::Result<Result<T, E>>
-        where
-            Self: RecvRecordReplay<T, E>,
-        {
-            self.record_replay_with(
-                &self.mode,
-                &self.metadata,
-                g,
-                self.event_recorder.get_recordable(),
-            )
-        }
-
-        pub(crate) fn get_buffer(&self) -> RefMut<BufferedValues<T>> {
-            self.buffer.borrow_mut()
-        }
     }
 
     #[derive(Debug, Serialize, Deserialize)]

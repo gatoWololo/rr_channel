@@ -60,7 +60,7 @@ impl Default for rr::DetChannelId {
 pub(crate) trait RecvRecordReplay<T, E> {
     /// Given a channel receiver function as a closure (e.g. || receiver.try_receive())
     /// handle the recording or replaying logic for this message arrival.
-    fn record_replay_with(
+    fn record_replay_recv(
         &self,
         mode: &RRMode,
         metadata: &recordlog::RecordMetadata,
@@ -99,11 +99,11 @@ pub(crate) trait RecvRecordReplay<T, E> {
         }
     }
 
-    /// Given the determininistic thread id return the corresponding successful case
+    /// Given the deterministic thread id return the corresponding successful case
     /// of RecordedEvent for record-logging.
     fn recorded_event_succ(dtid: DetThreadId) -> recordlog::RecordedEvent;
 
-    /// Given the channel recieve error, return the corresponding successful case
+    /// Given the channel receive error, return the corresponding successful case
     /// of RecordedEvent for record-logging. We take a reference here as there is no
     /// guarantee that our `E` implements Copy or Clone (like is the case for Ipc Error).
     fn recorded_event_err(e: &E) -> recordlog::RecordedEvent;
@@ -250,7 +250,7 @@ pub(crate) fn recv_expected_message<T>(
 mod test {
     use crate::detthread::{spawn, DetThreadId};
     use crate::rr::{recv_expected_message, DetChannelId};
-    use crate::{init_tivo_thread_root, BufferedValues};
+    use crate::{init_tivo_thread_root, BufferedValues, RRMode};
     use std::borrow::Borrow;
     use std::collections::VecDeque;
 
@@ -330,3 +330,11 @@ mod test {
         assert_eq!(10, bv.get_mut(&sender1).unwrap().pop_back().unwrap());
     }
 }
+
+// #[cfg(test)]
+// mod test {
+//     trait Receiver {
+//         fn recv(&self)
+//     }
+//
+// }
