@@ -16,6 +16,8 @@ use crate::{BufferedValues, DESYNC_MODE, ENV_LOGGER, RECORD_MODE};
 use crate::{DesyncMode, DetMessage};
 use std::any::type_name;
 
+pub use mpsc::{RecvError, RecvTimeoutError, TryRecvError};
+
 #[derive(Debug)]
 pub struct Sender<T> {
     pub(crate) sender: RealSender<T>,
@@ -232,12 +234,11 @@ impl<T> Sender<T> {
                     // TODO: One day we may want to record this alternate execution.
                     DesyncMode::KeepGoing => {
                         desync::mark_program_as_desynced();
-                        let res = rr::SendRecordReplay::underlying_send(
+                        rr::SendRecordReplay::underlying_send(
                             self,
                             detthread::get_forwarding_id(),
                             msg,
-                        );
-                        res
+                        )
                     }
                 }
             }
@@ -399,85 +400,173 @@ fn do_channel<T>(mode: RRMode, recorder: EventRecorder) -> (Sender<T>, Receiver<
 
 #[cfg(test)]
 mod test {
-    use crate::detthread::get_det_id;
+    use crate::mpsc;
     use crate::mpsc::channel_in_memory;
-    use crate::recordlog::{ChannelVariant, RecordEntry, RecordedEvent};
-    use crate::rr::DetChannelId;
-    use crate::{
-        get_tl_memory_recorder, init_tivo_thread_root, set_tl_memory_recorder, InMemoryRecorder,
-        RRMode,
-    };
+    use crate::test;
+    use crate::test::{Receiver, ReceiverTimeout, Sender, TestChannel, ThreadSafe, TryReceiver};
+    use crate::{init_tivo_thread_root, RRMode};
     use anyhow::Result;
+    use rusty_fork::rusty_fork_test;
+    use std::sync::mpsc::SendError;
+    use std::time::Duration;
 
+    use crate::detthread::reset_test_state;
+
+    enum Mpsc {}
+    impl<T: ThreadSafe> Sender<T> for mpsc::Sender<T> {
+        type SendError = SendError<T>;
+
+        fn send(&self, msg: T) -> Result<(), Self::SendError> {
+            self.send(msg)
+        }
+    }
+
+    impl<T> Receiver<T> for mpsc::Receiver<T> {
+        type RecvError = mpsc::RecvError;
+
+        fn recv(&self) -> Result<T, mpsc::RecvError> {
+            self.recv()
+        }
+    }
+
+    impl<T> TryReceiver<T> for mpsc::Receiver<T> {
+        type TryRecvError = mpsc::TryRecvError;
+
+        fn try_recv(&self) -> Result<T, mpsc::TryRecvError> {
+            self.try_recv()
+        }
+
+        const EMPTY: Self::TryRecvError = mpsc::TryRecvError::Empty;
+        const TRY_DISCONNECTED: Self::TryRecvError = mpsc::TryRecvError::Disconnected;
+    }
+
+    impl<T> ReceiverTimeout<T> for mpsc::Receiver<T> {
+        type RecvTimeoutError = mpsc::RecvTimeoutError;
+
+        fn recv_timeout(&self, timeout: Duration) -> Result<T, mpsc::RecvTimeoutError> {
+            self.recv_timeout(timeout)
+        }
+
+        const TIMEOUT: Self::RecvTimeoutError = mpsc::RecvTimeoutError::Timeout;
+        const DISCONNECTED: Self::RecvTimeoutError = mpsc::RecvTimeoutError::Disconnected;
+    }
+
+    impl<T: ThreadSafe> TestChannel<T> for Mpsc {
+        type S = mpsc::Sender<T>;
+        type R = mpsc::Receiver<T>;
+
+        fn make_channels(mode: RRMode) -> (Self::S, Self::R) {
+            mpsc::channel_in_memory(mode)
+        }
+    }
+
+    rusty_fork_test! {
     #[test]
     fn mpsc() -> Result<()> {
         init_tivo_thread_root();
-        let (s, r) = channel_in_memory::<i32>(RRMode::Record);
+        let (_s, _r) = channel_in_memory::<i32>(RRMode::Record);
         Ok(())
     }
 
-    fn simple_program(r: RRMode) -> Result<()> {
-        // Program which we'll compare logger for.
-        let (s, r) = channel_in_memory::<i32>(r);
-        s.send(1)?;
-        s.send(3)?;
-        s.send(5)?;
-        r.recv()?;
-        r.recv()?;
-        r.recv()?;
+    // #[test]
+    // fn mpsc_test_record() -> Result<()> {
+    //     init_tivo_thread_root();
+    //     test::simple_program::<Mpsc>(RRMode::Record)?;
+    //
+    //     let reference = test::simple_program_manual_log(
+    //         RecordedEvent::MpscSender,
+    //         |dti| RecordedEvent::MpscRecvSucc { sender_thread: dti },
+    //         ChannelVariant::MpscUnbounded,
+    //     );
+    //     assert_eq!(reference, get_tl_memory_recorder());
+    //     Ok(())
+    // }
+    //
+    // #[test]
+    // fn mpsc_test_replay() -> Result<()> {
+    //     init_tivo_thread_root();
+    //     let reference = test::simple_program_manual_log(
+    //         RecordedEvent::MpscSender,
+    //         |dti| RecordedEvent::CbRecvSucc { sender_thread: dti },
+    //         ChannelVariant::MpscUnbounded,
+    //     );
+    //     set_tl_memory_recorder(reference);
+    //     test::simple_program::<Mpsc>(RRMode::Replay)?;
+    //
+    //     // Not crashing is the goal, e.g. faithful replay.
+    //     // Nothing to assert.
+    //     Ok(())
+    // }
+
+    // Many of these tests were copied from Mpsc docs!
+    #[test]
+    fn mpsc_test_recv_passthrough() -> Result<()> {
+        init_tivo_thread_root();
+        test::recv_program::<Mpsc>(RRMode::NoRR)?;
         Ok(())
     }
 
     #[test]
-    fn mpsc_test_record() -> anyhow::Result<()> {
+    fn mpsc_test_recv_record() -> Result<()> {
         init_tivo_thread_root();
-        simple_program(RRMode::Record)?;
-
-        let dti = get_det_id();
-        let channel_id = DetChannelId::from_raw(dti.clone(), 1);
-
-        let tn = std::any::type_name::<i32>();
-        let re = RecordEntry::new(
-            RecordedEvent::MpscSender,
-            ChannelVariant::MpscUnbounded,
-            channel_id,
-            tn.to_string(),
-        );
-
-        let mut reference = InMemoryRecorder::new(dti);
-        reference.add_entry(re.clone());
-        reference.add_entry(re.clone());
-        reference.add_entry(re);
-
-        assert_eq!(reference, get_tl_memory_recorder());
+        test::recv_program::<Mpsc>(RRMode::Record)?;
         Ok(())
     }
 
     #[test]
-    fn crossbeam_test_replay() {
-        fn set_record_log() {
-            let dti = get_det_id();
-            let channel_id = DetChannelId::from_raw(dti.clone(), 1);
-
-            let tn = std::any::type_name::<i32>();
-            let re = RecordEntry::new(
-                RecordedEvent::MpscSender,
-                ChannelVariant::MpscUnbounded,
-                channel_id,
-                tn.to_string(),
-            );
-
-            let mut rf: InMemoryRecorder = InMemoryRecorder::new(dti);
-            rf.add_entry(re.clone());
-            rf.add_entry(re.clone());
-            rf.add_entry(re);
-            set_tl_memory_recorder(rf);
-        }
-
+    fn mpsc_test_recv_replay() -> Result<()> {
         init_tivo_thread_root();
-        set_record_log();
-        simple_program(RRMode::Replay);
+        // Record first to fill in-memory recorder.
+        test::recv_program::<Mpsc>(RRMode::Record)?;
+        reset_test_state();
+        test::recv_program::<Mpsc>(RRMode::Replay)?;
+        Ok(())
+    }
 
-        // Not crashing is the goal, e.g. faithful replay.
+    #[test]
+    fn mpsc_test_try_recv_record() -> Result<()> {
+        init_tivo_thread_root();
+        test::recv_program::<Mpsc>(RRMode::Record)?;
+        Ok(())
+    }
+
+    #[test]
+    fn mpsc_test_try_recv_passthrough() -> Result<()> {
+        init_tivo_thread_root();
+        test::try_recv_program::<Mpsc>(RRMode::NoRR)?;
+        Ok(())
+    }
+
+    #[test]
+    fn mpsc_test_try_recv_replay() -> Result<()> {
+        init_tivo_thread_root();
+        test::try_recv_program::<Mpsc>(RRMode::Record)?;
+        reset_test_state();
+        test::try_recv_program::<Mpsc>(RRMode::Replay)?;
+        Ok(())
+    }
+
+    #[test]
+    fn mpsc_test_recv_timeout_passthrough() -> Result<()> {
+        init_tivo_thread_root();
+        test::recv_timeout_program::<Mpsc>(RRMode::Record)?;
+        Ok(())
+    }
+
+    #[test]
+    fn mpsc_test_recv_timeout_record() -> Result<()> {
+        init_tivo_thread_root();
+        test::recv_timeout_program::<Mpsc>(RRMode::Record)?;
+        Ok(())
+    }
+
+    #[test]
+    fn mpsc_test_recv_timeout_replay() -> Result<()> {
+        init_tivo_thread_root();
+        test::recv_timeout_program::<Mpsc>(RRMode::Record)?;
+        reset_test_state();
+        test::recv_timeout_program::<Mpsc>(RRMode::Replay)?;
+        Ok(())
+    }
     }
 }

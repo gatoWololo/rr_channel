@@ -214,7 +214,7 @@ impl<'a> Select<'a> {
                                         crate::log_rr!(Debug, "No such message found via polling.");
                                         // We failed to find the message we were expecting
                                         // this is a desynchonization.
-                                        return Err(DesyncError::Timedout);
+                                        return Err(DesyncError::Timeout);
                                     }
                                     crate::log_rr!(Debug, "Polling verified message is present.");
                                 }
