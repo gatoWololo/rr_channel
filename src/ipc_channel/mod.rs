@@ -1,11 +1,10 @@
 // Reexport types via ipc::TYPE.
 
 pub mod router;
-
 pub use ipc_channel::Error;
 
 pub mod ipc {
-    use super::Error;
+    use ipc_channel::Error;
     use log::Level::{Debug, Info, Trace, Warn};
 
     use ipc_channel::ipc as ripc; //ripc = real ipc.
@@ -337,12 +336,11 @@ pub mod ipc {
                         // TODO: One day we may want to record this alternate execution.
                         DesyncMode::KeepGoing => {
                             desync::mark_program_as_desynced();
-                            let res = rr::SendRecordReplay::underlying_send(
+                            rr::SendRecordReplay::underlying_send(
                                 self,
                                 detthread::get_forwarding_id(),
                                 msg,
-                            );
-                            res
+                            )
                         }
                     }
                 }
@@ -381,7 +379,7 @@ pub mod ipc {
         spawn_ipc_channels(EventRecorder::new_file_recorder(), *RECORD_MODE)
     }
 
-    /// Allows us to test IPC channels using a inmemory recorder.
+    /// Allows us to test IPC channels using a in-memory recorder.
     pub(crate) fn in_memory_channel<T>(
         mode: RRMode,
     ) -> Result<(IpcSender<T>, IpcReceiver<T>), std::io::Error>
@@ -391,8 +389,7 @@ pub mod ipc {
         spawn_ipc_channels(EventRecorder::new_memory_recorder(), mode)
     }
 
-    /// Encapsulate all logic for properly setting up channels. Called by channel() function. Useful
-    /// for testing channels directly.
+    /// Encapsulate all logic for properly setting up channels. Called by channel() function.
     fn spawn_ipc_channels<T>(
         recorder: EventRecorder,
         mode: RRMode,
@@ -403,6 +400,7 @@ pub mod ipc {
         let (sender, receiver) = ripc::channel()?;
         let id = DetChannelId::new();
         let type_name = type_name::<T>().to_string();
+
         log_rr!(Info, "IPC channel created: {:?} {:?}", id, type_name);
 
         let metadata = recordlog::RecordMetadata {
@@ -738,7 +736,7 @@ pub mod ipc {
                             receiver.closed = true;
                             Ok(IpcSelectionResult::ChannelClosed(*index))
                         }
-                        Err(RecvErrorRR::Timeout) => Err((DesyncError::Timedout, None)),
+                        Err(RecvErrorRR::Timeout) => Err((DesyncError::Timeout, None)),
                         Ok(val) => {
                             // Expected a channel closed, saw a real message...
                             log_rr!(Trace, "Expected channel closed! Saw success: {:?}", index);
@@ -804,7 +802,7 @@ pub mod ipc {
                                         Some(IpcSelectionResult::ChannelClosed(index))));
                         }
                         Err(RecvErrorRR::Timeout) => {
-                            return Err((DesyncError::Timedout, None));
+                            return Err((DesyncError::Timeout, None));
                         }
                     };
 
@@ -1026,15 +1024,197 @@ pub mod ipc {
 #[cfg(test)]
 mod test {
     use crate::ipc_channel::ipc;
+
+    use crate::detthread::reset_test_state;
+    use crate::get_global_memory_recorder;
+    use crate::ipc_channel::ipc::in_memory_channel;
+    use crate::recordlog::{ChannelVariant, RecordedEvent};
+    use crate::test;
+    use crate::test::{Receiver, Sender, TestChannel, ThreadSafe, TryReceiver};
     use crate::{init_tivo_thread_root, RRMode};
+    use anyhow::Result;
+    use ipc_channel::ipc::{IpcError, TryRecvError};
+    use rusty_fork::rusty_fork_test;
+    use serde::export::Formatter;
+    use serde::{Deserialize, Serialize};
+    use std::error::Error;
+
+    #[derive(Debug, Eq, PartialEq)]
+    pub(crate) enum MyIpcError {
+        Empty,
+        Disconnected,
+        Io,
+        BinCode,
+        SendError,
+    }
+
+    impl std::fmt::Display for MyIpcError {
+        fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+            write!(f, "{:?}", self)
+        }
+    }
+
+    impl Error for MyIpcError {}
+
+    impl From<ipc::IpcError> for MyIpcError {
+        fn from(e: IpcError) -> Self {
+            match e {
+                IpcError::Bincode(_) => MyIpcError::BinCode,
+                IpcError::Io(_) => MyIpcError::Io,
+                IpcError::Disconnected => MyIpcError::Disconnected,
+            }
+        }
+    }
+
+    impl From<Box<ipc_channel::ErrorKind>> for MyIpcError {
+        fn from(_e: Box<ipc_channel::ErrorKind>) -> Self {
+            // Drop error for now :grimace-emoji;
+            MyIpcError::SendError
+        }
+    }
+
+    impl<T: ThreadSafe + Serialize> Sender<T> for ipc::IpcSender<T> {
+        type SendError = MyIpcError;
+
+        fn send(&self, msg: T) -> Result<(), Self::SendError> {
+            ipc::IpcSender::send(self, msg)?;
+            Ok(())
+        }
+    }
+
+    impl<T: for<'de> Deserialize<'de> + Serialize> Receiver<T> for ipc::IpcReceiver<T> {
+        type RecvError = MyIpcError;
+
+        fn recv(&self) -> Result<T, MyIpcError> {
+            let v = ipc::IpcReceiver::recv(self)?;
+            Ok(v)
+        }
+    }
+
+    impl From<ipc::TryRecvError> for MyIpcError {
+        fn from(e: TryRecvError) -> Self {
+            match e {
+                TryRecvError::IpcError(e) => e.into(),
+                TryRecvError::Empty => MyIpcError::Empty,
+            }
+        }
+    }
+    impl<T: for<'de> Deserialize<'de> + Serialize> TryReceiver<T> for ipc::IpcReceiver<T> {
+        type TryRecvError = MyIpcError;
+
+        fn try_recv(&self) -> Result<T, Self::TryRecvError> {
+            match ipc::IpcReceiver::try_recv(self) {
+                Ok(v) => Ok(v),
+                Err(e) => Err(e.into()),
+            }
+        }
+
+        const EMPTY: Self::TryRecvError = MyIpcError::Empty;
+        const TRY_DISCONNECTED: Self::TryRecvError = MyIpcError::Disconnected;
+    }
+
+    enum Ipc {}
+    impl<T> TestChannel<T> for Ipc
+    where
+        T: ThreadSafe + Serialize + for<'de> Deserialize<'de>,
+    {
+        type S = ipc::IpcSender<T>;
+        type R = ipc::IpcReceiver<T>;
+
+        fn make_channels(mode: RRMode) -> (Self::S, Self::R) {
+            ipc::in_memory_channel(mode).expect("Cannot init channels")
+        }
+    }
+
+    rusty_fork_test! {
+    #[test]
+    fn ipc() -> Result<()> {
+        init_tivo_thread_root();
+        let (_s, _r) = in_memory_channel::<i32>(RRMode::NoRR)?;
+        Ok(())
+    }
 
     #[test]
-    fn ipc_channel() {
+    fn ipc_test_record() -> Result<()> {
         init_tivo_thread_root();
-        let (s, r) = ipc::in_memory_channel::<i32>(RRMode::Record).unwrap();
+        test::simple_program::<Ipc>(RRMode::Record)?;
 
-        s.send(5).unwrap();
-        let v = r.recv().unwrap();
-        assert_eq!(v, 5);
+        let reference = test::simple_program_manual_log(
+            RecordedEvent::IpcSender,
+            |dti| RecordedEvent::IpcRecvSucc { sender_thread: dti },
+            ChannelVariant::Ipc,
+        );
+        assert_eq!(reference, get_global_memory_recorder());
+        Ok(())
+    }
+
+    // #[test]
+    // fn ipc_test_replay() -> Result<()> {
+    //     init_tivo_thread_root();
+    //     let reference = test::simple_program_manual_log(
+    //         RecordedEvent::CbSender,
+    //         |dti| RecordedEvent::CbRecvSucc { sender_thread: dti },
+    //         ChannelVariant::CbUnbounded,
+    //     );
+    //
+    //     set_global_memory_recorder(reference);
+    //     test::simple_program::<Ipc>(RRMode::Replay)?;
+    //
+    //     // Not crashing is the goal, e.g. faithful replay.
+    //     // Nothing to assert.
+    //     Ok(())
+    // }
+
+    // Many of these tests were copied from Ipc docs!
+    #[test]
+    fn ipc_test_recv_passthrough() -> Result<()> {
+        init_tivo_thread_root();
+        test::recv_program::<Ipc>(RRMode::NoRR)?;
+        Ok(())
+    }
+
+    #[test]
+    fn ipc_test_recv_record() -> Result<()> {
+        init_tivo_thread_root();
+        test::recv_program::<Ipc>(RRMode::Record)?;
+        Ok(())
+    }
+
+    #[test]
+    fn ipc_test_recv_replay() -> Result<()> {
+        init_tivo_thread_root();
+        // Record first to fill in-memory recorder.
+        test::recv_program::<Ipc>(RRMode::Record)?;
+
+        reset_test_state();
+        test::recv_program::<Ipc>(RRMode::Replay)?;
+        Ok(())
+    }
+
+    #[test]
+    fn ipc_test_try_recv_record() -> Result<()> {
+        init_tivo_thread_root();
+        test::recv_program::<Ipc>(RRMode::Record)?;
+        Ok(())
+    }
+
+    #[test]
+    fn ipc_test_try_recv_passthrough() -> Result<()> {
+        init_tivo_thread_root();
+        test::try_recv_program::<Ipc>(RRMode::NoRR)?;
+        Ok(())
+    }
+
+    #[test]
+    fn ipc_test_try_recv_replay() -> Result<()> {
+        init_tivo_thread_root();
+        test::try_recv_program::<Ipc>(RRMode::Record)?;
+
+        reset_test_state();
+        test::try_recv_program::<Ipc>(RRMode::Replay)?;
+        Ok(())
+    }
+
+    // Ipc does not implement timeout functionality.
     }
 }

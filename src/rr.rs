@@ -5,7 +5,7 @@ use crate::error;
 use crate::rr;
 use crate::RRMode;
 
-use crate::detthread::{self, DetThreadId};
+use crate::detthread::{self, DetThreadId, CHANNEL_ID};
 use crate::error::DesyncError;
 use crate::{desync, recordlog};
 use crate::{BufferedValues, DetMessage};
@@ -14,6 +14,7 @@ use crate::recordlog::Recordable;
 use log::Level::*;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
+use std::sync::atomic::Ordering;
 
 /// Channel themselves are assigned a deterministic ID as metadata. This make it
 /// possible to ensure the message was sent from the same sender every time.
@@ -27,9 +28,10 @@ impl DetChannelId {
     /// Create a DetChannelId using context's det_id() and channel_id()
     /// Assigns a unique id to this channel.
     pub fn new() -> DetChannelId {
+        let channel_id = CHANNEL_ID.with(|ci| ci.fetch_add(1, Ordering::SeqCst));
         DetChannelId {
             det_thread_id: detthread::get_det_id(),
-            channel_id: detthread::get_and_inc_channel_id(),
+            channel_id,
         }
     }
 
@@ -181,6 +183,7 @@ pub(crate) trait SendRecordReplay<T, E> {
                     // TODO: Hmmm when does this error case happen?
                     Err(e) => return Err((e, msg)),
                     Ok(event) => {
+                        // TODO Ugly write better.
                         if let Err(e) = rr::SendRecordReplay::check_log_entry(self, event) {
                             return Err((e, msg));
                         }
@@ -210,27 +213,28 @@ pub(crate) fn recv_expected_message<T>(
     buffer: &mut BufferedValues<T>,
     // id: &DetChannelId,
 ) -> desync::Result<T> {
-    // crate::log_rr!(
-    //     Debug,
-    //     "recv_from_sender(sender: {:?}, id: {:?}) ...",
-    //     expected_sender,
-    //     id
-    // );
+    crate::log_rr!(Debug, "recv_from_sender(sender: {:?}) ...", expected_sender);
 
     // Check our buffer to see if this value is already here.
     if let Some(val) = buffer.get_mut(expected_sender).and_then(|q| q.pop_front()) {
-        // crate::log_rr!(
-        //     Debug,
-        //     "replay_recv(): Recv message found in buffer. Channel id: {:?}",
-        //     id
-        // );
+        crate::log_rr!(Debug, "replay_recv(): Recv message found in buffer.");
         return Ok(val);
     }
 
     // Loop until we get the message we're waiting for. All "wrong" messages are
     // buffered into self.buffer.
     loop {
-        let (msg_sender, msg) = receiver_with_timeout()?;
+        let (msg_sender, msg) = match receiver_with_timeout() {
+            Ok(k) => k,
+            e @ Err(_) => {
+                crate::log_rr!(
+                    Warn,
+                    "timed out while wait for message from: {:?}",
+                    expected_sender
+                );
+                e?
+            }
+        };
         if msg_sender == *expected_sender {
             crate::log_rr!(Debug, "Recv message found through recv()");
             return Ok(msg);
@@ -250,7 +254,7 @@ pub(crate) fn recv_expected_message<T>(
 mod test {
     use crate::detthread::{spawn, DetThreadId};
     use crate::rr::{recv_expected_message, DetChannelId};
-    use crate::{init_tivo_thread_root, BufferedValues, RRMode};
+    use crate::{init_tivo_thread_root, BufferedValues};
     use std::borrow::Borrow;
     use std::collections::VecDeque;
 

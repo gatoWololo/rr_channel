@@ -2,6 +2,7 @@ use lazy_static::lazy_static;
 use log::warn;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 
 pub mod crossbeam_channel;
 mod crossbeam_select;
@@ -13,9 +14,9 @@ pub mod ipc_channel;
 pub mod mpsc;
 mod recordlog;
 mod rr;
+#[cfg(test)]
 mod test;
 
-use std::cell::RefCell;
 use std::io::Write;
 
 use desync::DesyncMode;
@@ -23,6 +24,7 @@ use detthread::DetThreadId;
 use log::Level::*;
 use std::env::var;
 use std::env::VarError;
+use std::sync::{Mutex, RwLock};
 
 use crate::detthread::get_det_id;
 pub use crate::detthread::init_tivo_thread_root;
@@ -126,6 +128,28 @@ lazy_static! {
         crate::log_rr!(Info, "Mode {:?} selected.", mode);
         mode
     };
+
+    /// Global in-memory recorder for events.
+    /// See Issue #46 for more information.
+    pub(crate) static ref IN_MEMORY_RECORDER:
+     RwLock<HashMap<DetThreadId, Arc<Mutex<InMemoryRecorder>>>> = {
+        // Init with initial entry. New entries are added by threads when they spawn.
+        let mut hm = HashMap::new();
+        let entry = Arc::new(Mutex::new(InMemoryRecorder::new(get_det_id())));
+        hm.insert(get_det_id(), entry);
+        RwLock::new(hm)
+     };
+}
+
+thread_local! {
+    static THREAD_LOCAL_RECORDER: Arc<Mutex<InMemoryRecorder>> = {
+            let detid = get_det_id();
+            let imr = IN_MEMORY_RECORDER
+                .write()
+                .expect("Unable to acquire rwlock");
+
+            imr.get(&detid).unwrap().clone()
+    }
 }
 
 /// Record and Replay using a memory-based recorder. Useful for unit testing channel methods.
@@ -134,6 +158,7 @@ lazy_static! {
 pub struct InMemoryRecorder {
     queue: VecDeque<RecordEntry>,
     /// The ID is the same for all events as this is a thread local record.
+    /// TODO: this field isn't used... remove it?
     dti: DetThreadId,
 }
 
@@ -154,54 +179,53 @@ impl InMemoryRecorder {
     }
 }
 
-thread_local! {
-    /// Our in-memory recorder
-    static IN_MEMORY_RECORDER: ThreadLocalImr = ThreadLocalImr::new();
-}
-
 // Thread local in memory recorder. We have this "extra" struct for this because we want to
 // implement the Recordable Trait for this type but not for InMemoryRecorder (since that would
 // required all InMemoryRecorders to carry a refcell to get the types to match. We only want the
 // refcell at the top level.
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct ThreadLocalImr {
-    imr: RefCell<InMemoryRecorder>,
-}
+pub struct ThreadLocalIMR {}
 
-impl ThreadLocalImr {
-    fn new() -> ThreadLocalImr {
-        ThreadLocalImr {
-            imr: RefCell::new(InMemoryRecorder::new(get_det_id())),
-        }
-    }
-
-    fn add_entry(&self, r: RecordEntry) {
-        self.imr.borrow_mut().add_entry(r);
+impl ThreadLocalIMR {
+    fn new() -> ThreadLocalIMR {
+        ThreadLocalIMR {}
     }
 }
 
-impl Recordable for ThreadLocalImr {
+impl Recordable for ThreadLocalIMR {
     fn write_entry(&self, entry: RecordEntry) {
-        IN_MEMORY_RECORDER.with(|imr| {
-            imr.add_entry(entry);
-        })
+        THREAD_LOCAL_RECORDER.with(|tlr| {
+            tlr.lock().unwrap().add_entry(entry);
+        });
+        // IN_MEMORY_RECORDER.with(|imr| {
+        //     imr.add_entry(entry);
+        // })
     }
 
     fn next_record_entry(&self) -> Option<RecordEntry> {
-        IN_MEMORY_RECORDER.with(|imr| imr.imr.borrow_mut().get_next_entry())
+        THREAD_LOCAL_RECORDER.with(|tlr| tlr.lock().unwrap().get_next_entry())
     }
 }
 
-/// Returns a cloned copy of the TLS in memory recorder as it looked when this function was called.
-pub(crate) fn get_tl_memory_recorder() -> InMemoryRecorder {
-    IN_MEMORY_RECORDER.with(|imr| imr.imr.borrow().clone())
+pub(crate) fn get_global_memory_recorder() -> HashMap<DetThreadId, InMemoryRecorder> {
+    let mut copy = HashMap::new();
+
+    for (k, v) in IN_MEMORY_RECORDER.try_write().unwrap().iter() {
+        copy.insert(k.clone(), v.lock().unwrap().clone());
+    }
+    copy
 }
 
-pub(crate) fn set_tl_memory_recorder(imr: InMemoryRecorder) {
-    IN_MEMORY_RECORDER.with(|tlimr| {
-        *tlimr.imr.borrow_mut() = imr;
-    })
-}
+// pub(crate) fn set_global_memory_recorder(imr: HashMap<DetThreadId, InMemoryRecorder>) {
+//     let mut copy = HashMap::new();
+//     for (k, v) in imr {
+//         copy.insert(k, Arc::new(Mutex::new(v)));
+//     }
+//
+//     THREAD_LOCAL_RECORDER.with(|tlr| {
+//         *tlr.lock().unwrap() = copy;
+//     })
+// }
 
 /// This is a mess... Originally I wanted to use a Box<dyn Recordable> and all channel receiver
 /// and sender implementations would have a field with this type, unfortunately, this causes issues
@@ -209,7 +233,7 @@ pub(crate) fn set_tl_memory_recorder(imr: InMemoryRecorder) {
 /// ...
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum EventRecorder {
-    Memory(ThreadLocalImr),
+    Memory(ThreadLocalIMR),
     File(FileRecorder),
 }
 
@@ -224,7 +248,7 @@ impl EventRecorder {
 
     // Note: Accesses global state!
     fn new_memory_recorder() -> EventRecorder {
-        EventRecorder::Memory(ThreadLocalImr::new())
+        EventRecorder::Memory(ThreadLocalIMR::new())
     }
 
     fn new_file_recorder() -> EventRecorder {

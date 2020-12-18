@@ -27,7 +27,7 @@ impl From<RecvErrorRR> for DesyncError {
     fn from(e: RecvErrorRR) -> DesyncError {
         match e {
             RecvErrorRR::Disconnected => DesyncError::Disconnected,
-            RecvErrorRR::Timeout => DesyncError::Timedout,
+            RecvErrorRR::Timeout => DesyncError::Timeout,
         }
     }
 }
@@ -63,7 +63,7 @@ pub enum DesyncError {
     /// Expected a message, but channel returned closed.
     ChannelClosedUnexpected(u64),
     /// Waited too long and no message ever came.
-    Timedout,
+    Timeout,
     /// Thread woke up after assuming it had ran of the end of the log.
     /// While `NoEntryInLog` may mean that this thread simply blocked forever
     /// or "didn't make it this far", DesynchronizedWakeup means we put that
