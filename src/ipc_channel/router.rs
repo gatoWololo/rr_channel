@@ -96,10 +96,7 @@ impl RouterProxy {
         });
 
         comm.msg_sender
-            .send(RouterMsg::AddRoute(
-                receiver.into_opaque(),
-                callback_wrapper,
-            ))
+            .send(RouterMsg::AddRoute(receiver.to_opaque(), callback_wrapper))
             .unwrap();
         comm.wakeup_sender.send(()).unwrap();
     }
