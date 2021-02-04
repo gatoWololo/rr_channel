@@ -195,7 +195,11 @@ impl Router {
                                 self.handlers.insert(new_receiver_id, handler);
                                 // println!("Added receiver {:?} at {:?} for handler", id, new_receiver_id);
                             }
-                            RouterMsg::Shutdown(_) => panic!("Shutdown in router! unimplemented!"),
+                            RouterMsg::Shutdown(s) => {
+                                s.send(())
+                                    .expect("Failed to send confirmation of shutdown.");
+                                break;
+                            }
                         }
                     }
                     IpcSelectionResult::MessageReceived(id, message) => {

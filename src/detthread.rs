@@ -76,30 +76,7 @@ where
     F: Send + 'static,
     T: Send + 'static,
 {
-    let new_id = DET_ID_SPAWNER.with(|spawner| spawner.borrow_mut().new_child_det_id());
-    crate::log_rr!(
-        Info,
-        "std::thread::spawn Assigned determinsitic id {:?} for new thread.",
-        new_id
-    );
-
-    thread::spawn(|| {
-        THREAD_INITIALIZED.with(|ti| {
-            ti.replace(true);
-        });
-
-        // Initialize TLS for this thread.
-        DET_ID.with(|id| {
-            *id.borrow_mut() = new_id;
-        });
-
-        // Force evaluation since TLS is lazy.
-        DET_ID_SPAWNER.with(|_| {
-            // Initalizes DET_ID_SPAWNER based on the value just set for DET_ID.
-        });
-
-        f()
-    })
+    Builder::new().spawn(f).unwrap()
 }
 
 /// Every thread has a DET_ID which holds its current det id. We also need a per-thread det id
