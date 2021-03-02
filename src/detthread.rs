@@ -102,39 +102,7 @@ where
     F: Send + 'static,
     T: Send + 'static,
 {
-    let new_id = DET_ID_SPAWNER.with(|spawner| spawner.borrow_mut().new_child_det_id());
-    crate::log_rr!(
-        Info,
-        "std::thread::spawn Assigned determinsitic id {:?} for new thread.",
-        new_id
-    );
-
-    thread::spawn(move || {
-        THREAD_INITIALIZED.with(|ti| {
-            ti.replace(true);
-        });
-
-        // Initialize TLS for this thread.
-        DET_ID.with(|id| {
-            *id.borrow_mut() = new_id.clone();
-        });
-
-        // Force evaluation since TLS is lazy.
-        DET_ID_SPAWNER.with(|_| {
-            // Initalizes DET_ID_SPAWNER based on the value just set for DET_ID.
-        });
-        {
-            // Insert entry for our thread into memory recorder.
-            let mut imr = IN_MEMORY_RECORDER.write().unwrap();
-            if !imr.contains_key(&new_id) {
-                imr.insert(
-                    new_id.clone(),
-                    Arc::new(Mutex::new(InMemoryRecorder::new(new_id.clone()))),
-                );
-            }
-        }
-        f()
-    })
+    Builder::new().spawn(f).unwrap()
 }
 
 /// Every thread has a DET_ID which holds its current det id. We also need a per-thread det id
@@ -267,15 +235,24 @@ impl Builder {
             new_id
         );
 
-        self.builder.spawn(|| {
+        self.builder.spawn(move || {
             THREAD_INITIALIZED.with(|ti| {
                 ti.replace(true);
             });
             // Set DET_ID to correct id! This is now safe as we have set THREAD_INITIALIZED To true.
             DET_ID.with(|id| {
-                *id.borrow_mut() = new_id;
+                *id.borrow_mut() = new_id.clone();
             });
-
+            {
+                // Insert entry for our thread into memory recorder.
+                let mut imr = IN_MEMORY_RECORDER.write().unwrap();
+                if !imr.contains_key(&new_id) {
+                    imr.insert(
+                        new_id.clone(),
+                        Arc::new(Mutex::new(InMemoryRecorder::new(new_id.clone()))),
+                    );
+                }
+            }
             f()
         })
     }

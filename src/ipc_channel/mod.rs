@@ -42,7 +42,7 @@ pub mod ipc {
 
     type OsIpcReceiverResults = (Vec<u8>, Vec<OsOpaqueIpcChannel>, Vec<OsIpcSharedMemory>);
 
-    #[derive(Serialize, Deserialize)]
+    #[derive(Serialize, Deserialize, Debug)]
     pub struct IpcReceiver<T> {
         pub(crate) receiver: ripc::IpcReceiver<DetMessage<T>>,
         buffer: RefCell<BufferedValues<T>>,
@@ -135,7 +135,7 @@ pub mod ipc {
                 .unwrap_or_else(|e| desync::handle_desync(e, f, self.get_buffer()))
         }
 
-        pub fn into_opaque(self) -> OpaqueIpcReceiver {
+        pub fn to_opaque(self) -> OpaqueIpcReceiver {
             let metadata = self.metadata;
             OpaqueIpcReceiver {
                 opaque_receiver: self.receiver.to_opaque(),
@@ -347,7 +347,7 @@ pub mod ipc {
             }
         }
 
-        pub fn into_opaque(self) -> OpaqueIpcSender {
+        pub fn to_opaque(self) -> OpaqueIpcSender {
             self.sender.to_opaque()
         }
 
@@ -531,7 +531,7 @@ pub mod ipc {
         where
             T: for<'de> Deserialize<'de> + Serialize,
         {
-            self.do_add(receiver.into_opaque())
+            self.do_add(receiver.to_opaque())
         }
 
         pub fn add_opaque(&mut self, receiver: OpaqueIpcReceiver) -> Result<u64, std::io::Error> {
@@ -972,10 +972,10 @@ pub mod ipc {
                         let (s, r) =
                             channel::<()>().expect("Unable to create channels for dummy receiver");
                         // keep sender around forever to avoid dropping channel.
-                        self.dummy_senders.push(s.into_opaque());
+                        self.dummy_senders.push(s.to_opaque());
                         let index = self
                             .receiver_set
-                            .add_opaque(r.into_opaque().opaque_receiver)
+                            .add_opaque(r.to_opaque().opaque_receiver)
                             .expect(
                                 "Unable to add dummy receiver while \
                                 handling desynchronization.",

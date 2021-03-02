@@ -12,7 +12,7 @@ use crate::rr::RecvRecordReplay;
 use crate::rr::SendRecordReplay;
 use crate::rr::{self, DetChannelId};
 use crate::{desync, EventRecorder, RRMode};
-use crate::{BufferedValues, DESYNC_MODE, ENV_LOGGER, RECORD_MODE};
+use crate::{BufferedValues, DESYNC_MODE, RECORD_MODE};
 use crate::{DesyncMode, DetMessage};
 use std::any::type_name;
 
@@ -332,7 +332,7 @@ impl<T> RealSender<T> {
 // }
 
 pub fn sync_channel<T>(bound: usize) -> (Sender<T>, Receiver<T>) {
-    *ENV_LOGGER;
+    // *ENV_LOGGER;
 
     let (sender, receiver) = mpsc::sync_channel(bound);
     let mode = *RECORD_MODE;

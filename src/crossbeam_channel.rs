@@ -11,7 +11,7 @@ use crate::error::DesyncError;
 use crate::recordlog::{self, ChannelVariant, RecordMetadata, RecordedEvent};
 use crate::rr::{self, DetChannelId, SendRecordReplay};
 use crate::{BufferedValues, DESYNC_MODE};
-use crate::{EventRecorder, RRMode, ENV_LOGGER, RECORD_MODE};
+use crate::{EventRecorder, RRMode, RECORD_MODE};
 
 pub use crate::crossbeam_select::{Select, SelectedOperation};
 use crate::rr::RecvRecordReplay;
@@ -412,7 +412,7 @@ fn do_unbounded<T>(event_recorder: EventRecorder, mode: RRMode) -> (Sender<T>, R
 }
 
 pub fn bounded<T>(cap: usize) -> (Sender<T>, Receiver<T>) {
-    *ENV_LOGGER;
+    // *ENV_LOGGER;
 
     let (sender, receiver) = crossbeam_channel::bounded(cap);
     let id = DetChannelId::new();
@@ -429,7 +429,7 @@ pub fn bounded<T>(cap: usize) -> (Sender<T>, Receiver<T>) {
 }
 
 pub fn never<T>() -> Receiver<T> {
-    *ENV_LOGGER;
+    // *ENV_LOGGER;
     let id = DetChannelId::new();
 
     Receiver::new(

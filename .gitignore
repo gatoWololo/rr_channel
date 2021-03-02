@@ -5,3 +5,4 @@ Cargo.lock
 \#*\#
 record.log
 debug_logs
+.idea
