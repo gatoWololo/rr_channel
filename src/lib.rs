@@ -15,7 +15,7 @@ pub mod mpsc;
 mod recordlog;
 mod rr;
 #[cfg(test)]
-mod test;
+pub mod test;
 
 use std::io::Write;
 

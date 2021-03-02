@@ -76,7 +76,7 @@ pub fn set_temp_det_id(new_id: DetThreadId) {
     });
 }
 
-pub fn start_forwading_id(forwarding_id: DetThreadId) {
+pub fn start_forwarding_id(forwarding_id: DetThreadId) {
     FORWADING_ID.with(|fi| {
         *fi.borrow_mut() = true;
     });

@@ -1,4 +1,7 @@
-/// Utility code for unit testing!
+//! Crossbeam, ipc, and mpsc channels share a lot in common. This module provides traits and methods
+//! to abstract over some of their differences. This allows to us tests these different channel
+//! implementations using the tests without worrying about what exact channel we're testing.
+
 use crate::detthread::{get_det_id, DetThreadId};
 use crate::recordlog::{ChannelVariant, RecordEntry, RecordedEvent};
 use crate::rr::DetChannelId;
@@ -9,45 +12,62 @@ use std::error::Error;
 use std::thread;
 use std::time::Duration;
 
+/// Our shorthand trait (aka trait alias) representing trait safety. Necessary as our channels will
+/// be sent across different threads.
+/// TODO: Switch to nightly and use trait_alias feature?
 pub(crate) trait ThreadSafe: Send + Sync + 'static {}
 impl<T: Send + Sync + 'static> ThreadSafe for T {}
 
-/// Interface shared by channels. Allows our test programs to abstract over channel
-/// type.
-///
-/// Have trait gone too far?
+/// A generic representation of a channel pair. Includes the types for the Sending and Receiving end
+/// as well as a method to create these channels.
 pub(crate) trait TestChannel<T> {
     // Send and 'static needed for channel sender to be moved to different threads.
+    /// `S` Represents the concrete type of the Sender end of the channel. Must implement _our_
+    /// test::Sender trait below.
     type S: Sender<T> + Send + 'static;
+    /// `R` Represents the concrete type of the Receiver end of the channel. Must implement _our_
+    /// test::Receiver trait below.
     type R;
+    /// Create a pair of connected channels with the given RRMode.
     fn make_channels(mode: RRMode) -> (Self::S, Self::R);
 }
 
+/// Representation of the sending end of our channels.
 pub(crate) trait Sender<T> {
+    /// Represents the  error type returned on sending failure.
     type SendError: Error + ThreadSafe;
     fn send(&self, msg: T) -> Result<(), Self::SendError>;
 }
 
+/// Representation of the receiving end of our channels.
 pub(crate) trait Receiver<T> {
+    /// Represents error type returned on receiving failure.
     type RecvError: Error + ThreadSafe + PartialEq;
 
     fn recv(&self) -> Result<T, Self::RecvError>;
 }
 
+/// Represents the `try_recv` method for channels.
 pub(crate) trait TryReceiver<T> {
+    /// Represents the error type returned on receiving failure.
     type TryRecvError: Error + ThreadSafe + PartialEq;
     fn try_recv(&self) -> Result<T, Self::TryRecvError>;
 
+    /// This const is the value returned when a `try_recv` happens on an empty channel.
     const EMPTY: Self::TryRecvError;
+    /// This const is the value returned when a `try_recv` happens on a disconnected channel.
     const TRY_DISCONNECTED: Self::TryRecvError;
 }
 
+/// Represents the `recv_timeout` method for channels.
 pub(crate) trait ReceiverTimeout<T> {
     type RecvTimeoutError: Error + ThreadSafe + PartialEq;
 
     fn recv_timeout(&self, timeout: Duration) -> Result<T, Self::RecvTimeoutError>;
 
+    /// This const is the value returned when a `recv_timeout` times out.
     const TIMEOUT: Self::RecvTimeoutError;
+    /// This const is the value returned when a `recv_timeout` happens on a disconnected channel.
     const DISCONNECTED: Self::RecvTimeoutError;
 }
 
