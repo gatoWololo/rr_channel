@@ -85,7 +85,7 @@ impl RouterProxy {
                     // DetThreadId is properly forwarded to receiver.
                     let original_id = detthread::get_det_id();
 
-                    detthread::start_forwading_id(forward_id);
+                    detthread::start_forwarding_id(forward_id);
                     callback(Ok(msg));
                     detthread::stop_forwarding_id(original_id);
                 }
