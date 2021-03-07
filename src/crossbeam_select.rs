@@ -7,9 +7,9 @@ use crate::detthread::DetThreadId;
 use crate::error::DesyncError;
 use crate::recordlog::{self, ChannelVariant, RecordedEvent, SelectEvent};
 use crate::rr::DetChannelId;
-use crate::{desync, detthread, EventRecorder};
+use crate::DESYNC_MODE;
+use crate::{desync, detthread, get_rr_mode, EventRecorder};
 use crate::{DesyncMode, DetMessage, RRMode};
-use crate::{DESYNC_MODE, RECORD_MODE};
 
 /// Our Select wrapper type must hold different types of Receivet<T>. We use this trait
 /// so we can hold different T's via a dynamic trait object.
@@ -50,12 +50,11 @@ pub struct Select<'a> {
 impl<'a> Select<'a> {
     /// Creates an empty list of channel operations for selection.
     pub fn new() -> Select<'a> {
-        let mode = *RECORD_MODE;
         Select {
-            mode,
+            mode: get_rr_mode(),
             selector: rc::Select::new(),
             receivers: HashMap::new(),
-            event_recorder: EventRecorder::new_file_recorder(),
+            event_recorder: EventRecorder::get_global_recorder(),
         }
     }
 
@@ -175,7 +174,7 @@ impl<'a> Select<'a> {
                 // Index will be recorded there.
                 Ok(SelectedOperation::Record(
                     self.selector.select(),
-                    EventRecorder::new_file_recorder(),
+                    EventRecorder::get_global_recorder(),
                 ))
             }
             RRMode::Replay => {

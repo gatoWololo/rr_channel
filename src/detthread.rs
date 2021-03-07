@@ -1,3 +1,4 @@
+use crate::ipc_channel::router::ROUTER;
 use crate::InMemoryRecorder;
 use log::Level::*;
 use serde::{Deserialize, Serialize};
@@ -8,18 +9,19 @@ use std::thread;
 use std::thread::JoinHandle;
 pub use std::thread::{current, panicking, park, park_timeout, sleep, yield_now};
 
+use crate::ipc_channel::router::RouterProxy;
 use crate::IN_MEMORY_RECORDER;
 use std::sync::{Arc, Mutex};
 
 thread_local! {
-    static DET_ID_SPAWNER: RefCell<DetIdSpawner> = RefCell::new(DetIdSpawner::starting());
+    pub(crate) static DET_ID_SPAWNER: RefCell<DetIdSpawner> = RefCell::new(DetIdSpawner::starting());
     /// Unique threadID assigned at thread spawn to each thread.
     pub static DET_ID: RefCell<DetThreadId> = RefCell::new(DetThreadId::new());
     /// Tells us whether this thread has been initialized yet. Init happens either through use of
     /// our det thread spawning wrappers or through explicit call to `init_tivo_thread_root`. This
     /// allows us to tell if a thread was spawned outside of our API. When this is false, the first
     /// call to DET_ID will error. This works because DET_ID is initialized lazily.
-    static THREAD_INITIALIZED: RefCell<bool> = RefCell::new(false);
+    pub(crate) static THREAD_INITIALIZED: RefCell<bool> = RefCell::new(false);
 
     pub(crate) static CHANNEL_ID: AtomicU32 = AtomicU32::new(1);
     /// Hack to know when we're in the router. Forwading the DetThreadId to to the callback
@@ -30,32 +32,6 @@ thread_local! {
     pub static TEMP_DET_ID: RefCell<Option<DetThreadId>> = RefCell::new(None);
 }
 
-/// Reset all global variables to their original starting value. Useful for record replay testing.
-/// Equal to running a clean program and calling `init_tivo_thread_root`. For example, the global channel id
-/// assignor must be reset otherwise doing:
-///
-/// simple_test::<Crossbeam>(RRMode:Record);
-/// simple_test::<Crossbeam>(RRMode:Replay);
-///
-/// Will result with the replay execution having different ChannelId values.
-/// TODO But the memory recorder doesn't count as global state? Yuck
-#[cfg(test)]
-pub(crate) fn reset_test_state() {
-    // Must be initialized in this order since some globals rely on other globals to be set
-    // a specific way... sigh...
-    CHANNEL_ID.with(|ci| {
-        ci.store(1, Ordering::SeqCst);
-    });
-    THREAD_INITIALIZED.with(|ti| {
-        *ti.borrow_mut() = true;
-    });
-    DET_ID.with(|di| {
-        *di.borrow_mut() = DetThreadId::new();
-    });
-    DET_ID_SPAWNER.with(|dis| {
-        *dis.borrow_mut() = DetIdSpawner::starting();
-    })
-}
 pub fn get_det_id() -> DetThreadId {
     DET_ID.with(|di| di.borrow().clone())
 }

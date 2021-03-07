@@ -10,7 +10,7 @@ use crate::desync;
 use crate::detthread::DetThreadId;
 use crate::error;
 use crate::rr::DetChannelId;
-use crate::{RRMode, LOG_FILE_NAME, RECORD_MODE};
+use crate::{RRMode, LOG_FILE_NAME};
 
 /// Record representing a successful select from a channel. Used in replay mode.
 #[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq)]
@@ -148,18 +148,10 @@ pub enum IpcErrorVariants {
 lazy_static::lazy_static! {
     /// Global log file which all threads write to.
     pub static ref WRITE_LOG_FILE: Mutex<File> = {
-        match *RECORD_MODE {
-            RRMode::Record => {
-                // Delete file if it already existed... file may not exist. That's okay.
-                let _ = remove_file(LOG_FILE_NAME.as_str());
-                let error = & format!("Unable to open {} for record logging.", *LOG_FILE_NAME);
-                Mutex::new(File::create(LOG_FILE_NAME.as_str()).expect(error))
-            }
-            RRMode::Replay =>
-                panic!("Write log file should not be accessed in replay mode."),
-            RRMode::NoRR =>
-                panic!("Write log file should not be accessed in no record-and-replay mode."),
-        }
+        // Delete file if it already existed... file may not exist. That's okay.
+        let _ = remove_file(LOG_FILE_NAME.as_str());
+        let error = & format!("Unable to open {} for record logging.", *LOG_FILE_NAME);
+        Mutex::new(File::create(LOG_FILE_NAME.as_str()).expect(error))
     };
 
     /// Global map holding all indexes from the record phase. Lazily initialized on replay

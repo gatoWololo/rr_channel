@@ -2,21 +2,64 @@
 //! to abstract over some of their differences. This allows to us tests these different channel
 //! implementations using the tests without worrying about what exact channel we're testing.
 
-use crate::detthread::{get_det_id, DetThreadId};
+use crate::detthread::DET_ID_SPAWNER;
+use crate::detthread::THREAD_INITIALIZED;
+use crate::detthread::{get_det_id, DetIdSpawner, DetThreadId, CHANNEL_ID, DET_ID};
 use crate::recordlog::{ChannelVariant, RecordEntry, RecordedEvent};
 use crate::rr::DetChannelId;
-use crate::{InMemoryRecorder, RRMode};
+use crate::{init_tivo_thread_root, InMemoryRecorder, RRMode};
 use anyhow::Result;
+use lazy_static::lazy_static;
 use std::collections::HashMap;
 use std::error::Error;
+use std::fmt::Debug;
+use std::sync::atomic::Ordering;
+use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
+
+lazy_static! {
+    pub static ref TEST_MODE: Mutex<Option<RRMode>> = Mutex::new(None);
+    pub static ref LOG_IMPL: Mutex<Option<RRMode>> = Mutex::new(None);
+}
+
+/// Reset all global variables to their original starting value. Useful for record replay testing.
+/// Equal to running a clean program and calling `init_tivo_thread_root`. For example, the global channel id
+/// assignor must be reset otherwise doing:
+///
+/// simple_test::<Crossbeam>(RRMode:Record);
+/// simple_test::<Crossbeam>(RRMode:Replay);
+///
+/// Will result with the replay execution having different ChannelId values.
+/// TODO But the memory recorder doesn't count as global state? Yuck
+#[cfg(test)]
+pub(crate) fn reset_test_state() {
+    // Must be initialized in this order since some globals rely on other globals to be set
+    // a specific way... sigh...
+    CHANNEL_ID.with(|ci| {
+        ci.store(1, Ordering::SeqCst);
+    });
+    THREAD_INITIALIZED.with(|ti| {
+        *ti.borrow_mut() = true;
+    });
+    DET_ID.with(|di| {
+        *di.borrow_mut() = DetThreadId::new();
+    });
+    DET_ID_SPAWNER.with(|dis| {
+        *dis.borrow_mut() = DetIdSpawner::starting();
+    });
+}
+
+pub(crate) fn set_rr_mode(mode: RRMode) {
+    let mut test_mode = TEST_MODE.lock().unwrap();
+    *test_mode = Some(mode);
+}
 
 /// Our shorthand trait (aka trait alias) representing trait safety. Necessary as our channels will
 /// be sent across different threads.
 /// TODO: Switch to nightly and use trait_alias feature?
-pub(crate) trait ThreadSafe: Send + Sync + 'static {}
-impl<T: Send + Sync + 'static> ThreadSafe for T {}
+pub(crate) trait ThreadSafe = Send + Sync + 'static;
+// impl<T: Send + Sync + 'static> ThreadSafe for T {}
 
 /// A generic representation of a channel pair. Includes the types for the Sending and Receiving end
 /// as well as a method to create these channels.
@@ -29,7 +72,7 @@ pub(crate) trait TestChannel<T> {
     /// test::Receiver trait below.
     type R;
     /// Create a pair of connected channels with the given RRMode.
-    fn make_channels(mode: RRMode) -> (Self::S, Self::R);
+    fn make_channels() -> (Self::S, Self::R);
 }
 
 /// Representation of the sending end of our channels.
@@ -71,11 +114,28 @@ pub(crate) trait ReceiverTimeout<T> {
     const DISCONNECTED: Self::RecvTimeoutError;
 }
 
-pub(crate) fn simple_program<C: TestChannel<i32>>(r: RRMode) -> Result<()>
+/// Records and replays a channel based program. See other modules for example of usage. Will set
+/// up state, run `f` in record mode, then use that log for replay mode. Compares the output of
+/// `f` between both executions to ensure not only log is correct, but data remains the same.
+pub(crate) fn rr_test<T: Eq + Debug>(f: impl Fn() -> Result<T>) -> Result<()> {
+    init_tivo_thread_root();
+
+    set_rr_mode(RRMode::Record);
+    let output1 = f()?;
+
+    reset_test_state();
+    set_rr_mode(RRMode::Replay);
+    let output2 = f()?;
+
+    assert_eq!(output1, output2);
+    Ok(())
+}
+
+pub(crate) fn simple_program<C: TestChannel<i32>>() -> Result<()>
 where
     C::R: Receiver<i32>,
 {
-    let (s, r) = C::make_channels(r);
+    let (s, r) = C::make_channels();
     s.send(1)?;
     s.send(3)?;
     s.send(5)?;
@@ -111,11 +171,11 @@ pub(crate) fn simple_program_manual_log(
     hm
 }
 
-pub(crate) fn recv_program<C: TestChannel<i32>>(r: RRMode) -> Result<()>
+pub(crate) fn recv_program<C: TestChannel<i32>>() -> Result<()>
 where
     C::R: Receiver<i32>,
 {
-    let (s, r) = C::make_channels(r);
+    let (s, r) = C::make_channels();
     let _ = s.send(1)?;
     let _ = s.send(2)?;
 
@@ -124,11 +184,11 @@ where
     Ok(())
 }
 
-pub(crate) fn try_recv_program<C: TestChannel<i32>>(r: RRMode) -> Result<()>
+pub(crate) fn try_recv_program<C: TestChannel<i32>>() -> Result<()>
 where
     C::R: TryReceiver<i32>,
 {
-    let (s, r) = C::make_channels(r);
+    let (s, r) = C::make_channels();
     assert_eq!(r.try_recv(), Err(C::R::EMPTY));
 
     s.send(5)?;
@@ -139,11 +199,11 @@ where
     Ok(())
 }
 
-pub(crate) fn recv_timeout_program<C: TestChannel<i32>>(r: RRMode) -> Result<()>
+pub(crate) fn recv_timeout_program<C: TestChannel<i32>>() -> Result<()>
 where
     C::R: ReceiverTimeout<i32>,
 {
-    let (s, r) = C::make_channels(r);
+    let (s, r) = C::make_channels();
 
     let h = crate::detthread::spawn::<_, Result<()>>(move || {
         thread::sleep(Duration::from_millis(10));

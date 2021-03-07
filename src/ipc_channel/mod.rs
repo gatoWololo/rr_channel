@@ -35,8 +35,10 @@ pub mod ipc {
     use crate::rr::RecvRecordReplay;
     use crate::rr::SendRecordReplay;
     use crate::rr::{self, DetChannelId};
-    use crate::{desync, detthread, log_rr, EventRecorder};
-    use crate::{BufferedValues, DetMessage, RRMode, DESYNC_MODE, RECORD_MODE};
+    use crate::{
+        desync, detthread, get_recorder_impl, get_rr_mode, log_rr, EventRecorder, LogImpl,
+    };
+    use crate::{BufferedValues, DetMessage, RRMode, DESYNC_MODE};
     use std::any::type_name;
     use std::io::ErrorKind;
 
@@ -274,7 +276,7 @@ pub mod ipc {
                 sender: self.sender.clone(),
                 metadata: self.metadata.clone(),
                 recorder: self.recorder.clone(),
-                mode: *RECORD_MODE,
+                mode: get_rr_mode(),
             }
         }
     }
@@ -371,32 +373,14 @@ pub mod ipc {
         }
     }
 
-    /// Part of IPC public interface.
+    /// Encapsulate all logic for properly setting up channels. Called by channel() function.
     pub fn channel<T>() -> Result<(IpcSender<T>, IpcReceiver<T>), std::io::Error>
     where
         T: for<'de> Deserialize<'de> + Serialize,
     {
-        spawn_ipc_channels(EventRecorder::new_file_recorder(), *RECORD_MODE)
-    }
+        let recorder = EventRecorder::get_global_recorder();
+        let mode = get_rr_mode();
 
-    /// Allows us to test IPC channels using a in-memory recorder.
-    pub(crate) fn in_memory_channel<T>(
-        mode: RRMode,
-    ) -> Result<(IpcSender<T>, IpcReceiver<T>), std::io::Error>
-    where
-        T: for<'de> Deserialize<'de> + Serialize,
-    {
-        spawn_ipc_channels(EventRecorder::new_memory_recorder(), mode)
-    }
-
-    /// Encapsulate all logic for properly setting up channels. Called by channel() function.
-    fn spawn_ipc_channels<T>(
-        recorder: EventRecorder,
-        mode: RRMode,
-    ) -> Result<(IpcSender<T>, IpcReceiver<T>), std::io::Error>
-    where
-        T: for<'de> Deserialize<'de> + Serialize,
-    {
         let (sender, receiver) = ripc::channel()?;
         let id = DetChannelId::new();
         let type_name = type_name::<T>().to_string();
@@ -515,15 +499,17 @@ pub mod ipc {
 
     impl IpcReceiverSet {
         pub fn new() -> Result<IpcReceiverSet, std::io::Error> {
+            let recorder = EventRecorder::get_global_recorder();
+
             ipc_channel::ipc::IpcReceiverSet::new().map(|r| IpcReceiverSet {
                 receiver_set: r,
-                mode: *RECORD_MODE,
+                mode: get_rr_mode(),
                 index: 0,
                 receivers: Vec::new(),
                 buffer: HashMap::new(),
                 desynced: false,
                 dummy_senders: Vec::new(),
-                recorder: EventRecorder::new_file_recorder(),
+                recorder,
             })
         }
 
@@ -1023,14 +1009,14 @@ pub mod ipc {
 
 #[cfg(test)]
 mod test {
-    use crate::ipc_channel::ipc;
-
-    use crate::detthread::reset_test_state;
     use crate::get_global_memory_recorder;
-    use crate::ipc_channel::ipc::in_memory_channel;
+    use crate::ipc_channel::ipc;
     use crate::recordlog::{ChannelVariant, RecordedEvent};
     use crate::test;
-    use crate::test::{Receiver, Sender, TestChannel, ThreadSafe, TryReceiver};
+    use crate::test::set_rr_mode;
+    use crate::test::{
+        reset_test_state, rr_test, Receiver, Sender, TestChannel, ThreadSafe, TryReceiver,
+    };
     use crate::{init_tivo_thread_root, RRMode};
     use anyhow::Result;
     use ipc_channel::ipc::{IpcError, TryRecvError};
@@ -1122,23 +1108,25 @@ mod test {
         type S = ipc::IpcSender<T>;
         type R = ipc::IpcReceiver<T>;
 
-        fn make_channels(mode: RRMode) -> (Self::S, Self::R) {
-            ipc::in_memory_channel(mode).expect("Cannot init channels")
+        fn make_channels() -> (Self::S, Self::R) {
+            ipc::channel().expect("Cannot init channels")
         }
     }
 
     rusty_fork_test! {
     #[test]
-    fn ipc() -> Result<()> {
+    fn ipc_channel_test() -> Result<()> {
         init_tivo_thread_root();
-        let (_s, _r) = in_memory_channel::<i32>(RRMode::NoRR)?;
+        set_rr_mode(RRMode::NoRR);
+        let (_s, _r) = ipc::channel::<i32>()?;
         Ok(())
     }
 
     #[test]
-    fn ipc_test_record() -> Result<()> {
+    fn simple_program_record_test() -> Result<()> {
         init_tivo_thread_root();
-        test::simple_program::<Ipc>(RRMode::Record)?;
+        set_rr_mode(RRMode::Record);
+        test::simple_program::<Ipc>()?;
 
         let reference = test::simple_program_manual_log(
             RecordedEvent::IpcSender,
@@ -1167,53 +1155,29 @@ mod test {
     // }
 
     // Many of these tests were copied from Ipc docs!
-    #[test]
-    fn ipc_test_recv_passthrough() -> Result<()> {
-        init_tivo_thread_root();
-        test::recv_program::<Ipc>(RRMode::NoRR)?;
-        Ok(())
-    }
 
     #[test]
-    fn ipc_test_recv_record() -> Result<()> {
+    fn recv_program_passthrough_test() -> Result<()> {
         init_tivo_thread_root();
-        test::recv_program::<Ipc>(RRMode::Record)?;
-        Ok(())
-    }
-
-    #[test]
-    fn ipc_test_recv_replay() -> Result<()> {
-        init_tivo_thread_root();
-        // Record first to fill in-memory recorder.
-        test::recv_program::<Ipc>(RRMode::Record)?;
-
-        reset_test_state();
-        test::recv_program::<Ipc>(RRMode::Replay)?;
-        Ok(())
-    }
-
-    #[test]
-    fn ipc_test_try_recv_record() -> Result<()> {
-        init_tivo_thread_root();
-        test::recv_program::<Ipc>(RRMode::Record)?;
-        Ok(())
+        set_rr_mode(RRMode::NoRR);
+        test::recv_program::<Ipc>()
     }
 
     #[test]
     fn ipc_test_try_recv_passthrough() -> Result<()> {
         init_tivo_thread_root();
-        test::try_recv_program::<Ipc>(RRMode::NoRR)?;
-        Ok(())
+        set_rr_mode(RRMode::NoRR);
+        test::try_recv_program::<Ipc>()
     }
 
     #[test]
-    fn ipc_test_try_recv_replay() -> Result<()> {
-        init_tivo_thread_root();
-        test::try_recv_program::<Ipc>(RRMode::Record)?;
+    fn recv_program_test() -> Result<()> {
+        rr_test(test::recv_program::<Ipc>)
+    }
 
-        reset_test_state();
-        test::try_recv_program::<Ipc>(RRMode::Replay)?;
-        Ok(())
+    #[test]
+    fn try_recv_program() -> Result<()> {
+        rr_test(test::try_recv_program::<Ipc>)
     }
 
     // Ipc does not implement timeout functionality.

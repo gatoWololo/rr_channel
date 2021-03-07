@@ -11,6 +11,7 @@ use crate::ipc_channel::ipc::{
 use crate::DetMessage;
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
+use std::thread::JoinHandle;
 
 lazy_static! {
     pub static ref ROUTER: RouterProxy = RouterProxy::new();
@@ -26,12 +27,14 @@ impl RouterProxy {
         let (msg_sender, msg_receiver) = crate::crossbeam_channel::unbounded();
         let (wakeup_sender, wakeup_receiver) = ipc::channel().unwrap();
 
-        crate::detthread::spawn(move || Router::new(msg_receiver, wakeup_receiver).run());
+        let handle =
+            crate::detthread::spawn(move || Router::new(msg_receiver, wakeup_receiver).run());
         RouterProxy {
             comm: Mutex::new(RouterProxyComm {
                 msg_sender,
                 wakeup_sender,
                 shutdown: false,
+                handle: Some(handle),
             }),
         }
     }
@@ -40,11 +43,11 @@ impl RouterProxy {
     /// send a wakeup message to the router, and block on the ACK.
     /// Calling it is idempotent,
     /// which can be useful when running a multi-process system in single-process mode.
-    pub fn shutdown(&self) {
+    pub fn shutdown(&self) -> std::thread::Result<()> {
         let mut comm = self.comm.lock().unwrap();
 
         if comm.shutdown {
-            return;
+            return Ok(());
         }
         comm.shutdown = true;
 
@@ -56,9 +59,16 @@ impl RouterProxy {
                 comm.msg_sender
                     .send(RouterMsg::Shutdown(ack_sender))
                     .unwrap();
-                ack_receiver.recv().unwrap();
+                ack_receiver.recv().expect("No ack message received.");
+                // ack_receiver.recv().unwrap();
             })
             .unwrap();
+
+        let h = comm
+            .handle
+            .take()
+            .expect("This should never happen! JoinHandle already taken.");
+        h.join()
     }
 
     // This is somewhere where our tivo wrapper diverges from the official ipc-channel API.
@@ -98,6 +108,7 @@ impl RouterProxy {
         comm.msg_sender
             .send(RouterMsg::AddRoute(receiver.to_opaque(), callback_wrapper))
             .unwrap();
+
         comm.wakeup_sender.send(()).unwrap();
     }
 
@@ -155,6 +166,10 @@ struct RouterProxyComm {
     msg_sender: Sender<RouterMsg>,
     wakeup_sender: IpcSender<()>,
     shutdown: bool,
+    /// The router spawns a thread when executed. If something goes wrong in this thread, it
+    /// silently panics as no one is checking its return. This is not great for CI unit testing.
+    /// Instead when shutting down the thread ROUTER, via `.shutdown()` we return our handle.
+    handle: Option<JoinHandle<()>>,
 }
 
 struct Router {
@@ -195,7 +210,12 @@ impl Router {
                                 self.handlers.insert(new_receiver_id, handler);
                                 // println!("Added receiver {:?} at {:?} for handler", id, new_receiver_id);
                             }
-                            RouterMsg::Shutdown(_) => panic!("Shutdown in router! unimplemented!"),
+                            RouterMsg::Shutdown(sender) => {
+                                sender
+                                    .send(())
+                                    .expect("Failed to send confirmation of shutdown.");
+                                return;
+                            }
                         }
                     }
                     IpcSelectionResult::MessageReceived(id, message) => {
@@ -220,3 +240,141 @@ enum RouterMsg {
 }
 
 pub type RouterHandler = Box<dyn FnMut(OpaqueIpcMessage) + Send>;
+
+/// These tests should not access the ROUTER directly. As this leads to weird issues as it persists
+/// between the record execution and replay execution in our tests below. Instead, use RouterProxy.
+#[cfg(test)]
+mod tests {
+    use crate::ipc_channel::ipc;
+    use crate::ipc_channel::router::RouterProxy;
+    use crate::test::{rr_test, set_rr_mode};
+    use crate::{detthread, init_tivo_thread_root, RRMode};
+    use anyhow::Result;
+    use rusty_fork::rusty_fork_test;
+    use std::fmt::Debug;
+
+    /// Doesn't actually test much, but exercises the common code paths for the router.
+    /// This will always be deterministic as there is no multiple producers.
+    fn add_route() -> Result<()> {
+        let (sender, receiver) = ipc::channel::<i32>()?;
+        let (sender2, receiver2) = ipc::channel::<i32>()?;
+        let router = RouterProxy::new();
+
+        let f = Box::new(move |result: Result<i32, _>| {
+            sender2
+                .send(result.unwrap())
+                .expect("Unable to send message.")
+        });
+
+        router.add_route::<i32>(receiver, f);
+
+        for i in 0..20 {
+            sender.send(i)?;
+        }
+
+        for i in 0..20 {
+            receiver2
+                .recv()
+                .expect("Cannot recv messages after router.");
+        }
+
+        router.shutdown().expect("Router thread errored.");
+        Ok(())
+    }
+
+    /// Use multiple producers on separate threads to generate data! Checks that the values are the
+    /// same.
+    fn add_route_mpsc() -> Result<Vec<(i32, i32)>> {
+        // Sends (thread #, value)
+        let (sender, receiver) = ipc::channel::<(i32, i32)>()?;
+        let (in_router_sender, from_router_receiver) = ipc::channel::<(i32, i32)>()?;
+
+        let thread_sender1 = sender.clone();
+        let thread_sender2 = sender;
+
+        let router = RouterProxy::new();
+        const ITERS: i32 = 1_000;
+        let f =
+            Box::new(move |result: Result<_, _>| in_router_sender.send(result.unwrap()).unwrap());
+
+        router.add_route(receiver, f);
+        let h1 = detthread::spawn::<_, Result<()>>(move || {
+            for i in 0..ITERS {
+                thread_sender1.send((1, i))?;
+            }
+            Ok(())
+        });
+        let h2 = detthread::spawn::<_, Result<()>>(move || {
+            for j in 0..ITERS {
+                thread_sender2.send((2, j))?;
+            }
+            Ok(())
+        });
+
+        let mut v = Vec::with_capacity((ITERS * 2) as usize);
+        for _ in 0..ITERS * 2 {
+            v.push(from_router_receiver.recv().unwrap());
+        }
+
+        h1.join().unwrap()?;
+        h2.join().unwrap()?;
+
+        router.shutdown().unwrap();
+
+        Ok(v)
+    }
+
+    /// Does pretty much the same as `add_route_mpsc` but uses the provided method, so it is
+    /// shorter!
+    fn route_ipc_receiver_to_new_crossbeam_receiver_mpsc() -> Result<()> {
+        let router = RouterProxy::new();
+        let (s, r) = ipc::channel::<(i32, i32)>()?;
+        const ITERS: i32 = 1_000;
+
+        let cr = router.route_ipc_receiver_to_new_crossbeam_receiver(r);
+        let thread_sender1 = s.clone();
+        let thread_sender2 = s;
+
+        let h1 = detthread::spawn::<_, Result<()>>(move || {
+            for i in 0..ITERS {
+                thread_sender1.send((1, i))?;
+            }
+            Ok(())
+        });
+
+        let h2 = detthread::spawn::<_, Result<()>>(move || {
+            for j in 0..ITERS {
+                thread_sender2.send((2, j))?;
+            }
+            Ok(())
+        });
+
+        let mut v = Vec::with_capacity((ITERS * 2) as usize);
+        for _ in 0..ITERS * 2 {
+            v.push(cr.recv().unwrap());
+        }
+
+        h1.join().unwrap()?;
+        h2.join().unwrap()?;
+        router.shutdown().unwrap();
+        Ok(())
+    }
+
+    rusty_fork_test! {
+    #[test]
+    fn add_route_test() -> Result<()> {
+        rr_test(add_route)
+    }
+
+    #[test]
+    fn add_route_mpsc_test() -> Result<()> {
+        rr_test(add_route_mpsc)
+    }
+
+    #[test]
+    fn route_ipc_receiver_to_new_crossbeam_receiver_mpsc_test() -> Result<()> {
+        rr_test(route_ipc_receiver_to_new_crossbeam_receiver_mpsc)
+    }
+
+    }
+}

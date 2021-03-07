@@ -12,6 +12,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 ipc-channel = { git = "https://github.com/gatoWololo/ipc-channel"}
 bincode = "1"
+anyhow = "1.0"
 
 [dev-dependencies]
 env_logger = "0.7.1"

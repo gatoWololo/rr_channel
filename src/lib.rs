@@ -1,3 +1,5 @@
+#![feature(trait_alias)]
+
 use lazy_static::lazy_static;
 use log::warn;
 use serde::{Deserialize, Serialize};
@@ -29,6 +31,8 @@ use std::sync::{Mutex, RwLock};
 use crate::detthread::get_det_id;
 pub use crate::detthread::init_tivo_thread_root;
 use crate::recordlog::{RecordEntry, Recordable};
+#[cfg(test)]
+use crate::test::TEST_MODE;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum RRMode {
@@ -48,6 +52,32 @@ const RECORD_MODE_VAR: &str = "RR_CHANNEL";
 const DESYNC_MODE_VAR: &str = "RR_DESYNC_MODE";
 const RECORD_FILE_VAR: &str = "RR_RECORD_FILE";
 
+#[cfg(test)]
+fn get_rr_mode() -> RRMode {
+    TEST_MODE
+        .lock()
+        .unwrap()
+        .expect("TEST_MODE not initialized when running tests!")
+}
+
+#[cfg(not(test))]
+fn get_rr_mode() -> RRMode {
+    *RECORD_MODE
+}
+
+pub enum LogImpl {
+    InMemory,
+    File,
+}
+
+fn get_recorder_impl() -> LogImpl {
+    if cfg!(test) {
+        LogImpl::InMemory
+    } else {
+        LogImpl::File
+    }
+}
+
 lazy_static! {
     /// Singleton environment logger. Must be initialized somewhere, and only once.
     pub static ref ENV_LOGGER: () = {
@@ -57,7 +87,7 @@ lazy_static! {
     };
 
     /// Record type. Initialized from environment variable RR_CHANNEL.
-    pub static ref RECORD_MODE: RRMode = {
+    static ref RECORD_MODE: RRMode = {
         crate::log_rr!(Debug, "Initializing RECORD_MODE lazy static.");
 
         let mode = match var(RECORD_MODE_VAR) {
@@ -66,17 +96,10 @@ lazy_static! {
                     "record" => RRMode::Record,
                     "replay" => RRMode::Replay,
                     "noRR"   => RRMode::NoRR,
-                    e        => {
-                        warn!("Unkown record and replay mode: {}. Assuming noRR.", e);
-                        RRMode::NoRR
-                    }
+                    e        => panic!("Unknown record and replay mode: {}", e),
                 }
             }
-            Err(VarError::NotPresent) => RRMode::NoRR,
-            Err(e @ VarError::NotUnicode(_)) => {
-                warn!("RR_CHANNEL value is not valid unicode: {}, assuming noRR.", e);
-                RRMode::NoRR
-            }
+            Err(_) => panic!("Please specify RR mode via {}", RECORD_MODE_VAR),
         };
 
         crate::log_rr!(Info, "Mode {:?} selected.", mode);
@@ -153,7 +176,7 @@ thread_local! {
 }
 
 /// Record and Replay using a memory-based recorder. Useful for unit testing channel methods.
-// These derives are needed because IpcReceiver requires Ser/Des... sigh...
+/// These derives are needed because IpcReceiver requires Ser/Des... sigh...
 #[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq)]
 pub struct InMemoryRecorder {
     queue: VecDeque<RecordEntry>,
@@ -197,9 +220,6 @@ impl Recordable for ThreadLocalIMR {
         THREAD_LOCAL_RECORDER.with(|tlr| {
             tlr.lock().unwrap().add_entry(entry);
         });
-        // IN_MEMORY_RECORDER.with(|imr| {
-        //     imr.add_entry(entry);
-        // })
     }
 
     fn next_record_entry(&self) -> Option<RecordEntry> {
@@ -246,13 +266,11 @@ impl EventRecorder {
         }
     }
 
-    // Note: Accesses global state!
-    fn new_memory_recorder() -> EventRecorder {
-        EventRecorder::Memory(ThreadLocalIMR::new())
-    }
-
-    fn new_file_recorder() -> EventRecorder {
-        EventRecorder::File(FileRecorder::new())
+    fn get_global_recorder() -> EventRecorder {
+        match get_recorder_impl() {
+            LogImpl::InMemory => EventRecorder::Memory(ThreadLocalIMR::new()),
+            LogImpl::File => EventRecorder::File(FileRecorder::new()),
+        }
     }
 }
 

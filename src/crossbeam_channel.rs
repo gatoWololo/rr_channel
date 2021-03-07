@@ -10,8 +10,8 @@ use crate::detthread::{self, DetThreadId};
 use crate::error::DesyncError;
 use crate::recordlog::{self, ChannelVariant, RecordMetadata, RecordedEvent};
 use crate::rr::{self, DetChannelId, SendRecordReplay};
-use crate::{BufferedValues, DESYNC_MODE};
-use crate::{EventRecorder, RRMode, RECORD_MODE};
+use crate::{get_recorder_impl, get_rr_mode, BufferedValues, LogImpl, DESYNC_MODE};
+use crate::{EventRecorder, RRMode};
 
 pub use crate::crossbeam_select::{Select, SelectedOperation};
 use crate::rr::RecvRecordReplay;
@@ -378,26 +378,22 @@ impl<T> Receiver<T> {
 // creates channels. Below are the "entry points" to creating channels.
 pub fn after(duration: Duration) -> Receiver<Instant> {
     let id = DetChannelId::new();
+    let recorder = EventRecorder::get_global_recorder();
 
     crate::log_rr!(Info, "After channel receiver created: {:?}", id);
     Receiver::new(
-        *RECORD_MODE,
+        get_rr_mode(),
         ChannelKind::After(crossbeam_channel::after(duration)),
         id,
-        EventRecorder::new_file_recorder(),
+        recorder,
     )
 }
 
 // Chanel constructors provided by crossbeam API:
 pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
-    do_unbounded(EventRecorder::new_file_recorder(), *RECORD_MODE)
-}
+    let recorder = EventRecorder::get_global_recorder();
+    let mode = get_rr_mode();
 
-pub(crate) fn unbounded_in_memory<T>(rr_mode: RRMode) -> (Sender<T>, Receiver<T>) {
-    do_unbounded(EventRecorder::new_memory_recorder(), rr_mode)
-}
-
-fn do_unbounded<T>(event_recorder: EventRecorder, mode: RRMode) -> (Sender<T>, Receiver<T>) {
     let (sender, receiver) = crossbeam_channel::unbounded();
     let type_name = type_name::<T>().to_string();
     let id = rr::DetChannelId::new();
@@ -406,8 +402,8 @@ fn do_unbounded<T>(event_recorder: EventRecorder, mode: RRMode) -> (Sender<T>, R
     let metadata =
         recordlog::RecordMetadata::new(type_name, ChannelVariant::CbUnbounded, id.clone());
     (
-        Sender::new(sender, metadata, mode, event_recorder.clone()),
-        Receiver::new(mode, ChannelKind::Unbounded(receiver), id, event_recorder),
+        Sender::new(sender, metadata, mode, recorder.clone()),
+        Receiver::new(mode, ChannelKind::Unbounded(receiver), id, recorder),
     )
 }
 
@@ -420,11 +416,11 @@ pub fn bounded<T>(cap: usize) -> (Sender<T>, Receiver<T>) {
     let type_name = type_name::<T>().to_string();
 
     crate::log_rr!(Info, "Bounded channel created: {:?} {:?}", id, type_name);
-    let recorder = EventRecorder::new_file_recorder();
+    let recorder = EventRecorder::get_global_recorder();
     let metadata = recordlog::RecordMetadata::new(type_name, ChannelVariant::CbBounded, id.clone());
     (
-        Sender::new(sender, metadata, *RECORD_MODE, recorder.clone()),
-        Receiver::new(*RECORD_MODE, ChannelKind::Bounded(receiver), id, recorder),
+        Sender::new(sender, metadata, get_rr_mode(), recorder.clone()),
+        Receiver::new(get_rr_mode(), ChannelKind::Bounded(receiver), id, recorder),
     )
 }
 
@@ -433,10 +429,10 @@ pub fn never<T>() -> Receiver<T> {
     let id = DetChannelId::new();
 
     Receiver::new(
-        *RECORD_MODE,
+        get_rr_mode(),
         ChannelKind::Never(crossbeam_channel::never()),
         id,
-        EventRecorder::new_file_recorder(),
+        EventRecorder::get_global_recorder(),
     )
 }
 
@@ -446,26 +442,30 @@ pub fn never<T>() -> Receiver<T> {
 /// My best guess is that every test gets its own brand new thread, which seems very unlikely...
 /// but how else?
 #[cfg(test)]
-mod test {
+mod tests {
     use crate::crossbeam_channel as cb;
-    use crate::crossbeam_channel::unbounded_in_memory;
-    use crate::detthread::{init_tivo_thread_root, reset_test_state};
+    use crate::detthread::init_tivo_thread_root;
     use crate::recordlog::{ChannelVariant, RecordedEvent};
     use crate::test;
-    use crate::test::{Receiver, ReceiverTimeout, Sender, TestChannel, ThreadSafe, TryReceiver};
+    use crate::test::{
+        reset_test_state, rr_test, set_rr_mode, Receiver, ReceiverTimeout, Sender, TestChannel,
+        ThreadSafe, TryReceiver,
+    };
     use crate::{get_global_memory_recorder, RRMode};
     use anyhow::Result;
     use rusty_fork::rusty_fork_test;
 
+    use crate::crossbeam_channel::unbounded;
     use std::time::Duration;
+
     pub(crate) struct Crossbeam {}
 
     impl<T: ThreadSafe> TestChannel<T> for Crossbeam {
         type S = cb::Sender<T>;
         type R = cb::Receiver<T>;
 
-        fn make_channels(mode: RRMode) -> (Self::S, Self::R) {
-            cb::unbounded_in_memory(mode)
+        fn make_channels() -> (Self::S, Self::R) {
+            unbounded()
         }
     }
 
@@ -506,17 +506,31 @@ mod test {
         const DISCONNECTED: Self::RecvTimeoutError = cb::RecvTimeoutError::Disconnected;
     }
 
+    fn after_always_timeout() -> Result<()> {
+        let (_, r) = cb::unbounded::<i32>();
+        let timeout = Duration::from_millis(1);
+
+        crate::select! {
+            recv(r) -> msg => println!("received {:?}", msg),
+            recv(cb::after(timeout)) -> _ => println!("timed out"),
+        }
+
+        Ok(())
+    }
+
     rusty_fork_test! {
     #[test]
-    fn crossbeam() {
+    fn init_unbounded() {
         init_tivo_thread_root();
-        let (_s, _r) = unbounded_in_memory::<i32>(RRMode::NoRR);
+        set_rr_mode(RRMode::NoRR);
+        let (_s, _r) = unbounded::<i32>();
     }
 
     #[test]
-    fn crossbeam_test_record() -> Result<()> {
+    fn simple_program_record_test() -> Result<()> {
         init_tivo_thread_root();
-        test::simple_program::<Crossbeam>(RRMode::Record)?;
+        set_rr_mode(RRMode::Record);
+        test::simple_program::<Crossbeam>()?;
 
         let reference = test::simple_program_manual_log(
             RecordedEvent::CbSender,
@@ -524,6 +538,22 @@ mod test {
             ChannelVariant::CbUnbounded,
         );
         assert_eq!(reference, get_global_memory_recorder());
+        Ok(())
+    }
+
+    #[test]
+    fn try_recv_passthrough_test() -> Result<()> {
+        init_tivo_thread_root();
+        set_rr_mode(RRMode::NoRR);
+        test::try_recv_program::<Crossbeam>()?;
+        Ok(())
+    }
+
+    #[test]
+    fn recv_timeout_passthrough_test() -> Result<()> {
+        init_tivo_thread_root();
+        set_rr_mode(RRMode::NoRR);
+        test::recv_timeout_program::<Crossbeam>()?;
         Ok(())
     }
 
@@ -545,81 +575,25 @@ mod test {
     // }
 
     // Many of these tests were copied from Crossbeam docs!
+
     #[test]
-    fn crossbeam_test_recv_passthrough() -> Result<()> {
-        init_tivo_thread_root();
-        test::recv_program::<Crossbeam>(RRMode::NoRR)?;
-        Ok(())
+    fn recv_program_test() -> Result<()> {
+        rr_test(test::recv_program::<Crossbeam>)
     }
 
     #[test]
-    fn crossbeam_test_recv_record() -> Result<()> {
-        init_tivo_thread_root();
-        test::recv_program::<Crossbeam>(RRMode::Record)?;
-        Ok(())
+    fn try_recv_program_test() -> Result<()> {
+        rr_test(test::try_recv_program::<Crossbeam>)
     }
 
     #[test]
-    fn crossbeam_test_recv_replay() -> Result<()> {
-        init_tivo_thread_root();
-        // Record first to fill in-memory recorder.
-        test::recv_program::<Crossbeam>(RRMode::Record)?;
-
-        reset_test_state();
-        test::recv_program::<Crossbeam>(RRMode::Replay)?;
-        Ok(())
+    fn recv_timeout_program_test() -> Result<()> {
+        rr_test(test::recv_timeout_program::<Crossbeam>)
     }
 
     #[test]
-    fn crossbeam_test_try_recv_record() -> Result<()> {
-        init_tivo_thread_root();
-        test::recv_program::<Crossbeam>(RRMode::Record)?;
-        Ok(())
-    }
-
-    #[test]
-    fn crossbeam_test_try_recv_passthrough() -> Result<()> {
-        init_tivo_thread_root();
-        test::try_recv_program::<Crossbeam>(RRMode::NoRR)?;
-        Ok(())
-    }
-
-    #[test]
-    fn crossbeam_test_try_recv_replay() -> Result<()> {
-        init_tivo_thread_root();
-        test::try_recv_program::<Crossbeam>(RRMode::Record)?;
-
-        reset_test_state();
-        test::try_recv_program::<Crossbeam>(RRMode::Replay)?;
-        Ok(())
-    }
-
-    #[test]
-    fn crossbeam_test_recv_timeout_passthrough() -> Result<()> {
-        init_tivo_thread_root();
-        test::recv_timeout_program::<Crossbeam>(RRMode::Record)?;
-        Ok(())
-    }
-
-    #[test]
-    fn crossbeam_test_recv_timeout_record() -> Result<()> {
-        init_tivo_thread_root();
-        test::recv_timeout_program::<Crossbeam>(RRMode::Record)?;
-        Ok(())
-    }
-
-    #[test]
-    fn crossbeam_test_recv_timeout_replay() -> Result<()> {
-        env_logger::builder().format_timestamp(None).init();
-
-        init_tivo_thread_root();
-        test::recv_timeout_program::<Crossbeam>(RRMode::Record)?;
-
-        log::error!("STARTING REPLAY");
-        reset_test_state();
-        log::error!("{:#?}", crate::get_global_memory_recorder());
-        test::recv_timeout_program::<Crossbeam>(RRMode::Replay)?;
-        Ok(())
+    fn after_always_timeout_test() -> Result<()> {
+        rr_test(after_always_timeout)
     }
     }
 }
