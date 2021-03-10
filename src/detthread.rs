@@ -1,15 +1,12 @@
-use crate::ipc_channel::router::ROUTER;
 use crate::InMemoryRecorder;
 use log::Level::*;
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::fmt::Debug;
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::thread;
+use std::sync::atomic::AtomicU32;
 use std::thread::JoinHandle;
 pub use std::thread::{current, panicking, park, park_timeout, sleep, yield_now};
 
-use crate::ipc_channel::router::RouterProxy;
 use crate::IN_MEMORY_RECORDER;
 use std::sync::{Arc, Mutex};
 
@@ -142,7 +139,7 @@ impl DetThreadId {
         }
     }
 
-    #[allow(dead_code)] // Used for testing.
+    #[cfg(test)]
     fn as_slice(&self) -> &[u32] {
         &self.thread_id[0..self.size]
     }

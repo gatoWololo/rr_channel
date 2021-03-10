@@ -191,9 +191,9 @@ impl<'a> Select<'a> {
                     // Thread woke back up... desynced!
                     return Err(DesyncError::DesynchronizedWakeup);
                 }
+                let recorded_entry = entry?;
 
-                let (event, flavor, chan_id) = entry?;
-                match event {
+                match recorded_entry.event {
                     RecordedEvent::CbSelect(event) => {
                         // Verify the receiver has the entry. We check now, since
                         // once we return the SelectedOperation it is too late if it turns
@@ -225,7 +225,11 @@ impl<'a> Select<'a> {
                             }
                         }
 
-                        Ok(SelectedOperation::Replay(event, flavor, chan_id))
+                        Ok(SelectedOperation::Replay(
+                            event,
+                            recorded_entry.channel_variant,
+                            recorded_entry.chan_id,
+                        ))
                     }
                     e => {
                         let dummy = SelectEvent::Success {

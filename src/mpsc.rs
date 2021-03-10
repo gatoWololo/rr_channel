@@ -7,15 +7,12 @@ use std::time::Duration;
 
 use crate::detthread::{self, DetThreadId};
 use crate::error::{DesyncError, RecvErrorRR};
-use crate::recordlog::{self, ChannelVariant, RecordedEvent};
+use crate::recordlog::{self, ChannelVariant, RecordEntry, RecordMetadata, RecordedEvent};
 use crate::rr::RecvRecordReplay;
 use crate::rr::SendRecordReplay;
 use crate::rr::{self, DetChannelId};
-use crate::{
-    desync, get_recorder_impl, get_rr_mode, EventRecorder, FileRecorder, InMemoryRecorder, LogImpl,
-    RRMode,
-};
-use crate::{BufferedValues, DESYNC_MODE, RECORD_MODE};
+use crate::{desync, get_rr_mode, EventRecorder, RRMode};
+use crate::{BufferedValues, DESYNC_MODE};
 use crate::{DesyncMode, DetMessage};
 use std::any::type_name;
 
@@ -55,6 +52,24 @@ macro_rules! impl_RR {
                 RecordedEvent::$err(*e)
             }
 
+            fn check_event_mismatch(
+                record_entry: &RecordEntry,
+                metadata: &RecordMetadata,
+            ) -> Result<(), DesyncError> {
+                match &record_entry.event {
+                    // These two are the expected enum variants. That's okay!
+                    RecordedEvent::$succ { sender_thread: _ } => {
+                        record_entry.check_mismatch(metadata)
+                    }
+                    RecordedEvent::$err(_) => record_entry.check_mismatch(metadata),
+                    // Unexpected enum variant!
+                    _ => unreachable!(
+                        "We should have already checked for this in {}",
+                        stringify!(check_event_mismatch)
+                    ),
+                }
+            }
+
             fn replay_recorded_event(
                 &self,
                 event: RecordedEvent,
@@ -72,13 +87,10 @@ macro_rules! impl_RR {
                         );
                         Ok(Err(e))
                     }
-                    e => {
-                        let mock_event = RecordedEvent::$succ {
-                            // TODO: Is there a better value to show this is a mock DTI?
-                            sender_thread: DetThreadId::new(),
-                        };
-                        Err(DesyncError::EventMismatch(e, mock_event))
-                    }
+                    _ => unreachable!(
+                        "We should have already checked for this in {}",
+                        stringify!(check_event_mismatch)
+                    ),
                 }
             }
         }
@@ -401,9 +413,7 @@ mod test {
     use crate::test;
     use crate::test::rr_test;
     use crate::test::set_rr_mode;
-    use crate::test::{
-        reset_test_state, Receiver, ReceiverTimeout, Sender, TestChannel, ThreadSafe, TryReceiver,
-    };
+    use crate::test::{Receiver, ReceiverTimeout, Sender, TestChannel, ThreadSafe, TryReceiver};
     use crate::{init_tivo_thread_root, RRMode};
     use anyhow::Result;
     use rusty_fork::rusty_fork_test;

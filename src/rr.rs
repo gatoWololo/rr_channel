@@ -10,7 +10,7 @@ use crate::error::DesyncError;
 use crate::{desync, recordlog};
 use crate::{BufferedValues, DetMessage};
 
-use crate::recordlog::Recordable;
+use crate::recordlog::{RecordEntry, RecordMetadata, Recordable};
 use log::Level::*;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -85,21 +85,32 @@ pub(crate) trait RecvRecordReplay<T, E> {
                 Ok(result)
             }
             RRMode::Replay => {
-                let entry = recordlog.get_log_entry_with(&metadata.channel_variant, &metadata.id);
+                let record_entry = recordlog.get_log_entry_ret();
 
                 // Special case for NoEntryInLog. Hang this thread forever.
-                if let Err(e @ error::DesyncError::NoEntryInLog) = entry {
+                if let Err(e @ error::DesyncError::NoEntryInLog) = record_entry {
                     crate::log_rr!(Info, "Saw {:?}. Putting thread to sleep.", e);
                     desync::sleep_until_desync();
                     // Thread woke back up... desynced!
                     return Err(error::DesyncError::DesynchronizedWakeup);
                 }
 
-                Ok(Self::replay_recorded_event(self, entry?)?)
+                let record_entry = record_entry?;
+                Self::check_event_mismatch(&record_entry, metadata)?;
+
+                Ok(Self::replay_recorded_event(self, record_entry.event)?)
             }
             RRMode::NoRR => Ok(recv_message().map(|v| v.1)),
         }
     }
+
+    /// Compare the expected values of the RecordEntry against the real values we're seeing. Some
+    /// commands have significant error checking that makes the meaning of the code hard to
+    /// understand. So we check it here.
+    fn check_event_mismatch(
+        record_entry: &RecordEntry,
+        metadata: &RecordMetadata,
+    ) -> desync::Result<()>;
 
     /// Given the deterministic thread id return the corresponding successful case
     /// of RecordedEvent for record-logging.
@@ -211,7 +222,6 @@ pub(crate) fn recv_expected_message<T>(
     expected_sender: &DetThreadId,
     receiver_with_timeout: impl Fn() -> Result<DetMessage<T>, error::RecvErrorRR>,
     buffer: &mut BufferedValues<T>,
-    // id: &DetChannelId,
 ) -> desync::Result<T> {
     crate::log_rr!(Debug, "recv_from_sender(sender: {:?}) ...", expected_sender);
 

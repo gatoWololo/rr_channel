@@ -18,6 +18,7 @@ mod recordlog;
 mod rr;
 #[cfg(test)]
 pub mod test;
+mod utils;
 
 use std::io::Write;
 
@@ -171,7 +172,10 @@ thread_local! {
                 .write()
                 .expect("Unable to acquire rwlock");
 
-            imr.get(&detid).unwrap().clone()
+            match imr.get(&detid) {
+                Some(imr) => imr.clone(),
+                None => panic!("Unable to get record log for {:?}. Available entries: {:?}.", detid, imr.keys()),
+            }
     }
 }
 
@@ -183,6 +187,15 @@ pub struct InMemoryRecorder {
     /// The ID is the same for all events as this is a thread local record.
     /// TODO: this field isn't used... remove it?
     dti: DetThreadId,
+}
+
+pub(crate) fn set_global_memory_recorder(imr: HashMap<DetThreadId, InMemoryRecorder>) {
+    let mut global_recorder = HashMap::new();
+    for (k, v) in imr {
+        global_recorder.insert(k, Arc::new(Mutex::new(v)));
+    }
+
+    *IN_MEMORY_RECORDER.try_write().unwrap() = global_recorder;
 }
 
 impl InMemoryRecorder {
@@ -235,17 +248,6 @@ pub(crate) fn get_global_memory_recorder() -> HashMap<DetThreadId, InMemoryRecor
     }
     copy
 }
-
-// pub(crate) fn set_global_memory_recorder(imr: HashMap<DetThreadId, InMemoryRecorder>) {
-//     let mut copy = HashMap::new();
-//     for (k, v) in imr {
-//         copy.insert(k, Arc::new(Mutex::new(v)));
-//     }
-//
-//     THREAD_LOCAL_RECORDER.with(|tlr| {
-//         *tlr.lock().unwrap() = copy;
-//     })
-// }
 
 /// This is a mess... Originally I wanted to use a Box<dyn Recordable> and all channel receiver
 /// and sender implementations would have a field with this type, unfortunately, this causes issues
@@ -313,7 +315,7 @@ impl Recordable for FileRecorder {
 
 #[macro_export]
 /// Log messages with added information. Specifically:
-/// thread name, event_name, envent_id, correct name resolution when forwading.
+/// thread name, event_name, event_id, correct name resolution when forwarding.
 macro_rules! log_rr {
     ($log_level:expr, $msg:expr, $($arg:expr),*) => {
 

@@ -245,13 +245,18 @@ pub type RouterHandler = Box<dyn FnMut(OpaqueIpcMessage) + Send>;
 /// between the record execution and replay execution in our tests below. Instead, use RouterProxy.
 #[cfg(test)]
 mod tests {
+    use crate::detthread::DetThreadId;
     use crate::ipc_channel::ipc;
     use crate::ipc_channel::router::RouterProxy;
+    use crate::recordlog::{ChannelVariant, RecordEntry, RecordedEvent};
+    use crate::rr::DetChannelId;
     use crate::test::{rr_test, set_rr_mode};
-    use crate::{detthread, init_tivo_thread_root, RRMode};
+    use crate::{
+        detthread, init_tivo_thread_root, set_global_memory_recorder, InMemoryRecorder, RRMode,
+    };
     use anyhow::Result;
     use rusty_fork::rusty_fork_test;
-    use std::fmt::Debug;
+    use std::collections::HashMap;
 
     /// Doesn't actually test much, but exercises the common code paths for the router.
     /// This will always be deterministic as there is no multiple producers.
@@ -272,7 +277,7 @@ mod tests {
             sender.send(i)?;
         }
 
-        for i in 0..20 {
+        for _ in 0..20 {
             receiver2
                 .recv()
                 .expect("Cannot recv messages after router.");
@@ -326,37 +331,142 @@ mod tests {
 
     /// Does pretty much the same as `add_route_mpsc` but uses the provided method, so it is
     /// shorter!
-    fn route_ipc_receiver_to_new_crossbeam_receiver_mpsc() -> Result<()> {
+    fn route_ipc_receiver_to_new_crossbeam_receiver_mpsc(iters: i32) -> Result<()> {
         let router = RouterProxy::new();
         let (s, r) = ipc::channel::<(i32, i32)>()?;
-        const ITERS: i32 = 1_000;
 
         let cr = router.route_ipc_receiver_to_new_crossbeam_receiver(r);
         let thread_sender1 = s.clone();
         let thread_sender2 = s;
 
         let h1 = detthread::spawn::<_, Result<()>>(move || {
-            for i in 0..ITERS {
+            for i in 0..iters {
                 thread_sender1.send((1, i))?;
             }
             Ok(())
         });
 
         let h2 = detthread::spawn::<_, Result<()>>(move || {
-            for j in 0..ITERS {
+            for j in 0..iters {
                 thread_sender2.send((2, j))?;
             }
             Ok(())
         });
 
-        let mut v = Vec::with_capacity((ITERS * 2) as usize);
-        for _ in 0..ITERS * 2 {
+        let mut v = Vec::with_capacity((iters * 2) as usize);
+        for _ in 0..iters * 2 {
             v.push(cr.recv().unwrap());
         }
 
         h1.join().unwrap()?;
         h2.join().unwrap()?;
         router.shutdown().unwrap();
+        Ok(())
+    }
+
+    /// Does replay using our manually recordlog. Basically all messages arrive from T2 before any
+    /// message arrives from T1. In practice this would be astronomically unlikely but we can force
+    /// rr-channels to verify this ordering.
+    fn router_manual_recordlog() -> Result<()> {
+        env_logger::init();
+        init_tivo_thread_root();
+        let iters = 5_000;
+
+        // The [..] is needed as there is no as_slice method for arrays? Weird...
+        // Main thread
+        let main_dti = DetThreadId::from(&[][..]);
+        // Router Thread
+        let router_dti = DetThreadId::from(&[1][..]);
+        // First sender thread
+        let dti1 = DetThreadId::from(&[2][..]);
+        // Second sender thread
+        let dti2 = DetThreadId::from(&[3][..]);
+
+        let tn = std::any::type_name::<i32>().to_string();
+
+        // Channel we use to send new messages to the router. Used by T1 and T2.
+        let threads_sender = DetChannelId::from_raw(main_dti.clone(), 1);
+        // Channel passed to router to recv messages from.
+        let router_receiver = DetChannelId::from_raw(main_dti.clone(), 1);
+        // Channel created by router to send messages into in function
+        // `route_ipc_receiver_to_new_crossbeam_receiver`.
+        let router_sender = DetChannelId::from_raw(main_dti.clone(), 2);
+        // Channel returned by router's `route_ipc_receiver_to_new_crossbeam_receiver` method.
+        // Used by main thread to read messages.
+        let main_recv = DetChannelId::from_raw(main_dti.clone(), 2);
+
+        let mut imr1 = InMemoryRecorder::new(dti1.clone());
+        let mut imr2 = InMemoryRecorder::new(dti2.clone());
+        let mut main_thread_imr = InMemoryRecorder::new(main_dti.clone());
+        let mut router_thread_imr = InMemoryRecorder::new(router_dti.clone());
+
+        let thread_sender_record = RecordEntry::new(
+            RecordedEvent::IpcSender,
+            ChannelVariant::Ipc,
+            threads_sender.clone(),
+            tn.clone(),
+        );
+
+        let main_record = RecordEntry::new(
+            RecordedEvent::CbRecvSucc {
+                sender_thread: router_dti.clone(),
+            },
+            ChannelVariant::CbUnbounded,
+            main_recv,
+            tn.clone(),
+        );
+
+        // Router receiving messages from T1.
+        let router_record_recv_t1 = RecordEntry::new(
+            RecordedEvent::IpcRecvSucc {
+                sender_thread: dti1.clone(),
+            },
+            ChannelVariant::Ipc,
+            router_receiver.clone(),
+            tn.clone(),
+        );
+        // Router receiving messages from T2.
+        let router_record_recv_t2 = RecordEntry::new(
+            RecordedEvent::IpcRecvSucc {
+                sender_thread: dti2.clone(),
+            },
+            ChannelVariant::Ipc,
+            router_receiver.clone(),
+            tn.clone(),
+        );
+
+        let router_record_send = RecordEntry::new(
+            RecordedEvent::CbSender,
+            ChannelVariant::CbUnbounded,
+            router_sender,
+            tn.clone(),
+        );
+
+        for _ in 0..iters {
+            imr1.add_entry(thread_sender_record.clone());
+            imr2.add_entry(thread_sender_record.clone());
+            main_thread_imr.add_entry(main_record.clone());
+            // Pretend we saw all messages from T2 first.
+            router_thread_imr.add_entry(router_record_recv_t2.clone());
+            router_thread_imr.add_entry(router_record_send.clone());
+        }
+
+        // Now pretend we saw all the entries for T1
+        for _ in 0..iters {
+            router_thread_imr.add_entry(router_record_recv_t1.clone());
+            router_thread_imr.add_entry(router_record_send.clone());
+        }
+
+        let mut manual_recordlog: HashMap<DetThreadId, InMemoryRecorder> = HashMap::new();
+        manual_recordlog.insert(dti1, imr1);
+        manual_recordlog.insert(dti2, imr2);
+        manual_recordlog.insert(main_dti, main_thread_imr);
+        manual_recordlog.insert(router_dti, router_thread_imr);
+
+        set_global_memory_recorder(manual_recordlog);
+
+        set_rr_mode(RRMode::Replay);
+        route_ipc_receiver_to_new_crossbeam_receiver_mpsc(iters)?;
         Ok(())
     }
 
@@ -373,8 +483,12 @@ mod tests {
 
     #[test]
     fn route_ipc_receiver_to_new_crossbeam_receiver_mpsc_test() -> Result<()> {
-        rr_test(route_ipc_receiver_to_new_crossbeam_receiver_mpsc)
+        rr_test(|| route_ipc_receiver_to_new_crossbeam_receiver_mpsc(10_000))
     }
 
+    // #[test]
+    // fn router_manual_recordlog_test() -> Result<()> {
+    //     router_manual_recordlog()
+    // }
     }
 }

@@ -10,13 +10,14 @@ use crate::detthread::{self, DetThreadId};
 use crate::error::DesyncError;
 use crate::recordlog::{self, ChannelVariant, RecordMetadata, RecordedEvent};
 use crate::rr::{self, DetChannelId, SendRecordReplay};
-use crate::{get_recorder_impl, get_rr_mode, BufferedValues, LogImpl, DESYNC_MODE};
+use crate::{get_rr_mode, BufferedValues, DESYNC_MODE};
 use crate::{EventRecorder, RRMode};
 
 pub use crate::crossbeam_select::{Select, SelectedOperation};
 use crate::rr::RecvRecordReplay;
 pub use crate::{select, DetMessage};
 
+use crate::RecordEntry;
 pub use rc::RecvTimeoutError;
 pub use rc::TryRecvError;
 pub use rc::{RecvError, SendError};
@@ -194,6 +195,22 @@ macro_rules! impl_recvrr {
             fn recorded_event_succ(dtid: DetThreadId) -> recordlog::RecordedEvent {
                 RecordedEvent::$succ {
                     sender_thread: dtid,
+                }
+            }
+
+            fn check_event_mismatch(
+                record_entry: &RecordEntry,
+                metadata: &RecordMetadata,
+            ) -> Result<(), DesyncError> {
+                match &record_entry.event {
+                    RecordedEvent::$succ { sender_thread: _ } => {
+                        record_entry.check_mismatch(metadata)
+                    }
+                    RecordedEvent::$err(_) => record_entry.check_mismatch(metadata),
+                    _ => unreachable!(
+                        "We should have already checked for this in {}",
+                        stringify!(check_event_mismatch)
+                    ),
                 }
             }
 
@@ -448,8 +465,8 @@ mod tests {
     use crate::recordlog::{ChannelVariant, RecordedEvent};
     use crate::test;
     use crate::test::{
-        reset_test_state, rr_test, set_rr_mode, Receiver, ReceiverTimeout, Sender, TestChannel,
-        ThreadSafe, TryReceiver,
+        rr_test, set_rr_mode, Receiver, ReceiverTimeout, Sender, TestChannel, ThreadSafe,
+        TryReceiver,
     };
     use crate::{get_global_memory_recorder, RRMode};
     use anyhow::Result;

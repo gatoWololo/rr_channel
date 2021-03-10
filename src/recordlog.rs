@@ -1,3 +1,4 @@
+use crate::context;
 use log::Level::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -9,8 +10,9 @@ use std::sync::Mutex;
 use crate::desync;
 use crate::detthread::DetThreadId;
 use crate::error;
+use crate::error::DesyncError;
 use crate::rr::DetChannelId;
-use crate::{RRMode, LOG_FILE_NAME};
+use crate::LOG_FILE_NAME;
 
 /// Record representing a successful select from a channel. Used in replay mode.
 #[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq)]
@@ -57,7 +59,7 @@ pub enum ChannelVariant {
 /// event_id, and event. Everything else is metadata used for checks to ensure we're reading from
 /// the right channel.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct RecordEntry {
+pub(crate) struct RecordEntry {
     /// Actual event and all information needed to replay this event.
     pub event: RecordedEvent,
     // TODO Replace this field with RecordMetadata type.
@@ -80,6 +82,24 @@ impl RecordEntry {
             chan_id,
             type_name,
         }
+    }
+
+    pub(crate) fn check_mismatch(&self, metadata: &RecordMetadata) -> Result<(), DesyncError> {
+        if self.channel_variant != metadata.channel_variant {
+            return Err(DesyncError::ChannelVariantMismatch(
+                self.channel_variant,
+                metadata.channel_variant,
+            ));
+        }
+
+        if self.chan_id != metadata.id {
+            return Err(DesyncError::ChannelMismatch(
+                metadata.id.clone(),
+                self.chan_id.clone(),
+            ));
+        }
+
+        Ok(())
     }
 }
 
@@ -233,7 +253,7 @@ pub(crate) trait Recordable {
     ) -> desync::Result<(RecordedEvent, ChannelVariant, DetChannelId)> {
         match self.next_record_entry() {
             Some(record_entry) => {
-                crate::log_rr!(Debug, "Event fetched: {:?}", record_entry);
+                crate::log_rr!(Debug, "{}", context!("Event fetched: {:?}", record_entry));
 
                 if let Some(curr_flavor) = curr_flavor {
                     if record_entry.channel_variant != *curr_flavor {
@@ -278,8 +298,8 @@ pub(crate) trait Recordable {
     }
 
     /// Get log entry returning the record, flavor, and channel id if needed.
-    fn get_log_entry_ret(&self) -> desync::Result<(RecordedEvent, ChannelVariant, DetChannelId)> {
-        self.get_log_entry_do(None, None)
+    fn get_log_entry_ret(&self) -> desync::Result<RecordEntry> {
+        self.next_record_entry().ok_or(DesyncError::NoEntryInLog)
     }
 }
 
