@@ -3,7 +3,6 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use crate::crossbeam_channel::{Receiver, Sender};
-use crate::detthread;
 use crate::get_det_id;
 use crate::ipc_channel::ipc::{
     self, IpcReceiver, IpcReceiverSet, IpcSelectionResult, IpcSender, OpaqueIpcMessage,
@@ -98,14 +97,8 @@ impl RouterProxy {
             // We want to forward the DetThreadId. Access the real opaque channel
             // underneath our wrapper. As our wrapper throws the DetThreadId away.
             match msg.opaque.to::<DetMessage<T>>() {
-                Ok((forward_id, msg)) => {
-                    // Big Hack: Temporarily set TLS DetThreadId so original sender's
-                    // DetThreadId is properly forwarded to receiver.
-                    let original_id = detthread::get_det_id();
-
-                    detthread::start_forwarding_id(forward_id);
+                Ok((_, msg)) => {
                     callback(Ok(msg));
-                    detthread::stop_forwarding_id(original_id);
                 }
                 Err(e) => {
                     callback(Err(e));
@@ -497,26 +490,11 @@ mod tests {
         }
 
         // Main thread reads messages from router. Thread 2 first.
-        for _ in 0..iters {
+        for _ in 0..2 * iters {
             main_thread_imr.add_entry(
                 RecordEntry::new(
                     RecordedEvent::CbRecvSucc {
-                        sender_thread: thread2.clone(),
-                    },
-                    ChannelVariant::CbUnbounded,
-                    main_recv.clone(),
-                    tn.clone(),
-                )
-                .clone(),
-            );
-        }
-
-        // Then read all messages from Thread 1.
-        for _ in 0..iters {
-            main_thread_imr.add_entry(
-                RecordEntry::new(
-                    RecordedEvent::CbRecvSucc {
-                        sender_thread: thread1.clone(),
+                        sender_thread: router_thread.clone(),
                     },
                     ChannelVariant::CbUnbounded,
                     main_recv.clone(),

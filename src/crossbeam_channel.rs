@@ -76,11 +76,7 @@ impl<T> Sender<T> {
                     DesyncMode::KeepGoing => {
                         desync::mark_program_as_desynced();
 
-                        rr::SendRecordReplay::underlying_send(
-                            self,
-                            detthread::get_forwarding_id(),
-                            msg,
-                        )
+                        rr::SendRecordReplay::underlying_send(self, get_det_id(), msg)
                     }
                 }
             }

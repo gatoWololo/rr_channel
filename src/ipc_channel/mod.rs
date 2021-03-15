@@ -37,7 +37,7 @@ pub mod ipc {
     use crate::rr::SendRecordReplay;
     use crate::rr::{self, DetChannelId};
     use crate::rr::{RecordEventChecker, RecvRecordReplay};
-    use crate::{desync, detthread, get_rr_mode, EventRecorder};
+    use crate::{desync, get_rr_mode, EventRecorder};
     use crate::{BufferedValues, DetMessage, RRMode, DESYNC_MODE};
     use std::any::type_name;
     use std::io::ErrorKind;
@@ -361,11 +361,7 @@ pub mod ipc {
                         // TODO: One day we may want to record this alternate execution.
                         DesyncMode::KeepGoing => {
                             desync::mark_program_as_desynced();
-                            rr::SendRecordReplay::underlying_send(
-                                self,
-                                detthread::get_forwarding_id(),
-                                msg,
-                            )
+                            rr::SendRecordReplay::underlying_send(self, get_det_id(), msg)
                         }
                     }
                 }

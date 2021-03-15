@@ -4,7 +4,7 @@
 use crate::rr;
 use crate::RRMode;
 
-use crate::detthread::{self, DetThreadId, CHANNEL_ID};
+use crate::detthread::{self, get_det_id, DetThreadId, CHANNEL_ID};
 use crate::error::{DesyncError, RecvErrorRR};
 use crate::{desync, recordlog};
 use crate::{BufferedValues, DetMessage};
@@ -189,19 +189,14 @@ pub(crate) trait SendRecordReplay<T, E>: RecordEventChecker<E> {
             error!(%error);
             return Err((error, msg));
         }
-
-        // However, for the record log, we still want to use the original
-        // thread's DetThreadId. Otherwise we will have "repeated" entries in the log
-        // which look like they're coming from the same thread.
-        let forwading_id = detthread::get_forwarding_id();
+        let det_id = get_det_id();
         info!(
-            "send<{}>(({:?}, {:?}))",
-            metadata.type_name, metadata.id, forwading_id,
+            "send<{}>(({:?}, {:?})",
+            metadata.type_name, metadata.id, det_id
         );
-
         match mode {
             RRMode::Record => {
-                let result = self.underlying_send(forwading_id, msg);
+                let result = self.underlying_send(det_id, msg);
                 recordlog.write_event_to_record(Self::EVENT_VARIANT, &metadata);
                 Ok(result)
             }
@@ -230,10 +225,10 @@ pub(crate) trait SendRecordReplay<T, E>: RecordEventChecker<E> {
                         }
                     }
                 }
-                let result = self.underlying_send(forwading_id, msg);
+                let result = self.underlying_send(det_id, msg);
                 Ok(result)
             }
-            RRMode::NoRR => Ok(self.underlying_send(detthread::get_det_id(), msg)),
+            RRMode::NoRR => Ok(self.underlying_send(det_id, msg)),
         }
     }
 

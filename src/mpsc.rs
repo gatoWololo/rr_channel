@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::mpsc;
 use std::time::Duration;
 
-use crate::detthread::{self, DetThreadId};
+use crate::detthread::{get_det_id, DetThreadId};
 use crate::error::RecvErrorRR;
 use crate::recordlog::{self, ChannelVariant, RecordedEvent};
 use crate::rr::SendRecordReplay;
@@ -253,11 +253,7 @@ impl<T> Sender<T> {
                     // TODO: One day we may want to record this alternate execution.
                     DesyncMode::KeepGoing => {
                         desync::mark_program_as_desynced();
-                        rr::SendRecordReplay::underlying_send(
-                            self,
-                            detthread::get_forwarding_id(),
-                            msg,
-                        )
+                        rr::SendRecordReplay::underlying_send(self, get_det_id(), msg)
                     }
                 }
             }

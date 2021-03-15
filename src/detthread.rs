@@ -21,12 +21,6 @@ thread_local! {
     pub(crate) static THREAD_INITIALIZED: RefCell<bool> = RefCell::new(false);
 
     pub(crate) static CHANNEL_ID: AtomicU32 = AtomicU32::new(1);
-    /// Hack to know when we're in the router. Forwading the DetThreadId to to the callback
-    /// by temporarily setting DET_ID to a different value.
-    static FORWADING_ID: RefCell<bool> = RefCell::new(false);
-    /// DetId set when forwarding id. Should only be accessed if in_forwading() returns
-    /// true. Which is set by start_forwarding_id() and ends by stop_forwading_id().
-    pub static TEMP_DET_ID: RefCell<Option<DetThreadId>> = RefCell::new(None);
 }
 
 pub fn get_det_id() -> DetThreadId {
@@ -37,34 +31,6 @@ pub fn set_det_id(new_id: DetThreadId) {
     DET_ID.with(|id| {
         *id.borrow_mut() = new_id;
     });
-}
-
-pub fn get_temp_det_id() -> DetThreadId {
-    TEMP_DET_ID.with(|di| di.borrow().clone().expect("No ID set!"))
-}
-
-pub fn set_temp_det_id(new_id: DetThreadId) {
-    TEMP_DET_ID.with(|id| {
-        *id.borrow_mut() = Some(new_id);
-    });
-}
-
-pub fn start_forwarding_id(forwarding_id: DetThreadId) {
-    FORWADING_ID.with(|fi| {
-        *fi.borrow_mut() = true;
-    });
-    set_temp_det_id(forwarding_id);
-}
-
-pub fn in_forwarding() -> bool {
-    FORWADING_ID.with(|fi| *fi.borrow())
-}
-
-pub fn stop_forwarding_id(original_id: DetThreadId) {
-    FORWADING_ID.with(|fi| {
-        *fi.borrow_mut() = false;
-    });
-    set_temp_det_id(original_id);
 }
 
 /// Wrapper around thread::spawn. We will need this later to assign a deterministic thread id, and
@@ -233,17 +199,6 @@ impl Builder {
 impl Default for Builder {
     fn default() -> Self {
         Builder::new()
-    }
-}
-
-/// Because of the router, we want to "forward" the original sender's DetThreadId
-/// sometimes. We should always use this function when sending our DetThreadId via a
-/// sender channel as it handles the router and non-router cases.
-pub fn get_forwarding_id() -> DetThreadId {
-    if in_forwarding() {
-        get_temp_det_id()
-    } else {
-        get_det_id()
     }
 }
 
