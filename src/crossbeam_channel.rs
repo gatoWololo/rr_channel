@@ -1,15 +1,13 @@
-// pub use crossbeam_channel::{self, RecvError, RecvTimeoutError, SendError, TryRecvError};
 use crossbeam_channel as rc; // rc = real_crossbeam
-use log::Level::*;
 use std::cell::{RefCell, RefMut};
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use crate::desync::{self, DesyncMode};
-use crate::detthread::{self, DetThreadId};
+use crate::detthread::{self, get_det_id, DetThreadId};
 use crate::error::DesyncError;
 use crate::recordlog::{self, ChannelVariant, RecordMetadata, RecordedEvent};
-use crate::rr::{self, DetChannelId, SendRecordReplay};
+use crate::rr::{self, DetChannelId, RecordEventChecker, SendRecordReplay};
 use crate::{get_rr_mode, BufferedValues, DESYNC_MODE};
 use crate::{EventRecorder, RRMode};
 
@@ -17,11 +15,14 @@ pub use crate::crossbeam_select::{Select, SelectedOperation};
 use crate::rr::RecvRecordReplay;
 pub use crate::{select, DetMessage};
 
-use crate::RecordEntry;
+use crate::fn_basename;
 pub use rc::RecvTimeoutError;
 pub use rc::TryRecvError;
 pub use rc::{RecvError, SendError};
 use std::any::type_name;
+
+#[allow(unused_imports)]
+use tracing::{debug, error, info, span, span::EnteredSpan, trace, warn, Level};
 
 pub struct Sender<T> {
     pub(crate) sender: crossbeam_channel::Sender<DetMessage<T>>,
@@ -39,6 +40,7 @@ impl<T> Sender<T> {
         mode: RRMode,
         e: EventRecorder,
     ) -> Sender<T> {
+        info!("{}", crate::function_name!(),);
         Sender {
             sender: real_sender,
             metadata,
@@ -47,7 +49,13 @@ impl<T> Sender<T> {
         }
     }
 
+    fn span(&self, fn_name: &str) -> EnteredSpan {
+        span!(Level::INFO, stringify!(Sender), fn_name).entered()
+    }
+
     pub fn send(&self, msg: T) -> Result<(), rc::SendError<T>> {
+        let _s = self.span(fn_basename!());
+
         match self.record_replay_send(
             msg,
             &self.mode,
@@ -57,10 +65,12 @@ impl<T> Sender<T> {
             Ok(v) => v,
             // send() should never hang. No need to check if NoEntryLog.
             Err((error, msg)) => {
-                crate::log_rr!(Warn, "Desynchronization detected: {:?}", error);
+                // error!(%error);
 
                 match *DESYNC_MODE {
-                    DesyncMode::Panic => panic!("Send::Desynchronization detected: {:?}", error),
+                    DesyncMode::Panic => {
+                        panic!("Send::Desynchronization detected: {}", error);
+                    }
 
                     // TODO: One day we may want to record this alternate execution.
                     DesyncMode::KeepGoing => {
@@ -99,21 +109,19 @@ impl<T> Clone for Sender<T> {
     }
 }
 
+impl<T> RecordEventChecker<rc::SendError<T>> for Sender<T> {
+    fn check_recorded_event(&self, re: &RecordedEvent) -> Result<(), RecordedEvent> {
+        match re {
+            RecordedEvent::CbSender => Ok(()),
+            _ => Err(RecordedEvent::CbSender),
+        }
+    }
+}
+
 impl<T> SendRecordReplay<T, rc::SendError<T>> for Sender<T> {
     const EVENT_VARIANT: RecordedEvent = RecordedEvent::CbSender;
 
-    fn check_log_entry(&self, entry: RecordedEvent) -> desync::Result<()> {
-        match entry {
-            RecordedEvent::CbSender => Ok(()),
-            log_event => Err(DesyncError::EventMismatch(
-                log_event,
-                RecordedEvent::CbSender,
-            )),
-        }
-    }
-
     fn underlying_send(&self, thread_id: DetThreadId, msg: T) -> Result<(), rc::SendError<T>> {
-        log::error!("Sending value from thread: {:?}", thread_id);
         self.sender
             .send((thread_id, msg))
             .map_err(|e| rc::SendError(e.into_inner().1))
@@ -188,6 +196,22 @@ pub struct Receiver<T> {
     mode: RRMode,
 }
 
+macro_rules! ImplRecordEvenChecker {
+    ($err_type:ty, $succ: ident, $err:ident) => {
+        impl<T> RecordEventChecker<$err_type> for Receiver<T> {
+            fn check_recorded_event(&self, re: &RecordedEvent) -> Result<(), RecordedEvent> {
+                match re {
+                    RecordedEvent::$succ { sender_thread: _ } => Ok(()),
+                    RecordedEvent::$err(_) => Ok(()),
+                    _ => Err(RecordedEvent::$succ {
+                        sender_thread: DetThreadId::new(),
+                    }),
+                }
+            }
+        }
+    };
+}
+
 /// Captures template for: impl RecvRR<_, _> for Receiver<T>
 macro_rules! impl_recvrr {
     ($err_type:ty, $succ: ident, $err:ident) => {
@@ -195,22 +219,6 @@ macro_rules! impl_recvrr {
             fn recorded_event_succ(dtid: DetThreadId) -> recordlog::RecordedEvent {
                 RecordedEvent::$succ {
                     sender_thread: dtid,
-                }
-            }
-
-            fn check_event_mismatch(
-                record_entry: &RecordEntry,
-                metadata: &RecordMetadata,
-            ) -> Result<(), DesyncError> {
-                match &record_entry.event {
-                    RecordedEvent::$succ { sender_thread: _ } => {
-                        record_entry.check_mismatch(metadata)
-                    }
-                    RecordedEvent::$err(_) => record_entry.check_mismatch(metadata),
-                    _ => unreachable!(
-                        "We should have already checked for this in {}",
-                        stringify!(check_event_mismatch)
-                    ),
                 }
             }
 
@@ -228,21 +236,10 @@ macro_rules! impl_recvrr {
                         Ok(Ok(retval))
                     }
                     RecordedEvent::$err(e) => {
-                        crate::log_rr!(
-                            Trace,
-                            "Creating error event for: {:?}",
-                            RecordedEvent::$err(e)
-                        );
+                        trace!("Creating error event for: {:?}", RecordedEvent::$err(e));
                         Ok(Err(e))
                     }
-                    e => {
-                        let mock_event = RecordedEvent::$succ {
-                            // TODO: Is there a better value that makes it obvious this is just
-                            // a placeholder?
-                            sender_thread: DetThreadId::new(),
-                        };
-                        Err(DesyncError::EventMismatch(e, mock_event))
-                    }
+                    _ => unreachable!("This should have been checked in RecordEventChecker"),
                 }
             }
         }
@@ -253,6 +250,10 @@ impl_recvrr!(rc::RecvError, CbRecvSucc, CbRecvErr);
 impl_recvrr!(rc::TryRecvError, CbTryRecvSucc, CbTryRecvErr);
 impl_recvrr!(rc::RecvTimeoutError, CbRecvTimeoutSucc, CbRecvTimeoutErr);
 
+ImplRecordEvenChecker!(rc::RecvError, CbRecvSucc, CbRecvErr);
+ImplRecordEvenChecker!(rc::TryRecvError, CbTryRecvSucc, CbTryRecvErr);
+ImplRecordEvenChecker!(rc::RecvTimeoutError, CbRecvTimeoutSucc, CbRecvTimeoutErr);
+
 impl<T> Receiver<T> {
     pub(crate) fn new(
         mode: RRMode,
@@ -260,11 +261,14 @@ impl<T> Receiver<T> {
         id: DetChannelId,
         recorder: EventRecorder,
     ) -> Receiver<T> {
-        let flavor = Receiver::get_marker(&real_receiver);
+        let variant = Receiver::get_marker(&real_receiver);
+
+        info!("{}", crate::function_name!());
+
         Receiver {
             buffer: RefCell::new(HashMap::new()),
             receiver: real_receiver,
-            metadata: recordlog::RecordMetadata::new(type_name::<T>().to_string(), flavor, id),
+            metadata: recordlog::RecordMetadata::new(type_name::<T>().to_string(), variant, id),
             recorder,
             mode,
         }
@@ -273,6 +277,7 @@ impl<T> Receiver<T> {
     // Implementation of crossbeam_channel public API.
 
     pub fn recv(&self) -> Result<T, rc::RecvError> {
+        let _s = self.span(fn_basename!());
         let f = || self.receiver.recv();
 
         self.record_replay(f)
@@ -280,6 +285,7 @@ impl<T> Receiver<T> {
     }
 
     pub fn try_recv(&self) -> Result<T, rc::TryRecvError> {
+        let _s = self.span(fn_basename!());
         let f = || self.receiver.try_recv();
 
         self.record_replay(f)
@@ -287,6 +293,7 @@ impl<T> Receiver<T> {
     }
 
     pub fn recv_timeout(&self, timeout: Duration) -> Result<T, rc::RecvTimeoutError> {
+        let _s = self.span(fn_basename!());
         let f = || self.receiver.recv_timeout(timeout);
 
         self.record_replay(f)
@@ -352,6 +359,10 @@ impl<T> Receiver<T> {
         None
     }
 
+    fn span(&self, fn_name: &str) -> EnteredSpan {
+        span!(Level::INFO, stringify!(Receiver), fn_name).entered()
+    }
+
     // The following methods are used for the select operation:
 
     /// Poll to see if this receiver has this entry. Polling is side-effecty and takes the
@@ -361,18 +372,19 @@ impl<T> Receiver<T> {
     /// Notice even on `false`, an arbitrary number of messages from _other_ senders may
     /// be buffered.
     pub(crate) fn poll_entry(&self, sender: &DetThreadId) -> bool {
-        crate::log_rr!(Debug, "poll_entry()");
+        let _s = self.span(fn_basename!());
+
         // There is already an entry in the buffer.
         if let Some(queue) = self.buffer.borrow_mut().get(sender) {
             if !queue.is_empty() {
-                crate::log_rr!(Debug, "Entry found in buffer");
+                debug!("Entry found in buffer");
                 return true;
             }
         }
 
         match self.replay_recv(sender) {
             Ok(msg) => {
-                crate::log_rr!(Debug, "Correct message found while polling and buffered.");
+                debug!("Correct message found while polling and buffered.");
                 // Save message in buffer for use later.
                 self.buffer
                     .borrow_mut()
@@ -382,7 +394,7 @@ impl<T> Receiver<T> {
                 true
             }
             Err(DesyncError::Timeout) => {
-                crate::log_rr!(Debug, "No entry found while polling...");
+                debug!("No entry found while polling...");
                 false
             }
             // TODO document why this is unreachable.
@@ -397,7 +409,7 @@ pub fn after(duration: Duration) -> Receiver<Instant> {
     let id = DetChannelId::new();
     let recorder = EventRecorder::get_global_recorder();
 
-    crate::log_rr!(Info, "After channel receiver created: {:?}", id);
+    let _s = span!(Level::INFO, stringify!(after)).entered();
     Receiver::new(
         get_rr_mode(),
         ChannelKind::After(crossbeam_channel::after(duration)),
@@ -415,9 +427,18 @@ pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
     let type_name = type_name::<T>().to_string();
     let id = rr::DetChannelId::new();
 
-    crate::log_rr!(Info, "Unbounded channel created: {:?} {:?}", id, type_name);
     let metadata =
         recordlog::RecordMetadata::new(type_name, ChannelVariant::CbUnbounded, id.clone());
+
+    let _s = span!(
+        Level::INFO,
+        "New Channel Created",
+        dti = ?get_det_id(),
+        variant = ?metadata.channel_variant,
+        chan=%id
+    )
+    .entered();
+
     (
         Sender::new(sender, metadata, mode, recorder.clone()),
         Receiver::new(mode, ChannelKind::Unbounded(receiver), id, recorder),
@@ -432,7 +453,6 @@ pub fn bounded<T>(cap: usize) -> (Sender<T>, Receiver<T>) {
 
     let type_name = type_name::<T>().to_string();
 
-    crate::log_rr!(Info, "Bounded channel created: {:?} {:?}", id, type_name);
     let recorder = EventRecorder::get_global_recorder();
     let metadata = recordlog::RecordMetadata::new(type_name, ChannelVariant::CbBounded, id.clone());
     (

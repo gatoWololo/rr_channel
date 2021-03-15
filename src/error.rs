@@ -5,6 +5,7 @@ use crate::rr::DetChannelId;
 use crossbeam_channel::{RecvError, RecvTimeoutError, TryRecvError};
 use serde::{Deserialize, Serialize};
 use std::sync::mpsc;
+use thiserror::Error;
 
 /// Fundamentally just wanna know if it was a Timeout or Disconnected error. This type is
 /// used to abstract over different types of RecvErrors from different channel types.
@@ -34,40 +35,55 @@ impl From<RecvErrorRR> for DesyncError {
 
 /// Desynchonizations are common (TODO: make desync less common). This error type
 /// enumerates all reasons why we might desynchronize when executing RR.
-#[derive(Debug)]
+#[derive(Error, Debug)]
 pub enum DesyncError {
     /// Missing entry for specified (DetThreadId, EventIt) pair.
+    /// TODO: Should probably carry information about which entry we're missing.
+    #[error("Ran off the end of the log.")]
     NoEntryInLog,
     /// ChannelVariants don't match. log flavor, vs current flavor.
+    #[error("Mismatched channel variants. Log showed {0:?} but actual was {1:?}")]
     ChannelVariantMismatch(ChannelVariant, ChannelVariant),
     /// Channel ids don't match. log channel, vs current flavor.
+    #[error("Mismatched channel IDs. Log showed {0} but actual was {1}")]
     ChannelMismatch(DetChannelId, DetChannelId),
     /// RecordedEvent log message was different. logged event vs current event.
+    #[error("Mismatched events. Log showed {0:?} but channel expected a {1:?}.")]
     EventMismatch(RecordedEvent, RecordedEvent),
     /// This thread did not get its DetThreadId initialized even though it should
     /// have.
+    #[error("Uninitialized Thread")]
     UnitializedDetThreadId,
     /// Receiver was expected for select operation but entry is missing.
+    #[error("Missing receiver in Select Set. At index {0:?}")]
     MissingReceiver(u64),
-    /// An entry already exists for the specificied index in IpcReceiverSet.
+    /// An entry already exists for the specified index in IpcReceiverSet.
+    #[error("IpcSelect Entry already exists at {0:?}")]
     SelectExistingEntry(u64),
     /// IpcReceiverSet expected first index, but found second index.
+    #[error("IpcReceiverSet receiver add mismatch. Expected to add {0} but saw {1}")]
     SelectIndexMismatch(u64, u64),
     /// Generic error used for situations where we already know we're
     /// desynchronized and want to alert caller.
+    #[error("RR Channels are desynchronized.")]
     Desynchronized,
     /// Expected a channel close message, but saw actual value.
+    #[error("Expected a channel close message, but saw actual value.")]
     ChannelClosedExpected,
     /// Receiver disconnected...
+    #[error("Receiver unexpectedly disconnected.")]
     Disconnected,
     /// Expected a message, but channel returned closed.
+    #[error("IpcReceiverSet expected a message, but channel returned closed at index {0}")]
     ChannelClosedUnexpected(u64),
     /// Waited too long and no message ever came.
+    #[error("Timed out!")]
     Timeout,
     /// Thread woke up after assuming it had ran of the end of the log.
     /// While `NoEntryInLog` may mean that this thread simply blocked forever
     /// or "didn't make it this far", DesynchronizedWakeup means we put that
     /// thread to sleep and it was woken up by a desync somewhere.
+    #[error("Thread woke up after assuming it had ran of the end of the log.")]
     DesynchronizedWakeup,
 }
 

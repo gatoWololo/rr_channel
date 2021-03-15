@@ -1,15 +1,17 @@
 use ::crossbeam_channel as rc; // rc = real_channel
-use log::Level::*;
 use std::collections::HashMap;
 
 use crate::crossbeam_channel::{self, ChannelKind};
 use crate::detthread::DetThreadId;
 use crate::error::DesyncError;
+use crate::fn_basename;
 use crate::recordlog::{self, ChannelVariant, RecordedEvent, SelectEvent};
 use crate::rr::DetChannelId;
 use crate::DESYNC_MODE;
 use crate::{desync, detthread, get_rr_mode, EventRecorder};
 use crate::{DesyncMode, DetMessage, RRMode};
+#[allow(unused_imports)]
+use tracing::{debug, error, info, span, span::EnteredSpan, trace, warn, Level};
 
 /// Our Select wrapper type must hold different types of Receivet<T>. We use this trait
 /// so we can hold different T's via a dynamic trait object.
@@ -69,7 +71,8 @@ impl<'a> Select<'a> {
     /// Adds a receive operation.
     /// Returns the index of the added operation.
     pub fn recv<T>(&mut self, r: &'a crossbeam_channel::Receiver<T>) -> usize {
-        crate::log_rr!(Info, "Select adding receiver<{:?}>", r.metadata.id);
+        let _s = self.span(fn_basename!());
+        info!("Select adding receiver<{:?}>", r.metadata.id);
 
         // We still register all receivers with selector, even on replay. As on
         // desynchonization we will have to select on the real selector.
@@ -88,9 +91,10 @@ impl<'a> Select<'a> {
     }
 
     pub fn select(&mut self) -> SelectedOperation<'a> {
-        crate::log_rr!(Info, "Select::select()");
+        let _s = self.span(fn_basename!());
+
         self.rr_select().unwrap_or_else(|error| {
-            crate::log_rr!(Warn, "Select: Desynchronization detected! {:?}", error);
+            warn!("Select: Desynchronization detected! {:?}", error);
 
             match *DESYNC_MODE {
                 DesyncMode::Panic => {
@@ -104,22 +108,27 @@ impl<'a> Select<'a> {
                     desync::mark_program_as_desynced();
                     for (index, receiver) in self.receivers.iter() {
                         if receiver.buffered_value() {
-                            crate::log_rr!(Debug, "Buffered value chosen from receiver.");
+                            debug!("Buffered value chosen from receiver.");
                             return SelectedOperation::DesyncBufferEntry(*index);
                         }
                     }
                     // No values in buffers, read directly from selector.
-                    crate::log_rr!(Debug, "No value in buffer, calling select directly.");
+                    debug!("No value in buffer, calling select directly.");
                     SelectedOperation::Desync(self.selector.select())
                 }
             }
         })
     }
 
+    fn span(&self, fn_name: &str) -> EnteredSpan {
+        span!(Level::INFO, stringify!(Select), fn_name).entered()
+    }
+
     pub fn ready(&mut self) -> usize {
-        crate::log_rr!(Info, "Select::ready()");
+        let _s = self.span(fn_basename!());
+
         self.rr_ready().unwrap_or_else(|error| {
-            crate::log_rr!(Warn, "Ready::Desynchronization found: {:?}", error);
+            warn!("Ready::Desynchronization found: {:?}", error);
             match *DESYNC_MODE {
                 DesyncMode::Panic => panic!("Desynchronization detected: {:?}", error),
                 DesyncMode::KeepGoing => {
@@ -132,7 +141,9 @@ impl<'a> Select<'a> {
 
     fn rr_ready(&mut self) -> desync::Result<usize> {
         if desync::program_desyned() {
-            return Err(DesyncError::Desynchronized);
+            let error = DesyncError::Desynchronized;
+            error!(%error);
+            return Err(error);
         }
         match self.mode {
             RRMode::Record => {
@@ -149,13 +160,15 @@ impl<'a> Select<'a> {
                 Ok(select_index)
             }
             RRMode::Replay => {
-                let event = self.event_recorder.get_recordable().get_log_entry()?;
+                let recorded_event = self.event_recorder.get_recordable().get_log_entry()?;
 
-                match event {
+                match recorded_event.event {
                     RecordedEvent::CbSelectReady { select_index } => Ok(select_index),
                     event => {
                         let dummy = RecordedEvent::CbSelectReady { select_index: 0 };
-                        Err(DesyncError::EventMismatch(event, dummy))
+                        let error = DesyncError::EventMismatch(event, dummy);
+                        error!(%error);
+                        Err(error)
                     }
                 }
             }
@@ -165,7 +178,9 @@ impl<'a> Select<'a> {
 
     fn rr_select(&mut self) -> desync::Result<SelectedOperation<'a>> {
         if desync::program_desyned() {
-            return Err(DesyncError::Desynchronized);
+            let error = DesyncError::Desynchronized;
+            error!(%error);
+            return Err(error);
         }
         match self.mode {
             RRMode::Record => {
@@ -181,15 +196,17 @@ impl<'a> Select<'a> {
                 // Query our log to see what index was selected!() during the replay phase.
                 // ChannelVariant type not check on Select::select() but on Select::recv()
 
-                let entry = self.event_recorder.get_recordable().get_log_entry_ret();
+                let entry = self.event_recorder.get_recordable().get_log_entry();
 
                 // Here we put this thread to sleep if the entry is missing.
                 // On record, the thread never returned from blocking...
                 if let Err(e @ DesyncError::NoEntryInLog) = entry {
-                    crate::log_rr!(Info, "Saw {:?}. Putting thread to sleep.", e);
+                    info!("Saw {:?}. Putting thread to sleep.", e);
                     desync::sleep_until_desync();
                     // Thread woke back up... desynced!
-                    return Err(DesyncError::DesynchronizedWakeup);
+                    let error = DesyncError::DesynchronizedWakeup;
+                    error!(%error);
+                    return Err(error);
                 }
                 let recorded_entry = entry?;
 
@@ -203,24 +220,27 @@ impl<'a> Select<'a> {
                             sender_thread,
                         } = event.clone()
                         {
-                            crate::log_rr!(
-                                Debug,
-                                "Polling select receiver to see if message is there..."
-                            );
+                            debug!("Polling select receiver to see if message is there...");
                             match self.receivers.get(&selected_index) {
                                 Some(receiver) => {
                                     if !receiver.poll(&sender_thread) {
-                                        crate::log_rr!(Debug, "No such message found via polling.");
+                                        debug!("No such message found via polling.");
                                         // We failed to find the message we were expecting
                                         // this is a desynchonization.
-                                        return Err(DesyncError::Timeout);
+                                        let error = DesyncError::Timeout;
+
+                                        error!(%error);
+                                        return Err(error);
                                     }
-                                    crate::log_rr!(Debug, "Polling verified message is present.");
+                                    debug!("Polling verified message is present.");
                                 }
                                 None => {
-                                    crate::log_rr!(Warn, "Missing receiver.");
+                                    warn!("Missing receiver.");
                                     let i = selected_index as u64;
-                                    return Err(DesyncError::MissingReceiver(i));
+                                    let error = DesyncError::MissingReceiver(i);
+
+                                    error!(%error);
+                                    return Err(error);
                                 }
                             }
                         }
@@ -237,10 +257,9 @@ impl<'a> Select<'a> {
                             sender_thread: DetThreadId::new(),
                             selected_index: (0 - 1) as usize,
                         };
-                        Err(DesyncError::EventMismatch(
-                            e,
-                            RecordedEvent::CbSelect(dummy),
-                        ))
+                        let error = DesyncError::EventMismatch(e, RecordedEvent::CbSelect(dummy));
+                        error!(%error);
+                        Err(error)
                     }
                 }
             }
@@ -309,6 +328,10 @@ impl<'a> SelectedOperation<'a> {
         panic!("Unimplemented send for record and replay channels.")
     }
 
+    fn span(&self, fn_name: &str) -> EnteredSpan {
+        span!(Level::INFO, stringify!(SelectedOperation), fn_name).entered()
+    }
+
     /// Completes the receive operation.
     ///
     /// The passed [`Receiver`] reference must be the same one that was used in [`Select::recv`]
@@ -318,7 +341,7 @@ impl<'a> SelectedOperation<'a> {
     ///
     /// Panics if an incorrect [`Receiver`] reference is passed.
     pub fn recv<T>(self, r: &crossbeam_channel::Receiver<T>) -> Result<T, rc::RecvError> {
-        crate::log_rr!(Info, "SelectedOperation<{:?}>::recv()", r.metadata().id);
+        let _s = self.span(fn_basename!());
 
         match self.rr_select_recv(r) {
             Ok(v) => v,
@@ -330,8 +353,7 @@ impl<'a> SelectedOperation<'a> {
                 // event. We cannot do this event preemptively as crossbeam will panic!()
                 // if we do select() but do not finish it by doing recv() on the selected
                 // operation. This should not really happen. So I think we're okay.
-                crate::log_rr!(
-                    Error,
+                error!(
                     "SelectedOperation: Unrecoverable desynchonization: {:?}",
                     error
                 );
@@ -353,18 +375,18 @@ impl<'a> SelectedOperation<'a> {
         let selected_index = self.index();
         match self {
             SelectedOperation::DesyncBufferEntry(_) => {
-                crate::log_rr!(Debug, "SelectedOperation::DesyncBufferEntry");
+                debug!("SelectedOperation::DesyncBufferEntry");
                 Ok(Ok(r.get_buffered_value().expect(
                     "Expected buffer value to be there. This is a bug.",
                 )))
             }
             SelectedOperation::Desync(selected) => {
-                crate::log_rr!(Debug, "SelectedOperation::Desync");
+                debug!("SelectedOperation::Desync");
                 Ok(SelectedOperation::do_recv(selected, r).map(|(_, msg)| msg))
             }
             // Record value we get from direct use of Select API recv().
             SelectedOperation::Record(selected, recorder) => {
-                crate::log_rr!(Debug, "SelectedOperation::Record");
+                debug!("SelectedOperation::Record");
 
                 let (msg, select_event) = match SelectedOperation::do_recv(selected, r) {
                     // Read value, log information needed for replay later.
@@ -390,22 +412,24 @@ impl<'a> SelectedOperation<'a> {
                 // We cannot check these in `Select::select()` since we do not have
                 // the receiver until this function to compare values against.
                 if flavor != r.metadata.channel_variant {
-                    return Err(DesyncError::ChannelVariantMismatch(
-                        flavor,
-                        r.metadata.channel_variant,
-                    ));
+                    let error =
+                        DesyncError::ChannelVariantMismatch(flavor, r.metadata.channel_variant);
+                    error!(%error);
+                    return Err(error);
                 }
                 if chan_id != r.metadata.id {
-                    return Err(DesyncError::ChannelMismatch(chan_id, r.metadata.id.clone()));
+                    let error = DesyncError::ChannelMismatch(chan_id, r.metadata.id.clone());
+                    error!(%error);
+                    return Err(error);
                 }
 
                 let retval = match event {
                     SelectEvent::Success { sender_thread, .. } => {
-                        crate::log_rr!(Debug, "SelectedOperation::Replay(SelectEvent::Success");
+                        debug!("SelectedOperation::Replay(SelectEvent::Success");
                         Ok(r.replay_recv(&sender_thread)?)
                     }
                     SelectEvent::RecvError { .. } => {
-                        crate::log_rr!(Debug, "SelectedOperation::Replay(SelectEvent::RecvError");
+                        debug!("SelectedOperation::Replay(SelectEvent::RecvError");
                         Err(rc::RecvError)
                     }
                 };

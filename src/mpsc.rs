@@ -1,4 +1,3 @@
-use log::Level::*;
 use std::cell::RefCell;
 use std::cell::RefMut;
 use std::collections::HashMap;
@@ -6,15 +5,18 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use crate::detthread::{self, DetThreadId};
-use crate::error::{DesyncError, RecvErrorRR};
-use crate::recordlog::{self, ChannelVariant, RecordEntry, RecordMetadata, RecordedEvent};
-use crate::rr::RecvRecordReplay;
+use crate::error::RecvErrorRR;
+use crate::recordlog::{self, ChannelVariant, RecordedEvent};
 use crate::rr::SendRecordReplay;
 use crate::rr::{self, DetChannelId};
+use crate::rr::{RecordEventChecker, RecvRecordReplay};
 use crate::{desync, get_rr_mode, EventRecorder, RRMode};
 use crate::{BufferedValues, DESYNC_MODE};
 use crate::{DesyncMode, DetMessage};
 use std::any::type_name;
+
+#[allow(unused_imports)]
+use tracing::{debug, error, info, span, span::EnteredSpan, trace, warn, Level};
 
 pub use mpsc::{RecvError, RecvTimeoutError, TryRecvError};
 
@@ -38,10 +40,26 @@ pub enum RealSender<T> {
     Unbounded(mpsc::Sender<DetMessage<T>>),
 }
 
+macro_rules! ImplRecordEventChecker {
+    ($err_type:ty, $succ: ident, $err:ident) => {
+        impl<T> RecordEventChecker<$err_type> for Receiver<T> {
+            fn check_recorded_event(&self, re: &RecordedEvent) -> Result<(), RecordedEvent> {
+                match re {
+                    RecordedEvent::$succ { sender_thread: _ } => Ok(()),
+                    RecordedEvent::$err(_) => Ok(()),
+                    _ => Err(RecordedEvent::$succ {
+                        sender_thread: DetThreadId::new(),
+                    }),
+                }
+            }
+        }
+    };
+}
+
 /// General template for implementing trait RecvRR for our mpsc::Receiver<T>.
 macro_rules! impl_RR {
     ($err_type:ty, $succ: ident, $err:ident) => {
-        impl<T> rr::RecvRecordReplay<T, $err_type> for Receiver<T> {
+        impl<T> RecvRecordReplay<T, $err_type> for Receiver<T> {
             fn recorded_event_succ(dtid: DetThreadId) -> recordlog::RecordedEvent {
                 RecordedEvent::$succ {
                     sender_thread: dtid,
@@ -50,24 +68,6 @@ macro_rules! impl_RR {
 
             fn recorded_event_err(e: &$err_type) -> recordlog::RecordedEvent {
                 RecordedEvent::$err(*e)
-            }
-
-            fn check_event_mismatch(
-                record_entry: &RecordEntry,
-                metadata: &RecordMetadata,
-            ) -> Result<(), DesyncError> {
-                match &record_entry.event {
-                    // These two are the expected enum variants. That's okay!
-                    RecordedEvent::$succ { sender_thread: _ } => {
-                        record_entry.check_mismatch(metadata)
-                    }
-                    RecordedEvent::$err(_) => record_entry.check_mismatch(metadata),
-                    // Unexpected enum variant!
-                    _ => unreachable!(
-                        "We should have already checked for this in {}",
-                        stringify!(check_event_mismatch)
-                    ),
-                }
             }
 
             fn replay_recorded_event(
@@ -80,11 +80,7 @@ macro_rules! impl_RR {
                         Ok(Ok(retval))
                     }
                     RecordedEvent::$err(e) => {
-                        crate::log_rr!(
-                            Trace,
-                            "Creating error event for: {:?}",
-                            RecordedEvent::$err(e)
-                        );
+                        trace!("Creating error event for: {:?}", RecordedEvent::$err(e));
                         Ok(Err(e))
                     }
                     _ => unreachable!(
@@ -100,6 +96,14 @@ macro_rules! impl_RR {
 impl_RR!(mpsc::RecvError, MpscRecvSucc, MpscRecvErr);
 impl_RR!(mpsc::TryRecvError, MpscTryRecvSucc, MpscTryRecvErr);
 impl_RR!(
+    mpsc::RecvTimeoutError,
+    MpscRecvTimeoutSucc,
+    MpscRecvTimeoutErr
+);
+
+ImplRecordEventChecker!(mpsc::RecvError, MpscRecvSucc, MpscRecvErr);
+ImplRecordEventChecker!(mpsc::TryRecvError, MpscTryRecvSucc, MpscTryRecvErr);
+ImplRecordEventChecker!(
     mpsc::RecvTimeoutError,
     MpscRecvTimeoutSucc,
     MpscRecvTimeoutErr
@@ -243,7 +247,7 @@ impl<T> Sender<T> {
             Ok(v) => v,
             // send() should never hang. No need to check if NoEntryLog.
             Err((error, msg)) => {
-                crate::log_rr!(Warn, "Desynchronization detected: {:?}", error);
+                warn!("Desynchronization detected: {:?}", error);
                 match *DESYNC_MODE {
                     DesyncMode::Panic => panic!("Send::Desynchronization detected: {:?}", error),
                     // TODO: One day we may want to record this alternate execution.
@@ -269,10 +273,9 @@ where
         // following implementation for crossbeam, we do not support MPSC for bounded channels as the blocking semantics are
         // more complicated to implement.
         if self.metadata.channel_variant == ChannelVariant::MpscBounded {
-            crate::log_rr!(
-                Warn,
+            warn!(
                 "MPSC for bounded channels not supported. Blocking semantics \
-                     of bounded channels will not be preseved!"
+                     of bounded channels will not be preserved!"
             );
         }
         Sender {
@@ -284,37 +287,24 @@ where
     }
 }
 
-impl<T> rr::SendRecordReplay<T, mpsc::SendError<T>> for Sender<T> {
-    const EVENT_VARIANT: RecordedEvent = RecordedEvent::MpscSender;
-
-    fn check_log_entry(&self, entry: RecordedEvent) -> desync::Result<()> {
-        match entry {
+impl<T> RecordEventChecker<mpsc::SendError<T>> for Sender<T> {
+    fn check_recorded_event(&self, re: &RecordedEvent) -> Result<(), RecordedEvent> {
+        match re {
             RecordedEvent::MpscSender => Ok(()),
-            log_event => Err(DesyncError::EventMismatch(
-                log_event,
-                RecordedEvent::MpscSender,
-            )),
+            _ => Err(RecordedEvent::MpscSender),
         }
     }
+}
+
+impl<T> SendRecordReplay<T, mpsc::SendError<T>> for Sender<T> {
+    const EVENT_VARIANT: RecordedEvent = RecordedEvent::MpscSender;
 
     fn underlying_send(&self, thread_id: DetThreadId, msg: T) -> Result<(), mpsc::SendError<T>> {
         self.sender.send((thread_id, msg))
     }
 }
 
-macro_rules! generate_try_send {
-    () => {
-        // if let SenderFlavor::Bounded(sender) = self {
-        //     pub fn try_send(&self, t: DetMessage<T>) -> Result<(), mpsc::TrySendError<T>> {
-        //         sender.try_send(t);
-        //     }
-        // }
-    };
-}
-
 impl<T> RealSender<T> {
-    generate_try_send!();
-
     // TODO(edumenyo)
     pub fn send(&self, t: DetMessage<T>) -> Result<(), mpsc::SendError<T>> {
         match self {
@@ -355,12 +345,7 @@ pub fn sync_channel<T>(bound: usize) -> (Sender<T>, Receiver<T>) {
     let type_name = type_name::<T>().to_string();
     let id = DetChannelId::new();
 
-    crate::log_rr!(
-        Info,
-        "Bounded mpsc channel created: {:?} {:?}",
-        id,
-        type_name
-    );
+    info!("Bounded mpsc channel created: {:?} {:?}", id, type_name);
     (
         Sender {
             sender: RealSender::Bounded(sender),
@@ -385,12 +370,7 @@ fn channel<T>() -> (Sender<T>, Receiver<T>) {
     let type_name = type_name::<T>().to_string();
     let id = DetChannelId::new();
 
-    crate::log_rr!(
-        Info,
-        "Unbounded mpsc channel created: {:?} {:?}",
-        id,
-        type_name
-    );
+    info!("Unbounded mpsc channel created: {:?} {:?}", id, type_name);
 
     (
         Sender {

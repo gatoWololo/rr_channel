@@ -7,12 +7,14 @@ edition = "2018"
 [dependencies]
 crossbeam-channel = "0.3"
 lazy_static = "1.3"
-log = "0.4"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 ipc-channel = { git = "https://github.com/gatoWololo/ipc-channel"}
 bincode = "1"
 anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = "0.2"
+thiserror = "1.0"
 
 [dev-dependencies]
 env_logger = "0.7.1"

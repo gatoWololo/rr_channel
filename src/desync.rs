@@ -9,11 +9,13 @@ use crate::error::DesyncError;
 use crate::BufferedValues;
 use crate::DetMessage;
 use crate::DESYNC_MODE;
-use log::Level::{Debug, Warn};
 use std::cell::RefMut;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::{Condvar, Mutex};
+
+#[allow(unused_imports)]
+use tracing::{debug, error, info, span, span::EnteredSpan, trace, warn, Level};
 
 /// Wrapper around DesyncError.
 pub(crate) type Result<T> = std::result::Result<T, DesyncError>;
@@ -37,7 +39,7 @@ pub(crate) fn program_desyned() -> bool {
 /// any currently sleeping threads. See `sleep_until_desync` for more information.
 pub(crate) fn mark_program_as_desynced() {
     if !DESYNC.load(Ordering::SeqCst) {
-        crate::log_rr!(Warn, "Program marked as desynced!");
+        warn!("Program marked as desynced!");
         DESYNC.store(true, Ordering::SeqCst);
         wake_up_threads();
     }
@@ -47,17 +49,17 @@ pub(crate) fn mark_program_as_desynced() {
 /// this far" on the record execution. So we put it to sleep. When we desynchronize this thread
 /// will be waken up. This is dones via conditional variables.
 pub(crate) fn sleep_until_desync() {
-    crate::log_rr!(Debug, "Thread being put to sleep.");
+    debug!("Thread being put to sleep.");
     let (lock, condvar) = &*PARK_THREADS;
     let mut started = lock.lock().expect("Unable to lock mutex.");
     while !*started {
         started = condvar.wait(started).expect("Unable to wait on condvar.");
     }
-    crate::log_rr!(Debug, "Thread woke up from eternal slumber!");
+    debug!("Thread woke up from eternal slumber!");
 }
 
 pub(crate) fn wake_up_threads() {
-    crate::log_rr!(Debug, "Waking up threads!");
+    debug!("Waking up threads!");
     let (lock, condvar) = &*PARK_THREADS;
     let mut started = lock.lock().expect("Unable to lock mutex.");
     *started = true;
@@ -87,8 +89,6 @@ pub(crate) fn handle_desync<T, E>(
     recv_msg: impl Fn() -> ::std::result::Result<DetMessage<T>, E>,
     mut buffer: RefMut<BufferedValues<T>>,
 ) -> ::std::result::Result<T, E> {
-    crate::log_rr!(Warn, "Desynchonization found: {:?}", desync);
-
     match *DESYNC_MODE {
         DesyncMode::KeepGoing => {
             mark_program_as_desynced();

@@ -1,11 +1,11 @@
 use crate::InMemoryRecorder;
-use log::Level::*;
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::fmt::Debug;
 use std::sync::atomic::AtomicU32;
 use std::thread::JoinHandle;
 pub use std::thread::{current, panicking, park, park_timeout, sleep, yield_now};
+use tracing::{event, span, Level};
 
 use crate::IN_MEMORY_RECORDER;
 use std::sync::{Arc, Mutex};
@@ -202,11 +202,6 @@ impl Builder {
         T: Send + 'static,
     {
         let new_id = DET_ID_SPAWNER.with(|spawner| spawner.borrow_mut().new_child_det_id());
-        crate::log_rr!(
-            Info,
-            "std::thread::Builder::spawn: Assigned deterministic id {:?} for new thread.",
-            new_id
-        );
 
         self.builder.spawn(move || {
             THREAD_INITIALIZED.with(|ti| {
@@ -226,7 +221,11 @@ impl Builder {
                     );
                 }
             }
-            f()
+            let _s = span!(Level::INFO, "Thread", dti = ?new_id,).entered();
+            event!(Level::INFO, "New Thread Spawned!");
+            let h = f();
+            event!(Level::INFO, "Thread Finished.");
+            h
         })
     }
 }
