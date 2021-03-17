@@ -26,6 +26,8 @@ pub struct RouterProxy {
 }
 
 impl RouterProxy {
+    pub fn init(&self) {}
+
     pub fn new() -> RouterProxy {
         let _s = span!(Level::INFO, "ROUTER Init", init_thread = ?get_det_id()).entered();
         let (msg_sender, msg_receiver) = crate::crossbeam_channel::unbounded();
@@ -364,15 +366,6 @@ mod tests {
     /// message arrives from T1. In practice this would be astronomically unlikely but we can force
     /// rr-channels to verify this ordering.
     fn get_manual_recordlog(iters: i32) -> HashMap<DetThreadId, InMemoryRecorder> {
-        tracing_subscriber::fmt::Subscriber::builder()
-            .with_env_filter(EnvFilter::from_default_env())
-            // .pretty()
-            .with_target(false)
-            .without_time()
-            .init();
-
-        init_tivo_thread_root();
-
         // The [..] is needed as there is no as_slice method for arrays? Weird...
         // Main thread
         let main_thread = DetThreadId::from(&[][..]);
@@ -583,6 +576,14 @@ mod tests {
 
     #[test]
     fn router_manual_recordlog_test() -> Result<()> {
+        tracing_subscriber::fmt::Subscriber::builder()
+        .with_env_filter(EnvFilter::from_default_env())
+        .with_target(false)
+        .without_time()
+        .init();
+
+        init_tivo_thread_root();
+
         let iters: i32 = 1_000;
         set_global_memory_recorder(get_manual_recordlog(iters));
         set_rr_mode(RRMode::Replay);

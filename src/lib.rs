@@ -178,6 +178,11 @@ thread_local! {
                 Some(imr) => imr.clone(),
                 None => panic!("Unable to get record log for {:?}. Available entries: {:?}.", detid, imr.keys()),
             }
+    };
+
+
+    static MAIN_THREAD_SPAN: EnteredSpan = {
+        span!(Level::INFO, "Thread", dti=?get_det_id()).entered()
     }
 }
 

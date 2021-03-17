@@ -39,7 +39,7 @@ pub(crate) fn program_desyned() -> bool {
 /// any currently sleeping threads. See `sleep_until_desync` for more information.
 pub(crate) fn mark_program_as_desynced() {
     if !DESYNC.load(Ordering::SeqCst) {
-        warn!("Program marked as desynced!");
+        error!("Program marked as desynced!");
         DESYNC.store(true, Ordering::SeqCst);
         wake_up_threads();
     }
@@ -113,11 +113,14 @@ pub(crate) fn handle_desync<T, E>(
 mod test {
     use crate::desync::{sleep_until_desync, wake_up_threads};
     use crate::detthread::init_tivo_thread_root;
+    use crate::test::set_rr_mode;
+    use crate::RRMode;
     use std::time::Duration;
 
     #[test]
     fn condvar_test() {
         init_tivo_thread_root();
+        set_rr_mode(RRMode::NoRR);
         let mut handles = vec![];
         for _ in 1..10 {
             let h = crate::detthread::spawn(move || {

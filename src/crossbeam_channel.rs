@@ -303,6 +303,7 @@ impl<T> Receiver<T> {
     where
         Self: RecvRecordReplay<T, E>,
     {
+        info!("recv()");
         self.record_replay_recv(
             &self.mode,
             &self.metadata,

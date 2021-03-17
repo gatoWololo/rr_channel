@@ -12,7 +12,7 @@ serde_json = "1.0"
 ipc-channel = { git = "https://github.com/gatoWololo/ipc-channel"}
 bincode = "1"
 anyhow = "1.0"
-tracing = "0.1"
+tracing = "0.1.25"
 tracing-subscriber = "0.2"
 thiserror = "1.0"
 
