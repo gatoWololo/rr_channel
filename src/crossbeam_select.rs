@@ -93,7 +93,7 @@ impl<'a> Select<'a> {
     pub fn select(&mut self) -> SelectedOperation<'a> {
         let _s = self.span(fn_basename!());
 
-        self.rr_select().unwrap_or_else(|error| {
+        let inner: SelectedOperationImpl = self.rr_select().unwrap_or_else(|error| {
             warn!("Select: Desynchronization detected! {:?}", error);
 
             match *DESYNC_MODE {
@@ -109,15 +109,17 @@ impl<'a> Select<'a> {
                     for (index, receiver) in self.receivers.iter() {
                         if receiver.buffered_value() {
                             debug!("Buffered value chosen from receiver.");
-                            return SelectedOperation::DesyncBufferEntry(*index);
+                            return SelectedOperationImpl::DesyncBufferEntry(*index);
                         }
                     }
                     // No values in buffers, read directly from selector.
                     debug!("No value in buffer, calling select directly.");
-                    SelectedOperation::Desync(self.selector.select())
+                    SelectedOperationImpl::Desync(self.selector.select())
                 }
             }
-        })
+        });
+
+        SelectedOperation::new(inner)
     }
 
     fn span(&self, fn_name: &str) -> EnteredSpan {
@@ -155,12 +157,11 @@ impl<'a> Select<'a> {
                 );
 
                 self.event_recorder
-                    .get_recordable()
                     .write_event_to_record(RecordedEvent::CbSelectReady { select_index }, metadata);
                 Ok(select_index)
             }
             RRMode::Replay => {
-                let recorded_event = self.event_recorder.get_recordable().get_log_entry()?;
+                let recorded_event = self.event_recorder.get_log_entry()?;
 
                 match recorded_event.event {
                     RecordedEvent::CbSelectReady { select_index } => Ok(select_index),
@@ -176,7 +177,7 @@ impl<'a> Select<'a> {
         }
     }
 
-    fn rr_select(&mut self) -> desync::Result<SelectedOperation<'a>> {
+    fn rr_select(&mut self) -> desync::Result<SelectedOperationImpl<'a>> {
         if desync::program_desyned() {
             let error = DesyncError::Desynchronized;
             error!(%error);
@@ -187,7 +188,7 @@ impl<'a> Select<'a> {
                 // We don't know the thread_id of sender until the select is complete
                 // when user call recv() on SelectedOperation. So do nothing here.
                 // Index will be recorded there.
-                Ok(SelectedOperation::Record(
+                Ok(SelectedOperationImpl::Record(
                     self.selector.select(),
                     EventRecorder::get_global_recorder(),
                 ))
@@ -196,7 +197,7 @@ impl<'a> Select<'a> {
                 // Query our log to see what index was selected!() during the replay phase.
                 // ChannelVariant type not check on Select::select() but on Select::recv()
 
-                let entry = self.event_recorder.get_recordable().get_log_entry();
+                let entry = self.event_recorder.get_log_entry();
 
                 // Here we put this thread to sleep if the entry is missing.
                 // On record, the thread never returned from blocking...
@@ -245,7 +246,7 @@ impl<'a> Select<'a> {
                             }
                         }
 
-                        Ok(SelectedOperation::Replay(
+                        Ok(SelectedOperationImpl::Replay(
                             event,
                             recorded_entry.channel_variant,
                             recorded_entry.chan_id,
@@ -263,7 +264,7 @@ impl<'a> Select<'a> {
                     }
                 }
             }
-            RRMode::NoRR => Ok(SelectedOperation::NoRR(self.selector.select())),
+            RRMode::NoRR => Ok(SelectedOperationImpl::NoRR(self.selector.select())),
         }
     }
 }
@@ -273,11 +274,26 @@ impl<'a> Default for Select<'a> {
         Select::new()
     }
 }
-pub enum SelectedOperation<'a> {
+
+pub struct SelectedOperation<'a> {
+    inner: SelectedOperationImpl<'a>,
+}
+
+impl<'a> SelectedOperation<'a> {
+    fn new(inner: SelectedOperationImpl<'a>) -> Self {
+        SelectedOperation { inner }
+    }
+}
+
+/// True implementation of our SelectedOperation type. We want to hide the fact that this is an
+/// enum and keep some our fields private, like `EventRecorder`. So we need this wrapper.
+enum SelectedOperationImpl<'a> {
     Replay(SelectEvent, ChannelVariant, DetChannelId),
     /// Desynchonization happened and receiver still has buffered entries. Index
     /// of receiver has been returned to user.
     DesyncBufferEntry(usize),
+    /// Record this event. We need somewhere to store the event recorded we plan to write the event
+    /// to. We do it here.
     Record(rc::SelectedOperation<'a>, EventRecorder),
     NoRR(rc::SelectedOperation<'a>),
     /// Desynchonization happened, no entries in buffer, we call selector.select()
@@ -300,15 +316,15 @@ impl<'a> SelectedOperation<'a> {
     /// Returns the index of the selected operation.
     /// We don't log calls to this method as they will always be determinstic.
     pub fn index(&self) -> usize {
-        match self {
-            SelectedOperation::DesyncBufferEntry(selected_index)
-            | SelectedOperation::Replay(SelectEvent::Success { selected_index, .. }, _, _)
-            | SelectedOperation::Replay(SelectEvent::RecvError { selected_index, .. }, _, _) => {
+        match &self.inner {
+            SelectedOperationImpl::DesyncBufferEntry(selected_index)
+            | SelectedOperationImpl::Replay(SelectEvent::Success { selected_index, .. }, _, _)
+            | SelectedOperationImpl::Replay(SelectEvent::RecvError { selected_index, .. }, _, _) => {
                 *selected_index
             }
-            SelectedOperation::Record(selected, _)
-            | SelectedOperation::NoRR(selected)
-            | SelectedOperation::Desync(selected) => selected.index(),
+            SelectedOperationImpl::Record(selected, _)
+            | SelectedOperationImpl::NoRR(selected)
+            | SelectedOperationImpl::Desync(selected) => selected.index(),
         }
     }
 
@@ -373,19 +389,19 @@ impl<'a> SelectedOperation<'a> {
         // is fatal. It is better to make sure it just doesn't happen.
         // See recv() above for more information.
         let selected_index = self.index();
-        match self {
-            SelectedOperation::DesyncBufferEntry(_) => {
+        match self.inner {
+            SelectedOperationImpl::DesyncBufferEntry(_) => {
                 debug!("SelectedOperation::DesyncBufferEntry");
                 Ok(Ok(r.get_buffered_value().expect(
                     "Expected buffer value to be there. This is a bug.",
                 )))
             }
-            SelectedOperation::Desync(selected) => {
+            SelectedOperationImpl::Desync(selected) => {
                 debug!("SelectedOperation::Desync");
                 Ok(SelectedOperation::do_recv(selected, r).map(|(_, msg)| msg))
             }
             // Record value we get from direct use of Select API recv().
-            SelectedOperation::Record(selected, recorder) => {
+            SelectedOperationImpl::Record(selected, recorder) => {
                 debug!("SelectedOperation::Record");
 
                 let (msg, select_event) = match SelectedOperation::do_recv(selected, r) {
@@ -400,15 +416,13 @@ impl<'a> SelectedOperation<'a> {
                     // Err(e) on the RHS is not the same type as Err(e) LHS.
                     Err(e) => (Err(e), SelectEvent::RecvError { selected_index }),
                 };
-                recorder
-                    .get_recordable()
-                    .write_event_to_record(RecordedEvent::CbSelect(select_event), &r.metadata);
+                recorder.write_event_to_record(RecordedEvent::CbSelect(select_event), &r.metadata);
                 Ok(msg)
             }
             // We do not use the select API at all on replays. Wait for correct
             // message to come by receving on channel directly.
             // replay_recv takes care of proper buffering.
-            SelectedOperation::Replay(event, flavor, chan_id) => {
+            SelectedOperationImpl::Replay(event, flavor, chan_id) => {
                 // We cannot check these in `Select::select()` since we do not have
                 // the receiver until this function to compare values against.
                 if flavor != r.metadata.channel_variant {
@@ -435,7 +449,7 @@ impl<'a> SelectedOperation<'a> {
                 };
                 Ok(retval)
             }
-            SelectedOperation::NoRR(selected) => {
+            SelectedOperationImpl::NoRR(selected) => {
                 // NoRR doesn't need DetThreadId
                 Ok(SelectedOperation::do_recv(selected, r).map(|v| v.1))
             }

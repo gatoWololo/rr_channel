@@ -1,20 +1,20 @@
-use crate::fn_basename;
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::thread::JoinHandle;
+
+use lazy_static::lazy_static;
+use serde::{Deserialize, Serialize};
+#[allow(unused_imports)]
+use tracing::{debug, error, info, span, span::EnteredSpan, trace, warn, Level};
 
 use crate::crossbeam_channel::{Receiver, Sender};
+use crate::fn_basename;
 use crate::get_det_id;
 use crate::ipc_channel::ipc::{
     self, IpcReceiver, IpcReceiverSet, IpcSelectionResult, IpcSender, OpaqueIpcMessage,
     OpaqueIpcReceiver,
 };
 use crate::DetMessage;
-use lazy_static::lazy_static;
-use serde::{Deserialize, Serialize};
-use std::thread::JoinHandle;
-
-#[allow(unused_imports)]
-use tracing::{debug, error, info, span, span::EnteredSpan, trace, warn, Level};
 
 lazy_static! {
     pub static ref ROUTER: RouterProxy = RouterProxy::new();
@@ -241,19 +241,21 @@ pub type RouterHandler = Box<dyn FnMut(OpaqueIpcMessage) + Send>;
 /// between the record execution and replay execution in our tests below. Instead, use RouterProxy.
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
+    use anyhow::Result;
+    use rusty_fork::rusty_fork_test;
+    use tracing_subscriber::EnvFilter;
+
     use crate::detthread::DetThreadId;
     use crate::ipc_channel::ipc;
     use crate::ipc_channel::router::RouterProxy;
-    use crate::recordlog::{ChannelVariant, IpcSelectEvent, RecordEntry, RecordedEvent};
+    use crate::recordlog::{
+        ChannelVariant, InMemoryRecorder, IpcSelectEvent, RecordEntry, RecordedEvent,
+    };
     use crate::rr::DetChannelId;
     use crate::test::{rr_test, set_rr_mode};
-    use crate::{
-        detthread, init_tivo_thread_root, set_global_memory_recorder, InMemoryRecorder, RRMode,
-    };
-    use anyhow::Result;
-    use rusty_fork::rusty_fork_test;
-    use std::collections::HashMap;
-    use tracing_subscriber::EnvFilter;
+    use crate::{detthread, init_tivo_thread_root, set_global_memory_recorder, RRMode};
 
     /// Doesn't actually test much, but exercises the common code paths for the router.
     /// This will always be deterministic as there is no multiple producers.

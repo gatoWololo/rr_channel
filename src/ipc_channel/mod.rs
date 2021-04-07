@@ -149,12 +149,7 @@ pub mod ipc {
         where
             Self: RecvRecordReplay<T, E>,
         {
-            self.record_replay_recv(
-                &self.mode,
-                &self.metadata,
-                g,
-                self.event_recorder.get_recordable(),
-            )
+            self.record_replay_recv(&self.mode, &self.metadata, g, &self.event_recorder)
         }
 
         pub(crate) fn get_buffer(&self) -> RefMut<BufferedValues<T>> {
@@ -346,12 +341,7 @@ pub mod ipc {
         pub fn send(&self, data: T) -> Result<(), ipc_channel::Error> {
             let _s = self.span(fn_basename!());
 
-            match self.record_replay_send(
-                data,
-                &self.mode,
-                &self.metadata,
-                self.recorder.get_recordable(),
-            ) {
+            match self.record_replay_send(data, &self.mode, &self.metadata, &self.recorder) {
                 Ok(v) => v,
                 Err((error, msg)) => {
                     match *DESYNC_MODE {
@@ -650,7 +640,7 @@ pub mod ipc {
                         select_events: recorded_events,
                     };
                     // Ehh, we fake it here. We never check this value anyways.
-                    self.recorder.get_recordable().write_event_to_record(
+                    self.recorder.write_event_to_record(
                         event,
                         &recordlog::RecordMetadata::new(
                             "IpcSelect".to_string(),
@@ -673,7 +663,7 @@ pub mod ipc {
 
                     // Here we put this thread to sleep if the entry is missing.
                     // On record, the thread never returned from blocking...
-                    let recorded_event = self.recorder.get_recordable().get_log_entry();
+                    let recorded_event = self.recorder.get_log_entry();
 
                     if let Err(e @ DesyncError::NoEntryInLog) = recorded_event {
                         info!("Saw {:?}. Putting thread to sleep.", e);
@@ -907,7 +897,6 @@ pub mod ipc {
 
                     let event = RecordedEvent::IpcSelectAdd(index);
                     self.recorder
-                        .get_recordable()
                         .write_event_to_record(event, &receiver.metadata);
                     Ok(Ok(index))
                 }
@@ -915,7 +904,7 @@ pub mod ipc {
                 // Do not add receiver to IpcReceiverSet, instead move the receiver to our own
                 // `receivers` hashmap where the index returned here is the key.
                 RRMode::Replay => {
-                    let record_entry = match self.recorder.get_recordable().get_log_entry() {
+                    let record_entry = match self.recorder.get_log_entry() {
                         Err(e) => {
                             return Err((e, receiver));
                         }

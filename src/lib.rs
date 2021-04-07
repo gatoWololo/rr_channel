@@ -1,13 +1,27 @@
 #![feature(trait_alias)]
 #![feature(const_type_name)]
 
+use std::collections::{HashMap, VecDeque};
+use std::env::var;
+use std::env::VarError;
+use std::sync::Arc;
+use std::sync::{Mutex, RwLock};
+
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
-
 #[allow(unused_imports)]
 use tracing::{debug, error, info, span, span::EnteredSpan, trace, warn, Level};
+
+use desync::DesyncMode;
+use detthread::DetThreadId;
+use recordlog::InMemoryRecorder;
+
+use crate::detthread::get_det_id;
+pub use crate::detthread::init_tivo_thread_root;
+use crate::error::DesyncError;
+use crate::recordlog::{RecordEntry, RecordMetadata, RecordedEvent};
+#[cfg(test)]
+use crate::test::TEST_MODE;
 
 pub mod crossbeam_channel;
 mod crossbeam_select;
@@ -23,20 +37,6 @@ mod rr;
 pub mod test;
 mod utils;
 
-use std::io::Write;
-
-use desync::DesyncMode;
-use detthread::DetThreadId;
-use std::env::var;
-use std::env::VarError;
-use std::sync::{Mutex, RwLock};
-
-use crate::detthread::get_det_id;
-pub use crate::detthread::init_tivo_thread_root;
-use crate::recordlog::{RecordEntry, Recordable};
-#[cfg(test)]
-use crate::test::TEST_MODE;
-
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum RRMode {
     Record,
@@ -44,7 +44,7 @@ pub enum RRMode {
     NoRR,
 }
 
-/// To deterministically replay messages we pass our determininistic thread ID + the
+/// To deterministically replay messages we pass our deterministic thread ID + the
 /// original message.
 pub type DetMessage<T> = (DetThreadId, T);
 
@@ -68,27 +68,7 @@ fn get_rr_mode() -> RRMode {
     *RECORD_MODE
 }
 
-pub enum LogImpl {
-    InMemory,
-    File,
-}
-
-fn get_recorder_impl() -> LogImpl {
-    if cfg!(test) {
-        LogImpl::InMemory
-    } else {
-        LogImpl::File
-    }
-}
-
 lazy_static! {
-    /// Singleton environment logger. Must be initialized somewhere, and only once.
-    pub static ref ENV_LOGGER: () = {
-        // env_logger::builder()
-        //     .format_timestamp(None)
-        //     .init()
-    };
-
     /// Record type. Initialized from environment variable RR_CHANNEL.
     static ref RECORD_MODE: RRMode = {
         debug!("Initializing RECORD_MODE lazy static.");
@@ -110,7 +90,7 @@ lazy_static! {
     };
 
     /// Record type. Initialized from environment variable RR_CHANNEL.
-    pub static ref DESYNC_MODE: DesyncMode = {
+    static ref DESYNC_MODE: DesyncMode = {
         debug!("Initializing DESYNC_MODE lazy static.");
 
         let mode = match var(DESYNC_MODE_VAR) {
@@ -136,7 +116,7 @@ lazy_static! {
     };
 
     /// Name of record file.
-    pub static ref LOG_FILE_NAME: String = {
+    static ref LOG_FILE_NAME: String = {
         debug!("Initializing RECORD_FILE lazy static.");
 
         let mode = match var(RECORD_FILE_VAR) {
@@ -157,7 +137,7 @@ lazy_static! {
 
     /// Global in-memory recorder for events.
     /// See Issue #46 for more information.
-    pub(crate) static ref IN_MEMORY_RECORDER:
+    static ref IN_MEMORY_RECORDER:
      RwLock<HashMap<DetThreadId, Arc<Mutex<InMemoryRecorder>>>> = {
         // Init with initial entry. New entries are added by threads when they spawn.
         let mut hm = HashMap::new();
@@ -168,7 +148,10 @@ lazy_static! {
 }
 
 thread_local! {
+    /// Every thread has a reference to its own recorder. This is to avoid too much contention if all
+    /// threads were trying to write to the global IN_MEMORY_RECORDER.
     static THREAD_LOCAL_RECORDER: Arc<Mutex<InMemoryRecorder>> = {
+            // TODO: Should we be fetching the dti every time?
             let detid = get_det_id();
             let imr = IN_MEMORY_RECORDER
                 .write()
@@ -180,22 +163,14 @@ thread_local! {
             }
     };
 
-
     static MAIN_THREAD_SPAN: EnteredSpan = {
         span!(Level::INFO, "Thread", dti=?get_det_id()).entered()
     }
 }
 
-/// Record and Replay using a memory-based recorder. Useful for unit testing channel methods.
-/// These derives are needed because IpcReceiver requires Ser/Des... sigh...
-#[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq)]
-pub struct InMemoryRecorder {
-    queue: VecDeque<RecordEntry>,
-    /// The ID is the same for all events as this is a thread local record.
-    /// TODO: this field isn't used... remove it?
-    dti: DetThreadId,
-}
-
+/// The actual IN_MEMORY_RECORDER has a much different type (includes a few locks and Arcs to play
+/// nicely with Rust's type system) this function allows us to init the global recorder using a
+/// much simpler type and takes care of the conversion.
 pub(crate) fn set_global_memory_recorder(imr: HashMap<DetThreadId, InMemoryRecorder>) {
     let mut global_recorder = HashMap::new();
     for (k, v) in imr {
@@ -203,48 +178,6 @@ pub(crate) fn set_global_memory_recorder(imr: HashMap<DetThreadId, InMemoryRecor
     }
 
     *IN_MEMORY_RECORDER.try_write().unwrap() = global_recorder;
-}
-
-impl InMemoryRecorder {
-    fn new(dti: DetThreadId) -> InMemoryRecorder {
-        InMemoryRecorder {
-            dti,
-            queue: VecDeque::new(),
-        }
-    }
-
-    fn add_entry(&mut self, r: RecordEntry) {
-        self.queue.push_back(r);
-    }
-
-    fn get_next_entry(&mut self) -> Option<RecordEntry> {
-        self.queue.pop_front()
-    }
-}
-
-// Thread local in memory recorder. We have this "extra" struct for this because we want to
-// implement the Recordable Trait for this type but not for InMemoryRecorder (since that would
-// required all InMemoryRecorders to carry a refcell to get the types to match. We only want the
-// refcell at the top level.
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct ThreadLocalIMR {}
-
-impl ThreadLocalIMR {
-    fn new() -> ThreadLocalIMR {
-        ThreadLocalIMR {}
-    }
-}
-
-impl Recordable for ThreadLocalIMR {
-    fn write_entry(&self, entry: RecordEntry) {
-        THREAD_LOCAL_RECORDER.with(|tlr| {
-            tlr.lock().unwrap().add_entry(entry);
-        });
-    }
-
-    fn next_record_entry(&self) -> Option<RecordEntry> {
-        THREAD_LOCAL_RECORDER.with(|tlr| tlr.lock().unwrap().get_next_entry())
-    }
 }
 
 pub(crate) fn get_global_memory_recorder() -> HashMap<DetThreadId, InMemoryRecorder> {
@@ -256,66 +189,68 @@ pub(crate) fn get_global_memory_recorder() -> HashMap<DetThreadId, InMemoryRecor
     copy
 }
 
-/// This is a mess... Originally I wanted to use a Box<dyn Recordable> and all channel receiver
-/// and sender implementations would have a field with this type, unfortunately, this causes issues
-/// and dynamic Trait objects cannot be easily serialized/deserialized... So we use an enum instead
-/// ...
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub enum EventRecorder {
-    Memory(ThreadLocalIMR),
-    File(FileRecorder),
-}
+struct EventRecorder {}
 
 impl EventRecorder {
-    /// Easy method for turning our current variant of our log into a Recordable.
-    fn get_recordable(&self) -> &dyn Recordable {
-        match self {
-            EventRecorder::Memory(m) => m,
-            EventRecorder::File(f) => f,
-        }
-    }
-
     fn get_global_recorder() -> EventRecorder {
-        match get_recorder_impl() {
-            LogImpl::InMemory => EventRecorder::Memory(ThreadLocalIMR::new()),
-            LogImpl::File => EventRecorder::File(FileRecorder::new()),
-        }
-    }
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct FileRecorder {}
-
-impl FileRecorder {
-    fn new() -> FileRecorder {
-        FileRecorder {}
-    }
-}
-
-// TODO Test.
-impl Recordable for FileRecorder {
-    fn write_entry(&self, entry: RecordEntry) {
-        use crate::recordlog::WRITE_LOG_FILE;
-
-        let serialized = serde_json::to_string(&entry).unwrap();
-
-        WRITE_LOG_FILE
-            .lock()
-            .expect("Unable to lock file.")
-            .write_fmt(format_args!("{}\n", serialized))
-            .expect("Unable to write to log file.");
+        EventRecorder {}
     }
 
     fn next_record_entry(&self) -> Option<RecordEntry> {
-        todo!()
-        // let (re, cl, dci) = RECORDED_INDICES.get(key)?.clone();
-        // Some(RecordEntry::new(
-        //     key.0.clone(),
-        //     key.1,
-        //     re,
-        //     cl,
-        //     dci,
-        //     "TODO".to_string(),
-        // ))
+        THREAD_LOCAL_RECORDER.with(|tlr| tlr.lock().unwrap().get_next_entry())
+    }
+
+    fn write_event_to_record(&self, event: RecordedEvent, metadata: &RecordMetadata) {
+        debug!("rr::log()");
+
+        let entry: RecordEntry = RecordEntry {
+            event,
+            channel_variant: metadata.channel_variant,
+            chan_id: metadata.id.clone(),
+            type_name: metadata.type_name.clone(),
+        };
+
+        THREAD_LOCAL_RECORDER.with(|tlr| {
+            tlr.lock().unwrap().add_entry(entry.clone());
+        });
+
+        warn!("Logged entry: {:?}", entry);
+    }
+
+    /// Get log entry returning the record, variant, and channel ID.
+    fn get_log_entry(&self) -> desync::Result<RecordEntry> {
+        self.next_record_entry().ok_or_else(|| {
+            let error = DesyncError::NoEntryInLog;
+            warn!(%error);
+            error
+        })
     }
 }
+
+// impl Recordable for FileRecorder {
+//     fn write_entry(&self, entry: RecordEntry) {
+//         use crate::recordlog::WRITE_LOG_FILE;
+//
+//         let serialized = serde_json::to_string(&entry).unwrap();
+//
+//         WRITE_LOG_FILE
+//             .lock()
+//             .expect("Unable to lock file.")
+//             .write_fmt(format_args!("{}\n", serialized))
+//             .expect("Unable to write to log file.");
+//     }
+//
+//     fn next_record_entry(&self) -> Option<RecordEntry> {
+//         todo!()
+//         // let (re, cl, dci) = RECORDED_INDICES.get(key)?.clone();
+//         // Some(RecordEntry::new(
+//         //     key.0.clone(),
+//         //     key.1,
+//         //     re,
+//         //     cl,
+//         //     dci,
+//         //     "TODO".to_string(),
+//         // ))
+//     }
+// }

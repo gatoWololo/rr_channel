@@ -180,12 +180,7 @@ impl<T> Receiver<T> {
     where
         Self: RecvRecordReplay<T, E>,
     {
-        self.record_replay_recv(
-            &self.mode,
-            &self.metadata,
-            g,
-            self.event_recorder.get_recordable(),
-        )
+        self.record_replay_recv(&self.mode, &self.metadata, g, &self.event_recorder)
     }
 
     /// Get label by looking at the type of channel.
@@ -238,12 +233,7 @@ impl<T> Sender<T> {
     /// Send our det thread id along with the actual message for both
     /// record and replay.
     pub fn send(&self, msg: T) -> Result<(), mpsc::SendError<T>> {
-        match self.record_replay_send(
-            msg,
-            &self.mode,
-            &self.metadata,
-            self.event_recorder.get_recordable(),
-        ) {
+        match self.record_replay_send(msg, &self.mode, &self.metadata, &self.event_recorder) {
             Ok(v) => v,
             // send() should never hang. No need to check if NoEntryLog.
             Err((error, msg)) => {

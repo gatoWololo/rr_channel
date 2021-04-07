@@ -2,14 +2,6 @@
 //! to abstract over some of their differences. This allows to us tests these different channel
 //! implementations using the tests without worrying about what exact channel we're testing.
 
-use crate::detthread::DET_ID_SPAWNER;
-use crate::detthread::THREAD_INITIALIZED;
-use crate::detthread::{get_det_id, DetIdSpawner, DetThreadId, CHANNEL_ID, DET_ID};
-use crate::recordlog::{ChannelVariant, RecordEntry, RecordedEvent};
-use crate::rr::DetChannelId;
-use crate::{init_tivo_thread_root, InMemoryRecorder, RRMode};
-use anyhow::Result;
-use lazy_static::lazy_static;
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt::Debug;
@@ -17,6 +9,16 @@ use std::sync::atomic::Ordering;
 use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
+
+use anyhow::Result;
+use lazy_static::lazy_static;
+
+use crate::detthread::DET_ID_SPAWNER;
+use crate::detthread::THREAD_INITIALIZED;
+use crate::detthread::{get_det_id, DetIdSpawner, DetThreadId, CHANNEL_ID, DET_ID};
+use crate::recordlog::{ChannelVariant, InMemoryRecorder, RecordEntry, RecordedEvent};
+use crate::rr::DetChannelId;
+use crate::{init_tivo_thread_root, RRMode};
 
 lazy_static! {
     pub static ref TEST_MODE: Mutex<Option<RRMode>> = Mutex::new(None);

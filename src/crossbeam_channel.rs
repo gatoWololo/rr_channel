@@ -56,12 +56,7 @@ impl<T> Sender<T> {
     pub fn send(&self, msg: T) -> Result<(), rc::SendError<T>> {
         let _s = self.span(fn_basename!());
 
-        match self.record_replay_send(
-            msg,
-            &self.mode,
-            &self.metadata,
-            self.event_recorder.get_recordable(),
-        ) {
+        match self.record_replay_send(msg, &self.mode, &self.metadata, &self.event_recorder) {
             Ok(v) => v,
             // send() should never hang. No need to check if NoEntryLog.
             Err((error, msg)) => {
@@ -304,12 +299,7 @@ impl<T> Receiver<T> {
         Self: RecvRecordReplay<T, E>,
     {
         info!("recv()");
-        self.record_replay_recv(
-            &self.mode,
-            &self.metadata,
-            g,
-            self.recorder.get_recordable(),
-        )
+        self.record_replay_recv(&self.mode, &self.metadata, g, &self.recorder)
     }
 
     /// Receives messages from `sender` buffering all other messages which it gets. Times out after
@@ -329,10 +319,6 @@ impl<T> Receiver<T> {
 
     pub(crate) fn get_buffer(&self) -> RefMut<BufferedValues<T>> {
         self.buffer.borrow_mut()
-    }
-
-    pub(crate) fn metadata(&self) -> &recordlog::RecordMetadata {
-        &self.metadata
     }
 
     pub(crate) fn get_marker(receiver: &ChannelKind<T>) -> ChannelVariant {

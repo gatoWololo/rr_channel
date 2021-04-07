@@ -1,19 +1,18 @@
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs::remove_file;
 use std::fs::File;
 use std::sync::mpsc;
 use std::sync::Mutex;
 
-use crate::desync;
+use serde::{Deserialize, Serialize};
+#[allow(unused_imports)]
+use tracing::{debug, info, span, span::EnteredSpan, trace, warn, Level};
+
 use crate::detthread::DetThreadId;
 use crate::error;
 use crate::error::DesyncError;
 use crate::rr::DetChannelId;
 use crate::LOG_FILE_NAME;
-
-#[allow(unused_imports)]
-use tracing::{debug, info, span, span::EnteredSpan, trace, warn, Level};
 
 /// Record representing a successful select from a channel. Used in replay mode.
 #[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq)]
@@ -218,87 +217,6 @@ fn init_recorded_indices(
     // recorded_indices
 }
 
-/// Interface necessary by all recorders. A recorder is any type that holds a record log for
-/// tracking channel events.
-pub(crate) trait Recordable {
-    // TODO Maybe add return type to signify failure.
-    // Ideally self should be a mutable reference because, it is. But this clashes with the
-    // the channel library APIs which for some reason send and recv are not mutable. So to keep
-    // things simple here we also say the self is not mutable :grimace-emoji:
-    fn write_entry(&self, message: RecordEntry);
-
-    fn write_event_to_record(&self, event: RecordedEvent, metadata: &RecordMetadata) {
-        debug!("rr::log()");
-
-        let entry: RecordEntry = RecordEntry {
-            event,
-            channel_variant: metadata.channel_variant,
-            chan_id: metadata.id.clone(),
-            type_name: metadata.type_name.clone(),
-        };
-
-        self.write_entry(entry.clone());
-
-        warn!("Logged entry: {:?}", entry);
-    }
-
-    fn next_record_entry(&self) -> Option<RecordEntry>;
-
-    /// Actual implementation. Compares `curr_flavor` and `curr_id` against
-    /// log entry if they're Some(_).
-    fn get_log_entry_do(
-        &self,
-        curr_flavor: Option<&ChannelVariant>,
-        curr_id: Option<&DetChannelId>,
-    ) -> desync::Result<(RecordedEvent, ChannelVariant, DetChannelId)> {
-        match self.next_record_entry() {
-            Some(record_entry) => {
-                debug!("Event fetched: {:?}", record_entry);
-
-                if let Some(curr_flavor) = curr_flavor {
-                    if record_entry.channel_variant != *curr_flavor {
-                        let e = error::DesyncError::ChannelVariantMismatch(
-                            record_entry.channel_variant,
-                            *curr_flavor,
-                        );
-                        error!(%e);
-                        return Err(e);
-                    }
-                }
-                if let Some(curr_id) = curr_id {
-                    if record_entry.chan_id != *curr_id {
-                        let e = error::DesyncError::ChannelMismatch(
-                            record_entry.chan_id,
-                            curr_id.clone(),
-                        );
-                        error!(%e);
-                        return Err(e);
-                    }
-                }
-                Ok((
-                    record_entry.event,
-                    record_entry.channel_variant,
-                    record_entry.chan_id,
-                ))
-            }
-            None => {
-                let e = DesyncError::NoEntryInLog;
-                warn!(%e);
-                Err(e)
-            }
-        }
-    }
-
-    /// Get log entry returning the record, variant, and channel ID.
-    fn get_log_entry(&self) -> desync::Result<RecordEntry> {
-        self.next_record_entry().ok_or_else(|| {
-            let error = DesyncError::NoEntryInLog;
-            warn!(%error);
-            error
-        })
-    }
-}
-
 /// TODO It seems there is repetition in the fields here and on LogEntry?
 /// Do we really need both?
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -319,5 +237,32 @@ impl RecordMetadata {
             channel_variant: flavor,
             id,
         }
+    }
+}
+
+/// Record and Replay using a memory-based recorder. Useful for unit testing channel methods.
+/// These derives are needed because IpcReceiver requires Ser/Des... sigh...
+#[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq)]
+pub(crate) struct InMemoryRecorder {
+    queue: VecDeque<RecordEntry>,
+    /// The ID is the same for all events as this is a thread local record.
+    /// TODO: this field isn't used... remove it?
+    dti: DetThreadId,
+}
+
+impl InMemoryRecorder {
+    pub fn new(dti: DetThreadId) -> InMemoryRecorder {
+        InMemoryRecorder {
+            dti,
+            queue: VecDeque::new(),
+        }
+    }
+
+    pub(crate) fn add_entry(&mut self, r: RecordEntry) {
+        self.queue.push_back(r);
+    }
+
+    pub(crate) fn get_next_entry(&mut self) -> Option<RecordEntry> {
+        self.queue.pop_front()
     }
 }

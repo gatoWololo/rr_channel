@@ -1,15 +1,15 @@
 //! Different Channel types share the same general method of doing RR through our
 //! per-channel buffers. This module encapsulates that logic via the
 
-use crate::rr;
 use crate::RRMode;
+use crate::{rr, EventRecorder};
 
 use crate::detthread::{self, get_det_id, DetThreadId, CHANNEL_ID};
 use crate::error::{DesyncError, RecvErrorRR};
 use crate::{desync, recordlog};
 use crate::{BufferedValues, DetMessage};
 
-use crate::recordlog::{RecordEntry, RecordMetadata, Recordable, RecordedEvent};
+use crate::recordlog::{RecordEntry, RecordMetadata, RecordedEvent};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::fmt::{Display, Formatter};
@@ -104,10 +104,7 @@ pub(crate) trait RecvRecordReplay<T, E>: RecordEventChecker<E> {
         mode: &RRMode,
         metadata: &recordlog::RecordMetadata,
         recv_message: impl FnOnce() -> Result<DetMessage<T>, E>,
-        // Ideally recordlog should be a mutable reference because, it is. But this clashes with the
-        // the channel library APIs which for some reason send and recv are not mutable. So to keep
-        // things simple here we also say the self is not mutable :grimace-emoji:
-        recordlog: &dyn Recordable,
+        recordlog: &EventRecorder,
     ) -> desync::Result<Result<T, E>> {
         // crate::log_rr!(Debug, "Receiver<{:?}>::{}", metadata.id, function_name);
 
@@ -182,7 +179,7 @@ pub(crate) trait SendRecordReplay<T, E>: RecordEventChecker<E> {
         msg: T,
         mode: &RRMode,
         metadata: &recordlog::RecordMetadata,
-        recordlog: &dyn Recordable,
+        recordlog: &EventRecorder,
     ) -> Result<Result<(), E>, (DesyncError, T)> {
         if desync::program_desyned() {
             let error = DesyncError::Desynchronized;
