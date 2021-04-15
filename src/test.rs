@@ -2,7 +2,7 @@
 //! to abstract over some of their differences. This allows to us tests these different channel
 //! implementations using the tests without worrying about what exact channel we're testing.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::error::Error;
 use std::fmt::Debug;
 use std::sync::atomic::Ordering;
@@ -11,22 +11,20 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::Result;
-use lazy_static::lazy_static;
 
 use crate::detthread::DET_ID_SPAWNER;
 use crate::detthread::THREAD_INITIALIZED;
 use crate::detthread::{get_det_id, DetIdSpawner, DetThreadId, CHANNEL_ID, DET_ID};
-use crate::recordlog::{ChannelVariant, InMemoryRecorder, RecordEntry, RecordedEvent};
+use crate::recordlog::{ChannelVariant, RecordEntry, RecordedEvent};
 use crate::rr::DetChannelId;
-use crate::{init_tivo_thread_root, RRMode};
+use crate::{RRMode, Tivo};
+use once_cell::sync::OnceCell;
+use tracing::info;
 
-lazy_static! {
-    pub static ref TEST_MODE: Mutex<Option<RRMode>> = Mutex::new(None);
-    pub static ref LOG_IMPL: Mutex<Option<RRMode>> = Mutex::new(None);
-}
+pub(crate) static TEST_MODE: OnceCell<Mutex<RRMode>> = OnceCell::new();
 
 /// Reset all global variables to their original starting value. Useful for record replay testing.
-/// Equal to running a clean program and calling `init_tivo_thread_root`. For example, the global channel id
+/// Equal to running a clean program and calling `init_tivo_thread_root_test`. For example, the global channel id
 /// assignor must be reset otherwise doing:
 ///
 /// simple_test::<Crossbeam>(RRMode:Record);
@@ -52,9 +50,19 @@ pub(crate) fn reset_test_state() {
     });
 }
 
+#[cfg(test)]
 pub(crate) fn set_rr_mode(mode: RRMode) {
-    let mut test_mode = TEST_MODE.lock().unwrap();
-    *test_mode = Some(mode);
+    info!("Initalizing rr_mode in TESTS to {:?}", mode);
+    match TEST_MODE.get() {
+        None => {
+            TEST_MODE
+                .set(Mutex::new(mode))
+                .expect("Cell was already full!");
+        }
+        Some(m) => {
+            *m.lock().unwrap() = mode;
+        }
+    }
 }
 
 /// Our shorthand trait (aka trait alias) representing trait safety. Necessary as our channels will
@@ -120,7 +128,7 @@ pub(crate) trait ReceiverTimeout<T> {
 /// up state, run `f` in record mode, then use that log for replay mode. Compares the output of
 /// `f` between both executions to ensure not only log is correct, but data remains the same.
 pub(crate) fn rr_test<T: Eq + Debug>(f: impl Fn() -> Result<T>) -> Result<()> {
-    init_tivo_thread_root();
+    let _f = Tivo::init_tivo_thread_root_test();
 
     set_rr_mode(RRMode::Record);
     let output1 = f()?;
@@ -151,22 +159,22 @@ pub(crate) fn simple_program_manual_log(
     send_event: RecordedEvent,
     recv_event: impl Fn(DetThreadId) -> RecordedEvent,
     variant: ChannelVariant,
-) -> HashMap<DetThreadId, InMemoryRecorder> {
+) -> HashMap<DetThreadId, VecDeque<RecordEntry>> {
     let dti = get_det_id();
     let channel_id = DetChannelId::from_raw(dti.clone(), 1);
 
     let tn = std::any::type_name::<i32>();
     let re = RecordEntry::new(send_event, variant, channel_id.clone(), tn.to_string());
 
-    let mut rf: InMemoryRecorder = InMemoryRecorder::new(dti.clone());
-    rf.add_entry(re.clone());
-    rf.add_entry(re.clone());
-    rf.add_entry(re);
+    let mut rf = VecDeque::new();
+    rf.push_back(re.clone());
+    rf.push_back(re.clone());
+    rf.push_back(re);
 
     let re = RecordEntry::new(recv_event(dti.clone()), variant, channel_id, tn.to_string());
-    rf.add_entry(re.clone());
-    rf.add_entry(re.clone());
-    rf.add_entry(re);
+    rf.push_back(re.clone());
+    rf.push_back(re.clone());
+    rf.push_back(re);
 
     let mut hm = HashMap::new();
     hm.insert(dti, rf);

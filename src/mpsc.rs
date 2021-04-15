@@ -347,7 +347,7 @@ pub fn sync_channel<T>(bound: usize) -> (Sender<T>, Receiver<T>) {
     )
 }
 
-fn channel<T>() -> (Sender<T>, Receiver<T>) {
+pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
     let mode = get_rr_mode();
     let recorder = EventRecorder::get_global_recorder();
 
@@ -380,7 +380,8 @@ mod test {
     use crate::test::rr_test;
     use crate::test::set_rr_mode;
     use crate::test::{Receiver, ReceiverTimeout, Sender, TestChannel, ThreadSafe, TryReceiver};
-    use crate::{init_tivo_thread_root, RRMode};
+    use crate::RRMode;
+    use crate::Tivo;
     use anyhow::Result;
     use rusty_fork::rusty_fork_test;
     use std::sync::mpsc::SendError;
@@ -437,47 +438,17 @@ mod test {
     rusty_fork_test! {
     #[test]
     fn mpsc() -> Result<()> {
-        init_tivo_thread_root();
+        Tivo::init_tivo_thread_root_test();
         set_rr_mode(RRMode::NoRR);
 
         let (_s, _r) = crate::mpsc::channel::<i32>();
         Ok(())
     }
 
-    // #[test]
-    // fn mpsc_test_record() -> Result<()> {
-    //     init_tivo_thread_root();
-    //     test::simple_program::<Mpsc>(RRMode::Record)?;
-    //
-    //     let reference = test::simple_program_manual_log(
-    //         RecordedEvent::MpscSender,
-    //         |dti| RecordedEvent::MpscRecvSucc { sender_thread: dti },
-    //         ChannelVariant::MpscUnbounded,
-    //     );
-    //     assert_eq!(reference, get_tl_memory_recorder());
-    //     Ok(())
-    // }
-    //
-    // #[test]
-    // fn mpsc_test_replay() -> Result<()> {
-    //     init_tivo_thread_root();
-    //     let reference = test::simple_program_manual_log(
-    //         RecordedEvent::MpscSender,
-    //         |dti| RecordedEvent::CbRecvSucc { sender_thread: dti },
-    //         ChannelVariant::MpscUnbounded,
-    //     );
-    //     set_tl_memory_recorder(reference);
-    //     test::simple_program::<Mpsc>(RRMode::Replay)?;
-    //
-    //     // Not crashing is the goal, e.g. faithful replay.
-    //     // Nothing to assert.
-    //     Ok(())
-    // }
-
     // Many of these tests were copied from Mpsc docs!
     #[test]
     fn recv_program_passthrough_test() -> Result<()> {
-        init_tivo_thread_root();
+        Tivo::init_tivo_thread_root_test();
         set_rr_mode(RRMode::NoRR);
         test::recv_program::<Mpsc>()?;
         Ok(())
@@ -485,7 +456,7 @@ mod test {
 
     #[test]
     fn try_recv_program_passthrough_test() -> Result<()> {
-        init_tivo_thread_root();
+        Tivo::init_tivo_thread_root_test();
         set_rr_mode(RRMode::NoRR);
         test::try_recv_program::<Mpsc>()?;
         Ok(())
@@ -493,7 +464,7 @@ mod test {
 
     #[test]
     fn mpsc_test_recv_timeout_passthrough() -> Result<()> {
-        init_tivo_thread_root();
+        Tivo::init_tivo_thread_root_test();
         set_rr_mode(RRMode::NoRR);
         test::recv_timeout_program::<Mpsc>()?;
         Ok(())

@@ -1,6 +1,6 @@
 //! Error Module
 
-use crate::recordlog::{ChannelVariant, RecordedEvent};
+use crate::recordlog::{ChannelVariant, RecordEntry, RecordedEvent};
 use crate::rr::DetChannelId;
 use crossbeam_channel::{RecvError, RecvTimeoutError, TryRecvError};
 use serde::{Deserialize, Serialize};
@@ -36,7 +36,7 @@ impl From<RecvErrorRR> for DesyncError {
 /// Desynchonizations are common (TODO: make desync less common). This error type
 /// enumerates all reasons why we might desynchronize when executing RR.
 #[derive(Error, Debug)]
-pub enum DesyncError {
+pub(crate) enum DesyncError {
     /// Missing entry for specified (DetThreadId, EventIt) pair.
     /// TODO: Should probably carry information about which entry we're missing.
     #[error("Ran off the end of the log.")]
@@ -50,10 +50,10 @@ pub enum DesyncError {
     /// RecordedEvent log message was different. logged event vs current event.
     #[error("Mismatched events. Log showed {0:?} but channel expected a {1:?}.")]
     EventMismatch(RecordedEvent, RecordedEvent),
-    /// This thread did not get its DetThreadId initialized even though it should
-    /// have.
-    #[error("Uninitialized Thread")]
-    UnitializedDetThreadId,
+    // /// This thread did not get its DetThreadId initialized even though it should
+    // /// have.
+    // #[error("Uninitialized Thread")]
+    // UnitializedDetThreadId,
     /// Receiver was expected for select operation but entry is missing.
     #[error("Missing receiver in Select Set. At index {0:?}")]
     MissingReceiver(u64),
@@ -85,6 +85,9 @@ pub enum DesyncError {
     /// thread to sleep and it was woken up by a desync somewhere.
     #[error("Thread woke up after assuming it had ran of the end of the log.")]
     DesynchronizedWakeup,
+    /// Unable to write event to log.
+    #[error("Cannot write event to recordlog. Reason {0}")]
+    CannotWriteEventToLog(#[source] crossbeam_channel::SendError<RecordEntry>),
 }
 
 // We want to Serialize Types defined in other crates. So we copy their definition here.

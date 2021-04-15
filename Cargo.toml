@@ -8,15 +8,18 @@ edition = "2018"
 crossbeam-channel = "0.3"
 lazy_static = "1.3"
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+ron = "0.6"
 ipc-channel = { git = "https://github.com/gatoWololo/ipc-channel"}
 bincode = "1"
-anyhow = "1.0"
 tracing = "0.1.25"
 tracing-subscriber = "0.2"
 thiserror = "1.0"
+once_cell = "1.7"
+anyhow = "1.0"
+
 
 [dev-dependencies]
+once_cell = "1.7"
 env_logger = "0.7.1"
 rand = "0.7.3"
 anyhow = "1.0"

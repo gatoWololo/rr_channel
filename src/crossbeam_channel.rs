@@ -464,14 +464,15 @@ pub fn never<T>() -> Receiver<T> {
 #[cfg(test)]
 mod tests {
     use crate::crossbeam_channel as cb;
-    use crate::detthread::init_tivo_thread_root;
+    use crate::recordlog::take_global_memory_recorder;
     use crate::recordlog::{ChannelVariant, RecordedEvent};
     use crate::test;
     use crate::test::{
         rr_test, set_rr_mode, Receiver, ReceiverTimeout, Sender, TestChannel, ThreadSafe,
         TryReceiver,
     };
-    use crate::{get_global_memory_recorder, RRMode};
+    use crate::RRMode;
+    use crate::Tivo;
     use anyhow::Result;
     use rusty_fork::rusty_fork_test;
 
@@ -541,14 +542,14 @@ mod tests {
     rusty_fork_test! {
     #[test]
     fn init_unbounded() {
-        init_tivo_thread_root();
+        Tivo::init_tivo_thread_root_test();
         set_rr_mode(RRMode::NoRR);
         let (_s, _r) = unbounded::<i32>();
     }
 
     #[test]
     fn simple_program_record_test() -> Result<()> {
-        init_tivo_thread_root();
+        Tivo::init_tivo_thread_root_test();
         set_rr_mode(RRMode::Record);
         test::simple_program::<Crossbeam>()?;
 
@@ -557,13 +558,13 @@ mod tests {
             |dti| RecordedEvent::CbRecvSucc { sender_thread: dti },
             ChannelVariant::CbUnbounded,
         );
-        assert_eq!(reference, get_global_memory_recorder());
+        assert_eq!(reference, take_global_memory_recorder());
         Ok(())
     }
 
     #[test]
     fn try_recv_passthrough_test() -> Result<()> {
-        init_tivo_thread_root();
+        Tivo::init_tivo_thread_root_test();
         set_rr_mode(RRMode::NoRR);
         test::try_recv_program::<Crossbeam>()?;
         Ok(())
@@ -571,28 +572,11 @@ mod tests {
 
     #[test]
     fn recv_timeout_passthrough_test() -> Result<()> {
-        init_tivo_thread_root();
+        Tivo::init_tivo_thread_root_test();
         set_rr_mode(RRMode::NoRR);
         test::recv_timeout_program::<Crossbeam>()?;
         Ok(())
     }
-
-    // #[test]
-    // fn crossbeam_test_replay() -> Result<()> {
-    //     init_tivo_thread_root();
-    //     let reference = test::simple_program_manual_log(
-    //         RecordedEvent::CbSender,
-    //         |dti| RecordedEvent::CbRecvSucc { sender_thread: dti },
-    //         ChannelVariant::CbUnbounded,
-    //     );
-    //
-    //     set_global_memory_recorder(reference);
-    //     test::simple_program::<Crossbeam>(RRMode::Replay)?;
-    //
-    //     // Not crashing is the goal, e.g. faithful replay.
-    //     // Nothing to assert.
-    //     Ok(())
-    // }
 
     // Many of these tests were copied from Crossbeam docs!
 

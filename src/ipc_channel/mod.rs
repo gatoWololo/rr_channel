@@ -640,14 +640,16 @@ pub mod ipc {
                         select_events: recorded_events,
                     };
                     // Ehh, we fake it here. We never check this value anyways.
-                    self.recorder.write_event_to_record(
-                        event,
-                        &recordlog::RecordMetadata::new(
-                            "IpcSelect".to_string(),
-                            ChannelVariant::IpcSelect,
-                            DetChannelId::fake(),
-                        ),
-                    );
+                    self.recorder
+                        .write_event_to_record(
+                            event,
+                            &recordlog::RecordMetadata::new(
+                                "IpcSelect".to_string(),
+                                ChannelVariant::IpcSelect,
+                                DetChannelId::fake(),
+                            ),
+                        )
+                        .expect("TODO");
                     Ok(Ok(moved_events))
                 }
 
@@ -897,7 +899,11 @@ pub mod ipc {
 
                     let event = RecordedEvent::IpcSelectAdd(index);
                     self.recorder
-                        .write_event_to_record(event, &receiver.metadata);
+                        .write_event_to_record(event, &receiver.metadata)
+                        // We use expect instead of '?' because I wouldn't know what (OpaqueIpcReceiver
+                        // to return up from here? It has been consumed.
+                        .expect("Unable to write entry to log.");
+
                     Ok(Ok(index))
                 }
 
@@ -1063,13 +1069,14 @@ pub mod ipc {
 
 #[cfg(test)]
 mod test {
-    use crate::get_global_memory_recorder;
     use crate::ipc_channel::ipc;
+    use crate::recordlog::take_global_memory_recorder;
     use crate::recordlog::{ChannelVariant, RecordedEvent};
     use crate::test;
     use crate::test::set_rr_mode;
     use crate::test::{rr_test, Receiver, Sender, TestChannel, ThreadSafe, TryReceiver};
-    use crate::{init_tivo_thread_root, RRMode};
+    use crate::RRMode;
+    use crate::Tivo;
     use anyhow::Result;
     use ipc_channel::ipc::{IpcError, TryRecvError};
     use rusty_fork::rusty_fork_test;
@@ -1168,7 +1175,7 @@ mod test {
     rusty_fork_test! {
     #[test]
     fn ipc_channel_test() -> Result<()> {
-        init_tivo_thread_root();
+        Tivo::init_tivo_thread_root_test();
         set_rr_mode(RRMode::NoRR);
         let (_s, _r) = ipc::channel::<i32>()?;
         Ok(())
@@ -1176,7 +1183,7 @@ mod test {
 
     #[test]
     fn simple_program_record_test() -> Result<()> {
-        init_tivo_thread_root();
+        Tivo::init_tivo_thread_root_test();
         set_rr_mode(RRMode::Record);
         test::simple_program::<Ipc>()?;
 
@@ -1185,39 +1192,20 @@ mod test {
             |dti| RecordedEvent::IpcRecvSucc { sender_thread: dti },
             ChannelVariant::Ipc,
         );
-        assert_eq!(reference, get_global_memory_recorder());
+        assert_eq!(reference, take_global_memory_recorder());
         Ok(())
     }
 
-    // #[test]
-    // fn ipc_test_replay() -> Result<()> {
-    //     init_tivo_thread_root();
-    //     let reference = test::simple_program_manual_log(
-    //         RecordedEvent::CbSender,
-    //         |dti| RecordedEvent::CbRecvSucc { sender_thread: dti },
-    //         ChannelVariant::CbUnbounded,
-    //     );
-    //
-    //     set_global_memory_recorder(reference);
-    //     test::simple_program::<Ipc>(RRMode::Replay)?;
-    //
-    //     // Not crashing is the goal, e.g. faithful replay.
-    //     // Nothing to assert.
-    //     Ok(())
-    // }
-
-    // Many of these tests were copied from Ipc docs!
-
     #[test]
     fn recv_program_passthrough_test() -> Result<()> {
-        init_tivo_thread_root();
+        Tivo::init_tivo_thread_root_test();
         set_rr_mode(RRMode::NoRR);
         test::recv_program::<Ipc>()
     }
 
     #[test]
     fn ipc_test_try_recv_passthrough() -> Result<()> {
-        init_tivo_thread_root();
+        Tivo::init_tivo_thread_root_test();
         set_rr_mode(RRMode::NoRR);
         test::try_recv_program::<Ipc>()
     }

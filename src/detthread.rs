@@ -1,17 +1,11 @@
 use std::cell::RefCell;
 use std::fmt::Debug;
 use std::sync::atomic::AtomicU32;
-use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 pub use std::thread::{current, panicking, park, park_timeout, sleep, yield_now};
 
 use serde::{Deserialize, Serialize};
 use tracing::{error, event, info, span, Level};
-
-use crate::ipc_channel::router::ROUTER;
-use crate::recordlog::InMemoryRecorder;
-use crate::IN_MEMORY_RECORDER;
-use crate::{get_rr_mode, RRMode, MAIN_THREAD_SPAN};
 
 thread_local! {
     /// DET_ID must be set before accessing the DET_ID_SPAWNER as it relies on DET_ID for correct
@@ -20,7 +14,7 @@ thread_local! {
     /// Unique threadID assigned at thread spawn to each thread.
     pub static DET_ID: RefCell<DetThreadId> = RefCell::new(DetThreadId::new());
     /// Tells us whether this thread has been initialized yet. Init happens either through use of
-    /// our det thread spawning wrappers or through explicit call to `init_tivo_thread_root`. This
+    /// our det thread spawning wrappers or through explicit call to `init_tivo_thread_root_test`. This
     /// allows us to tell if a thread was spawned outside of our API. When this is false, the first
     /// call to DET_ID will error. This works because DET_ID is initialized lazily.
     pub(crate) static THREAD_INITIALIZED: RefCell<bool> = RefCell::new(false);
@@ -221,58 +215,6 @@ fn initialize_new_thread(new_id: DetThreadId) {
     DET_ID.with(|id| {
         *id.borrow_mut() = new_id.clone();
     });
-
-    // TODO This should only be done if using the in-memory-recorder... Might have to come back
-    // to this later.
-    if get_rr_mode() == RRMode::Record {
-        // Insert entry for our thread into memory recorder.
-        let mut imr = IN_MEMORY_RECORDER.write().unwrap();
-        // There should never be duplicate entries as every thread get assigned a unique ID for a
-        // given execution.
-        if let Some(_) = imr.insert(
-            new_id.clone(),
-            Arc::new(Mutex::new(InMemoryRecorder::new(new_id.clone()))),
-        ) {
-            let e = format!(
-                "Recorder Entry already present for newly spawned thread: {:?}",
-                new_id
-            );
-            error!(%e);
-            panic!("{}", e);
-        }
-    }
-}
-
-pub fn init_tivo_thread_root() {
-    init_tivo_thread_root_do(false);
-}
-
-pub fn init_tivo_thread_root_with_router() {
-    init_tivo_thread_root_do(true);
-}
-
-#[allow(clippy::no_effect)]
-pub fn init_tivo_thread_root_do(init_router: bool) {
-    THREAD_INITIALIZED.with(|ti| {
-        if *ti.borrow() {
-            error!("Thread root already initialized!");
-            panic!("Thread root already initialized!");
-        }
-        ti.replace(true);
-    });
-
-    // Inits the struct. Clippy is wrong.
-    &*IN_MEMORY_RECORDER;
-
-    // Init ROUTER from main thread. This guarantees a deterministic thread id for it. As threads
-    // will not be racing to init it first.
-    if init_router {
-        ROUTER.init();
-    }
-
-    // Initv main threads span for logging. Allows main thread to also be labeled with its thread
-    // id.
-    MAIN_THREAD_SPAN.with(|_| {});
 }
 
 #[cfg(test)]
@@ -284,14 +226,14 @@ mod tests {
     use rusty_fork::rusty_fork_test;
 
     use crate::crossbeam_channel::unbounded;
-    use crate::detthread::{generate_new_child_id, init_foreign_thread, init_tivo_thread_root};
+    use crate::detthread::{generate_new_child_id, init_foreign_thread};
     use crate::test::set_rr_mode;
-    use crate::RRMode;
+    use crate::{RRMode, Tivo};
 
     use super::{get_det_id, spawn};
 
     fn thread_id_assignment() {
-        init_tivo_thread_root();
+        let _f = Tivo::init_tivo_thread_root_test();
 
         let h1 = spawn(move || {
             assert_eq!(&[1], get_det_id().as_slice());
@@ -321,7 +263,7 @@ mod tests {
     }
 
     fn thread_id_assignment_random_times() {
-        init_tivo_thread_root();
+        let _f = Tivo::init_tivo_thread_root_test();
 
         let mut v1: Vec<JoinHandle<_>> = vec![];
         let number_of_threads = thread_rng().gen_range(1, 15);
@@ -371,7 +313,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "thread not initialized")]
     fn foreign_thread_spawn_panic() {
-        init_tivo_thread_root();
+        Tivo::init_tivo_thread_root_test();
         set_rr_mode(RRMode::NoRR);
 
         let h = std::thread::spawn(|| {
@@ -386,14 +328,14 @@ mod tests {
     // "should_panic" tests don't work with rusty_fork. So we run these outside. It should be
     // okay...
 
-    // init_tivo_thread_root() should always be called before thread spawning.
+    // Tivo::init_tivo_thread_root_test() should always be called before thread spawning.
     #[test]
     #[should_panic(expected = "thread not initialized")]
     fn failed_to_init_root() {
         spawn(|| {});
     }
 
-    // init_tivo_thread_root() should always be called before using the TLS get_det_id().
+    // Tivo::init_tivo_thread_root_test() should always be called before using the TLS get_det_id().
     #[test]
     #[should_panic(expected = "thread not initialized")]
     fn failed_to_init_root2() {
@@ -403,8 +345,8 @@ mod tests {
     #[test]
     #[should_panic(expected = "Thread root already initialized!")]
     fn already_initialized() {
-        init_tivo_thread_root();
-        init_tivo_thread_root();
+        Tivo::init_tivo_thread_root_test();
+        Tivo::init_tivo_thread_root_test();
     }
 
     rusty_fork_test! {
@@ -423,7 +365,7 @@ mod tests {
 
     #[test]
     fn foreign_thread_spawn_test() {
-        init_tivo_thread_root();
+        Tivo::init_tivo_thread_root_test();
         set_rr_mode(RRMode::NoRR);
 
         foreign_thread_spawn();

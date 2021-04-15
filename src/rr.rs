@@ -115,7 +115,7 @@ pub(crate) trait RecvRecordReplay<T, E>: RecordEventChecker<E> {
                     Err(e) => (Self::recorded_event_err(&e), Err(e)),
                 };
 
-                recordlog.write_event_to_record(recorded, &metadata);
+                recordlog.write_event_to_record(recorded, &metadata)?;
                 Ok(result)
             }
             RRMode::Replay => {
@@ -194,7 +194,11 @@ pub(crate) trait SendRecordReplay<T, E>: RecordEventChecker<E> {
         match mode {
             RRMode::Record => {
                 let result = self.underlying_send(det_id, msg);
-                recordlog.write_event_to_record(Self::EVENT_VARIANT, &metadata);
+                recordlog
+                    .write_event_to_record(Self::EVENT_VARIANT, &metadata)
+                    // Use expect here instead of '?' as I don't have a 'T' to return as the error
+                    // type of this function expects.
+                    .expect("Unable to write to log");
                 Ok(result)
             }
             RRMode::Replay => {
@@ -287,13 +291,14 @@ pub(crate) fn recv_expected_message<T>(
 mod test {
     use crate::detthread::{spawn, DetThreadId};
     use crate::rr::{recv_expected_message, DetChannelId};
-    use crate::{init_tivo_thread_root, BufferedValues};
+    use crate::BufferedValues;
+    use crate::Tivo;
     use std::borrow::Borrow;
     use std::collections::VecDeque;
 
     #[test]
     fn det_chan_id() {
-        init_tivo_thread_root();
+        Tivo::init_tivo_thread_root_test();
         let chanid1 = DetChannelId::new();
         let chanid2 = DetChannelId::new();
 
@@ -304,7 +309,7 @@ mod test {
 
     #[test]
     fn det_chan_id2() {
-        init_tivo_thread_root();
+        Tivo::init_tivo_thread_root_test();
         let c1 = DetChannelId::new();
         spawn(move || {
             let c2 = DetChannelId::new();

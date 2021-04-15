@@ -1,6 +1,6 @@
+use std::collections::hash_map::Entry;
+use std::collections::vec_deque::IntoIter;
 use std::collections::{HashMap, VecDeque};
-use std::fs::remove_file;
-use std::fs::File;
 use std::sync::mpsc;
 use std::sync::Mutex;
 
@@ -11,8 +11,12 @@ use tracing::{debug, info, span, span::EnteredSpan, trace, warn, Level};
 use crate::detthread::DetThreadId;
 use crate::error;
 use crate::error::DesyncError;
+use crate::fn_basename;
+use crate::get_det_id;
 use crate::rr::DetChannelId;
 use crate::LOG_FILE_NAME;
+use anyhow::Context;
+use std::cell::RefCell;
 
 /// Record representing a successful select from a channel. Used in replay mode.
 #[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq)]
@@ -164,57 +168,66 @@ pub enum IpcErrorVariants {
     Disconnected,
 }
 
-lazy_static::lazy_static! {
-    /// Global log file which all threads write to.
-    pub static ref WRITE_LOG_FILE: Mutex<File> = {
-        // Delete file if it already existed... file may not exist. That's okay.
-        let _ = remove_file(LOG_FILE_NAME.as_str());
-        let error = & format!("Unable to open {} for record logging.", *LOG_FILE_NAME);
-        Mutex::new(File::create(LOG_FILE_NAME.as_str()).expect(error))
-    };
-
-    /// Global map holding all indexes from the record phase. Lazily initialized on replay
-    /// mode.
-    pub static ref RECORDED_INDICES: HashMap<(DetThreadId, u32), (RecordedEvent, ChannelVariant, DetChannelId)> =
-     init_recorded_indices();
+pub(crate) fn get_global_recorder() -> &'static Mutex<Option<GlobalRecorder>> {
+    &GLOBAL_RECORDER
 }
 
-fn init_recorded_indices(
-) -> HashMap<(DetThreadId, u32), (RecordedEvent, ChannelVariant, DetChannelId)> {
-    todo!()
-    // crate::log_rr!(Debug, "Initializing RECORDED_INDICES lazy static.");
-    // use std::io::BufReader;
-    //
-    // let mut recorded_indices = HashMap::new();
-    // let log = File::open(LOG_FILE_NAME.as_str())
-    //     .unwrap_or_else(|_| panic!("Unable to open {} for replay.", LOG_FILE_NAME.as_str()));
-    // let log = BufReader::new(log);
-    //
-    // for line in log.lines() {
-    //     let line = line.expect("Unable to read recorded log file");
-    //     let entry: RecordEntry = serde_json::from_str(&line).expect("Malformed log entry.");
-    //
-    //     // let curr_thread = entry.current_thread.clone();
-    //     let key = (curr_thread, todo!());
-    //     let value = (
-    //         entry.event.clone(),
-    //         entry.channel_variant,
-    //         entry.chan_id.clone(),
-    //     );
-    //
-    //     let prev = recorded_indices.insert(key, value);
-    //     if prev.is_some() {
-    //         panic!(
-    //             "Corrupted log file. Adding key-value ({:?}, {:?}) but previous value \
-    //                     {:?} already exited. Hashmap entries should be unique.",
-    //             (todo!(), todo!()),
-    //             (entry.event, entry.channel_variant, entry.chan_id),
-    //             prev
-    //         );
-    //     }
-    // }
-    //
-    // recorded_indices
+lazy_static::lazy_static! {
+    static ref GLOBAL_RECORDER: Mutex<Option<GlobalRecorder>> = {
+        if cfg!(test) {
+            return GlobalRecorder::init_no_file();
+        } else {
+            GlobalRecorder::init(&LOG_FILE_NAME)
+        }
+    };
+
+    static ref GLOBAL_REPLAYER: Mutex<GlobalReplayer> = {
+        if cfg!(test) {
+            let mut gr = GLOBAL_RECORDER.lock().unwrap();
+            if gr.is_none() {
+                panic!("GLOBAL Recorder already taken.");
+            }
+            let entries = gr.take().unwrap().get_all_entries();
+            Mutex::new(GlobalReplayer::init_from(entries))
+        } else {
+            Mutex::new(GlobalReplayer::new(&LOG_FILE_NAME))
+        }
+    };
+}
+
+thread_local! {
+
+    /// We have several requirements for our logger. Mainly:
+    /// 1) Child threads can die at any time. We cannot have their information lost if they exit
+    ///    before we have a time to flush their values to a file.
+    /// 2) We want to avoid having to use Mutex and Refcells for the recordlog, which are necessary
+    ///    as the recordlog must live somewhere globally. Either thread local or true global state.
+    /// 3) The main thread will be responsible for writing results to a file.
+    ///
+    /// Therefore we use channels which are implemented as lock-free data structures. So the logs
+    /// of threads live somewhere shared where the main thread always has access to it.
+    /// TODO Technically there is a data race here. If a thread spawns and tries to init
+    ///      EVENT_SENDER once the GLOBAL_RECORDER has already been flushed. It will fail since
+    ///      GLOBAL_RECORDER will be None.
+    /// TODO We probably wanna implement a destructor which flushes the GLOBAL_RECORDER in case of
+    ///      panic. Having even the partial recordlog would be useful. I'm tired of implementing
+    ///      this so I will not do it now. To implement this we must make sure the flushing function
+    ///      cannot panic, write now, it can. This mostly entails changing some of our lazy_static
+    ///      globals so they become anyhow::Result<T> if they could not be inited properly.
+    pub(crate) static EVENT_SENDER: crossbeam_channel::Sender<RecordEntry> = {
+        let (s, r) = crossbeam_channel::unbounded();
+        let mut gr = GLOBAL_RECORDER.lock().expect("Unable to acquire GLOBAL_RECORDER lock.");
+
+        let e = "Cannot acquire mutable reference to GLOBAL_RECORDER. It has been taken.";
+        let global_recorder = gr.as_mut().expect(e);
+        global_recorder.add_receiver(get_det_id(), r);
+        s
+    };
+
+    pub(crate) static EVENT_RECEIVER: RefCell<IntoIter<RecordEntry>> = {
+        let mut gr = GLOBAL_REPLAYER.lock().unwrap();
+        RefCell::new(gr.take_entry(&get_det_id()))
+    }
 }
 
 /// TODO It seems there is repetition in the fields here and on LogEntry?
@@ -240,29 +253,167 @@ impl RecordMetadata {
     }
 }
 
-/// Record and Replay using a memory-based recorder. Useful for unit testing channel methods.
-/// These derives are needed because IpcReceiver requires Ser/Des... sigh...
-#[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq)]
-pub(crate) struct InMemoryRecorder {
-    queue: VecDeque<RecordEntry>,
-    /// The ID is the same for all events as this is a thread local record.
-    /// TODO: this field isn't used... remove it?
-    dti: DetThreadId,
+#[derive(Clone, Eq, PartialEq, Debug)]
+pub struct GlobalReplayer {
+    replayer: HashMap<DetThreadId, VecDeque<RecordEntry>>,
 }
 
-impl InMemoryRecorder {
-    pub fn new(dti: DetThreadId) -> InMemoryRecorder {
-        InMemoryRecorder {
-            dti,
-            queue: VecDeque::new(),
+impl GlobalReplayer {
+    pub fn new(path: &str) -> GlobalReplayer {
+        let _s = Self::span(fn_basename!());
+        info!("Initialized from file {:?}", path);
+
+        let input = std::fs::read_to_string(&path).unwrap();
+
+        let replayer: HashMap<DetThreadId, VecDeque<RecordEntry>> = ron::from_str(&input).unwrap();
+
+        GlobalReplayer { replayer }
+    }
+
+    fn span(fn_name: &str) -> EnteredSpan {
+        span!(Level::INFO, stringify!(GlobalReplayer), fn_name).entered()
+    }
+
+    pub(crate) fn init_from(
+        replayer: HashMap<DetThreadId, VecDeque<RecordEntry>>,
+    ) -> GlobalReplayer {
+        if cfg!(not(test)) {
+            panic!("Test-only code somehow ran in non-test environment");
+        }
+
+        let _s = Self::span(fn_basename!());
+        info!(
+            "Initialized from manual replayer with keys: {:?}.",
+            replayer.keys()
+        );
+        GlobalReplayer { replayer }
+    }
+
+    fn take_entry(&mut self, det_id: &DetThreadId) -> IntoIter<RecordEntry> {
+        let _s = Self::span(fn_basename!());
+
+        match self.replayer.remove(&det_id) {
+            None => {
+                let e = format!("GlobalReplayer has no entry for {:?}", det_id,);
+                error!(%e);
+                panic!("{}", e);
+            }
+            Some(v) => {
+                info!("Entry for {:?} taken by thread.", det_id);
+                v.into_iter()
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+/// Initialize the GLOBAL_RECORDER. This way, when the GLOBAL_REPLAYER is lazily initialized, it
+/// will take the values from the GLOBAL_RECORDER. Effectively initializing the GLOBAL_REPLAYER.
+pub(crate) fn set_global_memory_replayer(replayer: HashMap<DetThreadId, VecDeque<RecordEntry>>) {
+    let _s = span!(Level::INFO, stringify!(set_global_memory_recorder)).entered();
+    let mut hm: HashMap<DetThreadId, crossbeam_channel::Receiver<RecordEntry>> = HashMap::new();
+
+    for (det_id, entries) in replayer {
+        let (s, r) = crossbeam_channel::unbounded();
+        for e in entries {
+            s.send(e).expect("Send failed? How?!");
+        }
+
+        hm.insert(det_id, r);
+    }
+
+    let mut gr = GLOBAL_RECORDER.lock().unwrap();
+    *gr = Some(GlobalRecorder {
+        recorder: hm,
+        path: None,
+    });
+}
+
+pub(crate) fn take_global_memory_recorder() -> HashMap<DetThreadId, VecDeque<RecordEntry>> {
+    let gr = GLOBAL_RECORDER.lock().unwrap().take().unwrap();
+    gr.get_all_entries()
+}
+
+/// Threads can be killed at any time we must make sure we flush the GlobalRecorder to a file
+/// without
+pub(crate) struct GlobalRecorder {
+    recorder: HashMap<DetThreadId, crossbeam_channel::Receiver<RecordEntry>>,
+    path: Option<String>,
+}
+
+impl GlobalRecorder {
+    pub(crate) fn init_no_file() -> Mutex<Option<GlobalRecorder>> {
+        if cfg!(not(test)) {
+            panic!("Test-only code somehow ran in non-test environment");
+        }
+
+        Mutex::new(Some(GlobalRecorder {
+            recorder: HashMap::new(),
+            path: None,
+        }))
+    }
+
+    pub(crate) fn init(path: &str) -> Mutex<Option<GlobalRecorder>> {
+        Mutex::new(Some(GlobalRecorder {
+            recorder: HashMap::new(),
+            path: Some(path.to_string()),
+        }))
+    }
+
+    fn add_receiver(
+        &mut self,
+        sender_id: DetThreadId,
+        r: crossbeam_channel::Receiver<RecordEntry>,
+    ) {
+        match self.recorder.entry(sender_id) {
+            Entry::Occupied(o) => {
+                let e = format!("Entry already present for {:?} in GlobalRecorder.", o.key());
+                error!(%e);
+                panic!("{}", e);
+            }
+            Entry::Vacant(v) => {
+                v.insert(r);
+            }
         }
     }
 
-    pub(crate) fn add_entry(&mut self, r: RecordEntry) {
-        self.queue.push_back(r);
+    fn get_all_entries(self) -> HashMap<DetThreadId, VecDeque<RecordEntry>> {
+        let mut hm: HashMap<DetThreadId, VecDeque<RecordEntry>> = HashMap::new();
+        for (id, event_receiver) in self.recorder {
+            let events: VecDeque<_> = event_receiver.try_iter().collect();
+            if hm.insert(id, events).is_some() {
+                unreachable!(
+                    "Our GlobalRecorder invariants guarantee we will never have \
+                     duplicates here."
+                );
+            }
+        }
+        hm
     }
 
-    pub(crate) fn get_next_entry(&mut self) -> Option<RecordEntry> {
-        self.queue.pop_front()
+    // Write to file.
+    pub(crate) fn flush(self) -> anyhow::Result<()> {
+        use anyhow::bail;
+
+        info!("Flushing Global recordlog.");
+
+        if self.path.is_none() {
+            bail!("Flush called in record mode?");
+        }
+        let path = self
+            .path
+            .clone()
+            .context("Unable to get path. GlobalRecorder not init properly?")?;
+        let hm = self.get_all_entries();
+
+        if hm.len() == 0 {
+            bail!("No entries in recordlog. Perhaps you dropped the value returned from init_tivo_thread_root_test too early?");
+        }
+
+        let serialized =
+            ron::to_string(&hm).with_context(|| "Unable to serialize our data structure.")?;
+        std::fs::write(&path, serialized)
+            .with_context(|| format!("Unable to write recordlog to file: {:?}", path))?;
+        Ok(())
     }
 }

@@ -156,8 +156,10 @@ impl<'a> Select<'a> {
                     DetChannelId::fake(), // We fake it here. We never check this value anyways.
                 );
 
-                self.event_recorder
-                    .write_event_to_record(RecordedEvent::CbSelectReady { select_index }, metadata);
+                self.event_recorder.write_event_to_record(
+                    RecordedEvent::CbSelectReady { select_index },
+                    metadata,
+                )?;
                 Ok(select_index)
             }
             RRMode::Replay => {
@@ -381,7 +383,7 @@ impl<'a> SelectedOperation<'a> {
         }
     }
 
-    pub fn rr_select_recv<T>(
+    pub(crate) fn rr_select_recv<T>(
         self,
         r: &crossbeam_channel::Receiver<T>,
     ) -> desync::Result<Result<T, rc::RecvError>> {
@@ -416,7 +418,8 @@ impl<'a> SelectedOperation<'a> {
                     // Err(e) on the RHS is not the same type as Err(e) LHS.
                     Err(e) => (Err(e), SelectEvent::RecvError { selected_index }),
                 };
-                recorder.write_event_to_record(RecordedEvent::CbSelect(select_event), &r.metadata);
+                recorder
+                    .write_event_to_record(RecordedEvent::CbSelect(select_event), &r.metadata)?;
                 Ok(msg)
             }
             // We do not use the select API at all on replays. Wait for correct

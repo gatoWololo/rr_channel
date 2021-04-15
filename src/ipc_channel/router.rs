@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info, span, span::EnteredSpan, trace, warn, Level};
 
 use crate::crossbeam_channel::{Receiver, Sender};
+use crate::detthread::get_det_id;
 use crate::fn_basename;
-use crate::get_det_id;
 use crate::ipc_channel::ipc::{
     self, IpcReceiver, IpcReceiverSet, IpcSelectionResult, IpcSender, OpaqueIpcMessage,
     OpaqueIpcReceiver,
@@ -242,20 +242,21 @@ pub type RouterHandler = Box<dyn FnMut(OpaqueIpcMessage) + Send>;
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::collections::VecDeque;
 
     use anyhow::Result;
     use rusty_fork::rusty_fork_test;
-    use tracing_subscriber::EnvFilter;
 
     use crate::detthread::DetThreadId;
     use crate::ipc_channel::ipc;
     use crate::ipc_channel::router::RouterProxy;
+
     use crate::recordlog::{
-        ChannelVariant, InMemoryRecorder, IpcSelectEvent, RecordEntry, RecordedEvent,
+        set_global_memory_replayer, ChannelVariant, IpcSelectEvent, RecordEntry, RecordedEvent,
     };
     use crate::rr::DetChannelId;
     use crate::test::{rr_test, set_rr_mode};
-    use crate::{detthread, init_tivo_thread_root, set_global_memory_recorder, RRMode};
+    use crate::{detthread, RRMode, Tivo};
 
     /// Doesn't actually test much, but exercises the common code paths for the router.
     /// This will always be deterministic as there is no multiple producers.
@@ -367,7 +368,7 @@ mod tests {
     /// Does replay using our manually recordlog. Basically all messages arrive from T2 before any
     /// message arrives from T1. In practice this would be astronomically unlikely but we can force
     /// rr-channels to verify this ordering.
-    fn get_manual_recordlog(iters: i32) -> HashMap<DetThreadId, InMemoryRecorder> {
+    fn get_manual_recordlog(iters: i32) -> HashMap<DetThreadId, VecDeque<RecordEntry>> {
         // The [..] is needed as there is no as_slice method for arrays? Weird...
         // Main thread
         let main_thread = DetThreadId::from(&[][..]);
@@ -391,10 +392,10 @@ mod tests {
         let main_recv = DetChannelId::from_raw(main_thread.clone(), 4);
         let shutdown_ack = DetChannelId::from_raw(main_thread.clone(), 5);
 
-        let mut imr1 = InMemoryRecorder::new(thread1.clone());
-        let mut imr2 = InMemoryRecorder::new(thread2.clone());
-        let mut main_thread_imr = InMemoryRecorder::new(main_thread.clone());
-        let mut router_thread_imr = InMemoryRecorder::new(router_thread.clone());
+        let mut imr1 = VecDeque::new();
+        let mut imr2 = VecDeque::new();
+        let mut main_thread_imr = VecDeque::new();
+        let mut router_thread_imr = VecDeque::new();
 
         // Router sends messages when routes are added to it!
         let cb_sender = RecordEntry::new(
@@ -403,10 +404,10 @@ mod tests {
             router_main_interface.clone(),
             tn.clone(),
         );
-        main_thread_imr.add_entry(cb_sender.clone());
+        main_thread_imr.push_back(cb_sender.clone());
 
         // Router sends messages when routes are added to it!
-        main_thread_imr.add_entry(RecordEntry::new(
+        main_thread_imr.push_back(RecordEntry::new(
             RecordedEvent::IpcSender,
             ChannelVariant::Ipc,
             internal_router_channels.clone(),
@@ -414,7 +415,7 @@ mod tests {
         ));
 
         // Init Router's internal IpcSelector.
-        router_thread_imr.add_entry(RecordEntry::new(
+        router_thread_imr.push_back(RecordEntry::new(
             RecordedEvent::IpcSelectAdd(0),
             ChannelVariant::Ipc,
             internal_router_channels.clone(),
@@ -429,9 +430,9 @@ mod tests {
             router_main_interface.clone(),
             tn.clone(),
         );
-        router_thread_imr.add_entry(select.clone());
+        router_thread_imr.push_back(select.clone());
 
-        router_thread_imr.add_entry(RecordEntry::new(
+        router_thread_imr.push_back(RecordEntry::new(
             RecordedEvent::CbRecvSucc {
                 sender_thread: main_thread.clone(),
             },
@@ -441,7 +442,7 @@ mod tests {
         ));
 
         // New route added to router, added to IpcSelect.
-        router_thread_imr.add_entry(RecordEntry::new(
+        router_thread_imr.push_back(RecordEntry::new(
             RecordedEvent::IpcSelectAdd(1),
             ChannelVariant::Ipc,
             threads_sender.clone(),
@@ -450,7 +451,7 @@ mod tests {
 
         // Router loops on selecting and sending.
         for _ in 0..iters {
-            router_thread_imr.add_entry(RecordEntry::new(
+            router_thread_imr.push_back(RecordEntry::new(
                 RecordedEvent::IpcSelect {
                     select_events: vec![IpcSelectEvent::MessageReceived(1, thread2.clone())],
                 },
@@ -459,7 +460,7 @@ mod tests {
                 tn.clone(),
             ));
 
-            router_thread_imr.add_entry(RecordEntry {
+            router_thread_imr.push_back(RecordEntry {
                 chan_id: main_recv.clone(),
                 ..cb_sender.clone()
             });
@@ -467,7 +468,7 @@ mod tests {
 
         // Router selects and forwards messages.
         for _ in 0..iters {
-            router_thread_imr.add_entry(RecordEntry::new(
+            router_thread_imr.push_back(RecordEntry::new(
                 RecordedEvent::IpcSelect {
                     select_events: vec![IpcSelectEvent::MessageReceived(1, thread1.clone())],
                 },
@@ -476,7 +477,7 @@ mod tests {
                 tn.clone(),
             ));
 
-            router_thread_imr.add_entry(RecordEntry::new(
+            router_thread_imr.push_back(RecordEntry::new(
                 RecordedEvent::CbSender,
                 ChannelVariant::CbUnbounded,
                 main_recv.clone(),
@@ -486,7 +487,7 @@ mod tests {
 
         // Main thread reads messages from router. Thread 2 first.
         for _ in 0..2 * iters {
-            main_thread_imr.add_entry(
+            main_thread_imr.push_back(
                 RecordEntry::new(
                     RecordedEvent::CbRecvSucc {
                         sender_thread: router_thread.clone(),
@@ -507,21 +508,21 @@ mod tests {
         );
         // Two threads continuously send messages to Router.
         for _ in 0..iters {
-            imr1.add_entry(ipc_sender.clone());
-            imr2.add_entry(ipc_sender.clone());
+            imr1.push_back(ipc_sender.clone());
+            imr2.push_back(ipc_sender.clone());
         }
 
         // Send message to router to wake up.
-        main_thread_imr.add_entry(RecordEntry {
+        main_thread_imr.push_back(RecordEntry {
             chan_id: internal_router_channels.clone(),
             ..ipc_sender
         });
 
         // Send message to router to send Shutdown message.
-        main_thread_imr.add_entry(cb_sender.clone());
+        main_thread_imr.push_back(cb_sender.clone());
 
         // Ack back from Router.
-        main_thread_imr.add_entry(
+        main_thread_imr.push_back(
             RecordEntry::new(
                 RecordedEvent::CbRecvSucc {
                     sender_thread: router_thread.clone(),
@@ -534,10 +535,10 @@ mod tests {
         );
 
         // Shutdown signal arrives
-        router_thread_imr.add_entry(select.clone());
+        router_thread_imr.push_back(select.clone());
 
         // Shutdown event read from channel.
-        router_thread_imr.add_entry(RecordEntry::new(
+        router_thread_imr.push_back(RecordEntry::new(
             RecordedEvent::CbRecvSucc {
                 sender_thread: main_thread.clone(),
             },
@@ -547,47 +548,42 @@ mod tests {
         ));
 
         // Send back shutdown ack.
-        router_thread_imr.add_entry(RecordEntry {
+        router_thread_imr.push_back(RecordEntry {
             chan_id: shutdown_ack,
             ..cb_sender
         });
 
-        let mut manual_recordlog: HashMap<DetThreadId, InMemoryRecorder> = HashMap::new();
+        let mut manual_recordlog: HashMap<DetThreadId, VecDeque<RecordEntry>> = HashMap::new();
         manual_recordlog.insert(thread1, imr1);
         manual_recordlog.insert(thread2, imr2);
         manual_recordlog.insert(main_thread, main_thread_imr);
         manual_recordlog.insert(router_thread, router_thread_imr);
+        // println!("{:?}", manual_recordlog);
         manual_recordlog
     }
 
     rusty_fork_test! {
-    #[test]
-    fn add_route_test() -> Result<()> {
-        rr_test(add_route)
-    }
+        #[test]
+        fn add_route_test() -> Result<()> {
+            rr_test(add_route)
+        }
 
-    #[test]
-    fn add_route_mpsc_test() -> Result<()> {
-        rr_test(add_route_mpsc)
-    }
+        #[test]
+        fn add_route_mpsc_test() -> Result<()> {
+            rr_test(add_route_mpsc)
+        }
 
-    #[test]
-    fn route_ipc_receiver_to_new_crossbeam_receiver_mpsc_test() -> Result<()> {
-        rr_test(|| route_ipc_receiver_to_new_crossbeam_receiver_mpsc(1_000))
+        #[test]
+        fn route_ipc_receiver_to_new_crossbeam_receiver_mpsc_test() -> Result<()> {
+            rr_test(|| route_ipc_receiver_to_new_crossbeam_receiver_mpsc(1_000))
+        }
     }
-
     #[test]
     fn router_manual_recordlog_test() -> Result<()> {
-        tracing_subscriber::fmt::Subscriber::builder()
-        .with_env_filter(EnvFilter::from_default_env())
-        .with_target(false)
-        .without_time()
-        .init();
-
-        init_tivo_thread_root();
+        Tivo::init_tivo_thread_root_test();
 
         let iters: i32 = 1_000;
-        set_global_memory_recorder(get_manual_recordlog(iters));
+        set_global_memory_replayer(get_manual_recordlog(iters));
         set_rr_mode(RRMode::Replay);
 
         let results = route_ipc_receiver_to_new_crossbeam_receiver_mpsc(iters)?;
@@ -602,5 +598,5 @@ mod tests {
         assert_eq!(results, refv);
         Ok(())
     }
-    }
+    // }
 }

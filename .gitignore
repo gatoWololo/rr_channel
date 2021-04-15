@@ -6,3 +6,4 @@ Cargo.lock
 record.log
 debug_logs
 .idea
+tests/generated_output.txt
