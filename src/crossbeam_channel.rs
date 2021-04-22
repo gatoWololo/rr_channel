@@ -21,6 +21,7 @@ pub use rc::TryRecvError;
 pub use rc::{RecvError, SendError};
 use std::any::type_name;
 
+use tracing::Metadata;
 #[allow(unused_imports)]
 use tracing::{debug, error, info, span, span::EnteredSpan, trace, warn, Level};
 
@@ -195,7 +196,7 @@ pub struct Receiver<T> {
     mode: RRMode,
 }
 
-macro_rules! ImplRecordEvenChecker {
+macro_rules! ImplRecordEventChecker {
     ($err_type:ty, $succ: ident, $err:ident) => {
         impl<T> RecordEventChecker<$err_type> for Receiver<T> {
             fn check_recorded_event(&self, re: &TivoEvent) -> Result<(), TivoEvent> {
@@ -253,9 +254,9 @@ impl_recvrr!(
     CrossbeamRecvTimeoutErr
 );
 
-ImplRecordEvenChecker!(rc::RecvError, CrossbeamRecvSucc, CrossbeamRecvErr);
-ImplRecordEvenChecker!(rc::TryRecvError, CrossbeamTryRecvSucc, CrossbeamTryRecvErr);
-ImplRecordEvenChecker!(
+ImplRecordEventChecker!(rc::RecvError, CrossbeamRecvSucc, CrossbeamRecvErr);
+ImplRecordEventChecker!(rc::TryRecvError, CrossbeamTryRecvSucc, CrossbeamTryRecvErr);
+ImplRecordEventChecker!(
     rc::RecvTimeoutError,
     CrossbeamRecvTimeoutSucc,
     CrossbeamRecvTimeoutErr

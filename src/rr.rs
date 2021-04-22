@@ -75,6 +75,11 @@ impl DetChannelId {
     }
 }
 
+/// The E type parameter is not used in the API of this trait, we use E to allow the same type,
+/// say crossbeam-channel::Receiver to implement this trait for multiple different `E`s. For example,
+/// for RecordEventChecker<TryRecvErr>, RecordEventChecker<TimeoutRecvErr>, etc. This is due to
+/// our RecordEventChecker relating to TivoEvents, there may be multiple TivoEvents related to a
+/// specific Rust type, but traits only work on types.
 pub(crate) trait RecordEventChecker<E> {
     /// Returns Ok if the passed event matches the expected event for Self. Otherwise returns
     /// Err of the expected event.
@@ -109,8 +114,6 @@ pub(crate) trait RecvRecordReplay<T, E>: RecordEventChecker<E> {
         recv_message: impl FnOnce() -> Result<DetMessage<T>, E>,
         recordlog: &EventRecorder,
     ) -> desync::Result<Result<T, E>> {
-        // crate::log_rr!(Debug, "Receiver<{:?}>::{}", metadata.id, function_name);
-
         match mode {
             RRMode::Record => {
                 let (recorded, result) = match recv_message() {

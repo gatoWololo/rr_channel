@@ -4,8 +4,9 @@ use std::sync::atomic::AtomicU32;
 use std::thread::JoinHandle;
 pub use std::thread::{current, panicking, park, park_timeout, sleep, yield_now};
 
+use crate::desync::handle_desync;
 use crate::recordlog::{ChannelVariant, TivoEvent};
-use crate::rr::DetChannelId;
+use crate::rr::{DetChannelId, RecordEventChecker};
 use crate::{get_rr_mode, recordlog, EventRecorder, RRMode};
 use serde::{Deserialize, Serialize};
 use tracing::{error, event, info, span, Level};
@@ -160,6 +161,26 @@ pub struct Builder {
     builder: std::thread::Builder,
 }
 
+struct ThreadSpawnChecker {
+    thread_id: DetThreadId,
+}
+
+// We don't care about the () here.
+impl RecordEventChecker<()> for ThreadSpawnChecker {
+    fn check_recorded_event(&self, re: &TivoEvent) -> Result<(), TivoEvent> {
+        let err_case = Err(TivoEvent::ThreadInitialized(self.thread_id.clone()));
+        match re {
+            TivoEvent::ThreadInitialized(expected_dti) => {
+                if *expected_dti != self.thread_id {
+                    return err_case;
+                }
+                return Ok(());
+            }
+            _ => return err_case,
+        }
+    }
+}
+
 impl Builder {
     pub fn new() -> Builder {
         Builder {
@@ -195,7 +216,8 @@ impl Builder {
             RRMode::Record => {
                 let event = TivoEvent::ThreadInitialized(new_id.clone());
 
-                // TODO: We shouldn't have metadata for thread events...
+                // TODO: We shouldn't have metadata for thread events this requires a refactoring
+                // of the recordlog entries.
                 let metadata = recordlog::RecordMetadata::new(
                     "Thread".to_string(),
                     ChannelVariant::None,
@@ -203,33 +225,30 @@ impl Builder {
                 );
                 recorder.write_event_to_record(event, &metadata).unwrap();
             }
-            RRMode::Replay => match recorder.get_log_entry() {
-                Ok(event) => match event.event {
-                    TivoEvent::ThreadInitialized(expected_dti) => {
-                        if expected_dti != new_id {
-                            let e = format!(
-                                "ThreadInitialized event mismatched DTIs. Expected {:?}, saw {:?}",
-                                expected_dti, new_id
-                            );
-                            error!("{}", e);
+            RRMode::Replay => {
+                match recorder.get_log_entry() {
+                    Ok(event) => {
+                        let tsc = ThreadSpawnChecker {
+                            thread_id: new_id.clone(),
+                        };
+                        let metadata = recordlog::RecordMetadata::new(
+                            "Thread".to_string(),
+                            ChannelVariant::None,
+                            DetChannelId::fake(),
+                        );
+
+                        // Can't propagate error up, panic.
+                        if let Err(e) = tsc.check_event_mismatch(&event, &metadata) {
                             panic!("{}", e);
                         }
                     }
-                    unexpected_event => {
-                        let e = format!(
-                            "Expected ThreadInitialized event, instead saw: {:?}",
-                            unexpected_event
-                        );
-                        error!("{}", e);
+                    // Only happens when we run to the end of the log?
+                    Err(e) => {
+                        error!(%e);
                         panic!("{}", e);
                     }
-                },
-                // Only happens when we run to the end of the log?
-                Err(e) => {
-                    error!(%e);
-                    panic!("{}", e);
                 }
-            },
+            }
             RRMode::NoRR => {}
         }
 

@@ -48,7 +48,7 @@ pub(crate) enum DesyncError {
     #[error("Mismatched channel IDs. Log showed {0} but actual was {1}")]
     ChannelMismatch(DetChannelId, DetChannelId),
     /// TivoEvent log message was different. logged event vs current event.
-    #[error("Mismatched events. Log showed {0:?} but channel expected a {1:?}.")]
+    #[error("Mismatched events. Log showed {0:?} but actual current event was {1:?}.")]
     EventMismatch(TivoEvent, TivoEvent),
     // /// This thread did not get its DetThreadId initialized even though it should
     // /// have.
