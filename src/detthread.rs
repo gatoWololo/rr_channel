@@ -4,7 +4,6 @@ use std::sync::atomic::AtomicU32;
 use std::thread::JoinHandle;
 pub use std::thread::{current, panicking, park, park_timeout, sleep, yield_now};
 
-use crate::desync::handle_desync;
 use crate::recordlog::{ChannelVariant, TivoEvent};
 use crate::rr::{DetChannelId, RecordEventChecker};
 use crate::{get_rr_mode, recordlog, EventRecorder, RRMode};
@@ -242,7 +241,6 @@ impl Builder {
                             panic!("{}", e);
                         }
                     }
-                    // Only happens when we run to the end of the log?
                     Err(e) => {
                         error!(%e);
                         panic!("{}", e);

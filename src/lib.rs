@@ -10,7 +10,9 @@ use serde::{Deserialize, Serialize};
 #[allow(unused_imports)]
 use tracing::{debug, error, info, span, span::EnteredSpan, trace, warn, Level};
 
-use crate::recordlog::{get_global_recorder, EVENT_NUMBER, EVENT_RECEIVER, EVENT_SENDER};
+use crate::recordlog::{
+    get_global_recorder, ChannelVariant, EVENT_NUMBER, EVENT_RECEIVER, EVENT_SENDER,
+};
 use desync::DesyncMode;
 use detthread::DetThreadId;
 
@@ -18,9 +20,11 @@ use detthread::DetThreadId;
 use crate::detthread::{get_det_id, THREAD_INITIALIZED};
 use crate::error::DesyncError;
 use crate::recordlog::{RecordEntry, RecordMetadata, TivoEvent};
+use crate::rr::{DetChannelId, RecordEventChecker};
 #[cfg(test)]
 use crate::test::TEST_MODE;
 use anyhow::Context;
+use std::any::type_name;
 
 pub mod crossbeam_channel;
 mod crossbeam_select;
@@ -55,15 +59,21 @@ const DESYNC_MODE_VAR: &str = "RR_DESYNC_MODE";
 const RECORD_FILE_VAR: &str = "RR_RECORD_FILE";
 
 fn get_rr_mode() -> RRMode {
-    #[cfg(test)]
-    return *TEST_MODE
-        .get()
-        .expect("TEST_MODE one-cell not initialized.")
-        .lock()
-        .unwrap();
+    if cfg!(test) {
+        #[cfg(test)]
+        return *TEST_MODE
+            .get()
+            .expect("TEST_MODE one-cell not initialized.")
+            .lock()
+            .unwrap();
 
-    #[cfg(not(test))]
-    return *RECORD_MODE.as_ref().expect("Cannot Get RR_MODE");
+        #[allow(unreachable_code)]
+        {
+            unreachable!("Never rechable in test mode")
+        };
+    } else {
+        *RECORD_MODE.as_ref().expect("Cannot Get RR_MODE")
+    }
 }
 
 ///
@@ -290,4 +300,35 @@ impl Tivo {
 
         Ok(())
     }
+}
+
+struct ChannelCreation {}
+impl RecordEventChecker<()> for ChannelCreation {
+    fn check_recorded_event(&self, re: &TivoEvent) -> Result<(), TivoEvent> {
+        match re {
+            TivoEvent::ChannelCreation => Ok(()),
+            _other => Err(TivoEvent::ChannelCreation),
+        }
+    }
+}
+
+pub(crate) fn rr_channel_creation_event<T>(
+    mode: RRMode,
+    id: &DetChannelId,
+    recorder: &EventRecorder,
+    variant: ChannelVariant,
+) -> desync::Result<()> {
+    let metadata = RecordMetadata::new(type_name::<T>().to_string(), variant, id.clone());
+    match mode {
+        RRMode::Record => {
+            recorder.write_event_to_record(TivoEvent::ChannelCreation, &metadata)?;
+        }
+        RRMode::Replay => {
+            let event = recorder.get_log_entry()?;
+            // Can't propagate error up, panic.
+            ChannelCreation {}.check_event_mismatch(&event, &metadata)?;
+        }
+        RRMode::NoRR => {}
+    }
+    Ok(())
 }

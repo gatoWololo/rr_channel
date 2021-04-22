@@ -172,6 +172,7 @@ pub enum TivoEvent {
     },
     /// Current thread spawned new child thread with this DTI.
     ThreadInitialized(DetThreadId),
+    ChannelCreation,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq)]
@@ -346,6 +347,7 @@ pub(crate) fn set_global_memory_replayer(replayer: HashMap<DetThreadId, VecDeque
     });
 }
 
+#[cfg(test)]
 pub(crate) fn take_global_memory_recorder() -> HashMap<DetThreadId, VecDeque<RecordEntry>> {
     let gr = GLOBAL_RECORDER.lock().unwrap().take().unwrap();
     gr.get_all_entries()

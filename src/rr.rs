@@ -57,6 +57,7 @@ impl DetChannelId {
         DetChannelId::new()
     }
 
+    #[cfg(test)]
     pub(crate) fn from_raw(dti: DetThreadId, channel_id: u32) -> DetChannelId {
         DetChannelId {
             det_thread_id: dti,

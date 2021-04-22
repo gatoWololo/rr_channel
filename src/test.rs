@@ -1,7 +1,6 @@
 //! Crossbeam, ipc, and mpsc channels share a lot in common. This module provides traits and methods
 //! to abstract over some of their differences. This allows to us tests these different channel
 //! implementations using the tests without worrying about what exact channel we're testing.
-
 use std::collections::{HashMap, VecDeque};
 use std::error::Error;
 use std::fmt::Debug;
@@ -19,6 +18,7 @@ use crate::recordlog::{ChannelVariant, RecordEntry, TivoEvent};
 use crate::rr::DetChannelId;
 use crate::{RRMode, Tivo};
 use once_cell::sync::OnceCell;
+use std::any::type_name;
 use tracing::info;
 
 /// We want to dynamically change the RRMode during testing. That is, run the test in Record mode,
@@ -37,7 +37,6 @@ pub(crate) static TEST_MODE: OnceCell<Mutex<RRMode>> = OnceCell::new();
 ///
 /// Will result with the replay execution having different ChannelId values.
 /// TODO But the memory recorder doesn't count as global state? Yuck
-#[cfg(test)]
 pub(crate) fn reset_test_state() {
     // Must be initialized in this order since some globals rely on other globals to be set
     // a specific way... sigh...
@@ -55,7 +54,6 @@ pub(crate) fn reset_test_state() {
     });
 }
 
-#[cfg(test)]
 pub(crate) fn set_rr_mode(mode: RRMode) {
     info!("Initalizing rr_mode in TESTS to {:?}", mode);
     match TEST_MODE.get() {
@@ -174,6 +172,12 @@ pub(crate) fn simple_program_manual_log(
     let re = RecordEntry::new(send_event, variant, channel_id.clone(), tn.to_string());
 
     let mut rf = VecDeque::new();
+    rf.push_back(RecordEntry::new(
+        TivoEvent::ChannelCreation,
+        variant,
+        channel_id.clone(),
+        type_name::<i32>().to_string(),
+    ));
     rf.push_back(re.clone());
     rf.push_back(re.clone());
     rf.push_back(re);
@@ -223,7 +227,7 @@ where
     let (s, r) = C::make_channels();
 
     let h = crate::detthread::spawn::<_, Result<()>>(move || {
-        thread::sleep(Duration::from_millis(10));
+        thread::sleep(Duration::from_millis(30));
         s.send(5)?;
         drop(s);
         Ok(())
@@ -234,9 +238,9 @@ where
         Err(C::R::TIMEOUT)
     );
 
-    assert_eq!(r.recv_timeout(Duration::from_millis(40)), Ok(5));
+    assert_eq!(r.recv_timeout(Duration::from_millis(100)), Ok(5));
     assert_eq!(
-        r.recv_timeout(Duration::from_millis(50)),
+        r.recv_timeout(Duration::from_millis(100)),
         Err(C::R::DISCONNECTED)
     );
 

@@ -4,7 +4,7 @@ pub mod router;
 pub use ipc_channel::Error;
 
 pub mod ipc {
-    use crate::{fn_basename, get_det_id};
+    use crate::{fn_basename, get_det_id, rr_channel_creation_event};
     use ipc_channel::Error;
 
     #[allow(unused_imports)]
@@ -64,6 +64,7 @@ pub mod ipc {
             mode: RRMode,
         ) -> IpcReceiver<T> {
             info!("{}", crate::function_name!());
+
             IpcReceiver {
                 receiver,
                 buffer: RefCell::new(HashMap::new()),
@@ -414,6 +415,12 @@ pub mod ipc {
             chan=%id
         )
         .entered();
+
+        // Cant't really propagate error up.. panic!
+        if let Err(e) = rr_channel_creation_event::<T>(mode, &id, &recorder, ChannelVariant::Ipc) {
+            error!("{}", e);
+            panic!("{}", e);
+        }
 
         Ok((
             IpcSender::new(sender, metadata, recorder.clone(), mode),

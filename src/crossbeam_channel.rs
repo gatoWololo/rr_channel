@@ -8,7 +8,7 @@ use crate::detthread::{self, get_det_id, DetThreadId};
 use crate::error::DesyncError;
 use crate::recordlog::{self, ChannelVariant, RecordMetadata, TivoEvent};
 use crate::rr::{self, DetChannelId, RecordEventChecker, SendRecordReplay};
-use crate::{get_rr_mode, BufferedValues, DESYNC_MODE};
+use crate::{get_rr_mode, rr_channel_creation_event, BufferedValues, DESYNC_MODE};
 use crate::{EventRecorder, RRMode};
 
 pub use crate::crossbeam_select::{Select, SelectedOperation};
@@ -21,7 +21,6 @@ pub use rc::TryRecvError;
 pub use rc::{RecvError, SendError};
 use std::any::type_name;
 
-use tracing::Metadata;
 #[allow(unused_imports)]
 use tracing::{debug, error, info, span, span::EnteredSpan, trace, warn, Level};
 
@@ -414,10 +413,20 @@ impl<T> Receiver<T> {
 pub fn after(duration: Duration) -> Receiver<Instant> {
     let id = DetChannelId::generate_new_unique_channel_id();
     let recorder = EventRecorder::get_global_recorder();
+    let mode = get_rr_mode();
 
     let _s = span!(Level::INFO, stringify!(after)).entered();
+
+    // Cant't really propagate error up.. panic!
+    if let Err(e) =
+        rr_channel_creation_event::<Instant>(mode, &id, &recorder, ChannelVariant::CbAfter)
+    {
+        error!("{}", e);
+        panic!("{}", e);
+    }
+
     Receiver::new(
-        get_rr_mode(),
+        mode,
         ChannelKind::After(crossbeam_channel::after(duration)),
         id,
         recorder,
@@ -435,6 +444,12 @@ pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
 
     let metadata =
         recordlog::RecordMetadata::new(type_name, ChannelVariant::CbUnbounded, id.clone());
+
+    // Cant't really propagate error up.. panic!
+    if let Err(e) = rr_channel_creation_event::<T>(mode, &id, &recorder, metadata.channel_variant) {
+        error!("{}", e);
+        panic!("{}", e);
+    }
 
     let _s = span!(
         Level::INFO,
@@ -461,20 +476,36 @@ pub fn bounded<T>(cap: usize) -> (Sender<T>, Receiver<T>) {
 
     let recorder = EventRecorder::get_global_recorder();
     let metadata = recordlog::RecordMetadata::new(type_name, ChannelVariant::CbBounded, id.clone());
+    let mode = get_rr_mode();
+
+    // Cant't really propagate error up.. panic!
+    if let Err(e) = rr_channel_creation_event::<T>(mode, &id, &recorder, metadata.channel_variant) {
+        error!("{}", e);
+        panic!("{}", e);
+    }
+
     (
-        Sender::new(sender, metadata, get_rr_mode(), recorder.clone()),
-        Receiver::new(get_rr_mode(), ChannelKind::Bounded(receiver), id, recorder),
+        Sender::new(sender, metadata, mode, recorder.clone()),
+        Receiver::new(mode, ChannelKind::Bounded(receiver), id, recorder),
     )
 }
 
 pub fn never<T>() -> Receiver<T> {
     let id = DetChannelId::generate_new_unique_channel_id();
+    let recorder = EventRecorder::get_global_recorder();
+    let mode = get_rr_mode();
+
+    // Cant't really propagate error up.. panic!
+    if let Err(e) = rr_channel_creation_event::<T>(mode, &id, &recorder, ChannelVariant::CbNever) {
+        error!("{}", e);
+        panic!("{}", e);
+    }
 
     Receiver::new(
-        get_rr_mode(),
+        mode,
         ChannelKind::Never(crossbeam_channel::never()),
         id,
-        EventRecorder::get_global_recorder(),
+        recorder,
     )
 }
 

@@ -398,13 +398,19 @@ mod tests {
         let mut main_thread_imr = VecDeque::new();
         let mut router_thread_imr = VecDeque::new();
 
-        // Router sends messages when routes are added to it!
-        let cb_sender = RecordEntry::new(
-            TivoEvent::CrossbeamSender,
+        main_thread_imr.push_back(RecordEntry::new(
+            TivoEvent::ChannelCreation,
             ChannelVariant::CbUnbounded,
             router_main_interface.clone(),
-            tn.clone(),
-        );
+            "Thread".to_string(),
+        ));
+
+        main_thread_imr.push_back(RecordEntry::new(
+            TivoEvent::ChannelCreation,
+            ChannelVariant::Ipc,
+            internal_router_channels.clone(),
+            "Thread".to_string(),
+        ));
 
         main_thread_imr.push_back(RecordEntry::new(
             TivoEvent::ThreadInitialized(router_thread.clone()),
@@ -413,6 +419,27 @@ mod tests {
             "Thread".to_string(),
         ));
 
+        main_thread_imr.push_back(RecordEntry::new(
+            TivoEvent::ChannelCreation,
+            ChannelVariant::Ipc,
+            threads_sender.clone(),
+            "Thread".to_string(),
+        ));
+
+        main_thread_imr.push_back(RecordEntry::new(
+            TivoEvent::ChannelCreation,
+            ChannelVariant::CbUnbounded,
+            main_recv.clone(),
+            "Thread".to_string(),
+        ));
+
+        // Router sends messages when routes are added to it!
+        let cb_sender = RecordEntry::new(
+            TivoEvent::CrossbeamSender,
+            ChannelVariant::CbUnbounded,
+            router_main_interface.clone(),
+            tn.clone(),
+        );
         main_thread_imr.push_back(cb_sender.clone());
 
         // Router sends messages when routes are added to it!
@@ -535,6 +562,13 @@ mod tests {
             imr2.push_back(ipc_sender.clone());
         }
 
+        main_thread_imr.push_back(RecordEntry::new(
+            TivoEvent::ChannelCreation,
+            ChannelVariant::CbUnbounded,
+            shutdown_ack.clone(),
+            "Thread".to_string(),
+        ));
+
         // Send message to router to wake up.
         main_thread_imr.push_back(RecordEntry {
             chan_id: internal_router_channels.clone(),
@@ -602,32 +636,31 @@ mod tests {
 
             rr_test(|| route_ipc_receiver_to_new_crossbeam_receiver_mpsc(1_000))
         }
-    }
 
-    #[test]
-    fn router_manual_recordlog_test() -> Result<()> {
-        // tracing_subscriber::fmt::Subscriber::builder()
-        //     .with_env_filter(EnvFilter::from_default_env())
-        //     .with_target(false)
-        //     .without_time()
-        //     .init();
-        Tivo::init_tivo_thread_root_test();
+        #[test]
+        fn router_manual_recordlog_test() -> Result<()> {
+            // tracing_subscriber::fmt::Subscriber::builder()
+            //     // .with_env_filter(EnvFilter::from_default_env())
+            //     .with_target(false)
+            //     .without_time()
+            //     .init();
+            Tivo::init_tivo_thread_root_test();
 
-        let iters: i32 = 1_000;
-        set_global_memory_replayer(get_manual_recordlog(iters));
-        set_rr_mode(RRMode::Replay);
+            let iters: i32 = 1_000;
+            set_global_memory_replayer(get_manual_recordlog(iters));
+            set_rr_mode(RRMode::Replay);
 
-        let results = route_ipc_receiver_to_new_crossbeam_receiver_mpsc(iters)?;
-        let mut refv = vec![];
-        for i in 0..iters {
-            refv.push((2, i));
+            let results = route_ipc_receiver_to_new_crossbeam_receiver_mpsc(iters)?;
+            let mut refv = vec![];
+            for i in 0..iters {
+                refv.push((2, i));
+            }
+            for i in 0..iters {
+                refv.push((1, i));
+            }
+
+            assert_eq!(results, refv);
+            Ok(())
         }
-        for i in 0..iters {
-            refv.push((1, i));
-        }
-
-        assert_eq!(results, refv);
-        Ok(())
     }
-    // }
 }

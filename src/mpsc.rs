@@ -10,7 +10,7 @@ use crate::recordlog::{self, ChannelVariant, TivoEvent};
 use crate::rr::SendRecordReplay;
 use crate::rr::{self, DetChannelId};
 use crate::rr::{RecordEventChecker, RecvRecordReplay};
-use crate::{desync, get_rr_mode, EventRecorder, RRMode};
+use crate::{desync, get_rr_mode, rr_channel_creation_event, EventRecorder, RRMode};
 use crate::{BufferedValues, DESYNC_MODE};
 use crate::{DesyncMode, DetMessage};
 use std::any::type_name;
@@ -123,7 +123,12 @@ pub struct Receiver<T> {
 }
 
 impl<T> Receiver<T> {
-    fn new(real_receiver: RealReceiver<T>, id: DetChannelId) -> Receiver<T> {
+    fn new(
+        real_receiver: RealReceiver<T>,
+        id: DetChannelId,
+        mode: RRMode,
+        event_recorder: EventRecorder,
+    ) -> Receiver<T> {
         let flavor = Receiver::get_marker(&real_receiver);
         Receiver {
             buffer: RefCell::new(HashMap::new()),
@@ -133,8 +138,8 @@ impl<T> Receiver<T> {
                 channel_variant: flavor,
                 id,
             },
-            event_recorder: EventRecorder::get_global_recorder(),
-            mode: get_rr_mode(),
+            event_recorder,
+            mode,
         }
     }
 
@@ -323,15 +328,23 @@ impl<T> RealSender<T> {
 // }
 
 pub fn sync_channel<T>(bound: usize) -> (Sender<T>, Receiver<T>) {
-    // *ENV_LOGGER;
-
     let (sender, receiver) = mpsc::sync_channel(bound);
     let mode = get_rr_mode();
     let channel_type = ChannelVariant::MpscBounded;
     let type_name = type_name::<T>().to_string();
     let id = DetChannelId::generate_new_unique_channel_id();
+    let recorder = EventRecorder::get_global_recorder();
 
     info!("Bounded mpsc channel created: {:?} {:?}", id, type_name);
+
+    // Cant't really propagate error up.. panic!
+    if let Err(e) =
+        rr_channel_creation_event::<T>(mode, &id, &recorder, ChannelVariant::MpscBounded)
+    {
+        error!("{}", e);
+        panic!("{}", e);
+    }
+
     (
         Sender {
             sender: RealSender::Bounded(sender),
@@ -341,9 +354,9 @@ pub fn sync_channel<T>(bound: usize) -> (Sender<T>, Receiver<T>) {
                 id: id.clone(),
             },
             mode,
-            event_recorder: EventRecorder::get_global_recorder(),
+            event_recorder: recorder.clone(),
         },
-        Receiver::new(RealReceiver::Bounded(receiver), id),
+        Receiver::new(RealReceiver::Bounded(receiver), id, mode, recorder),
     )
 }
 
@@ -356,6 +369,14 @@ pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
     let type_name = type_name::<T>().to_string();
     let id = DetChannelId::generate_new_unique_channel_id();
 
+    // Cant't really propagate error up.. panic!
+    if let Err(e) =
+        rr_channel_creation_event::<T>(mode, &id, &recorder, ChannelVariant::MpscUnbounded)
+    {
+        error!("{}", e);
+        panic!("{}", e);
+    }
+
     info!("Unbounded mpsc channel created: {:?} {:?}", id, type_name);
 
     (
@@ -367,9 +388,9 @@ pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
                 id: id.clone(),
             },
             mode,
-            event_recorder: recorder,
+            event_recorder: recorder.clone(),
         },
-        Receiver::new(RealReceiver::Unbounded(receiver), id),
+        Receiver::new(RealReceiver::Unbounded(receiver), id, mode, recorder),
     )
 }
 
