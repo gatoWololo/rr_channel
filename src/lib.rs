@@ -10,14 +10,14 @@ use serde::{Deserialize, Serialize};
 #[allow(unused_imports)]
 use tracing::{debug, error, info, span, span::EnteredSpan, trace, warn, Level};
 
-use crate::recordlog::{get_global_recorder, EVENT_RECEIVER, EVENT_SENDER};
+use crate::recordlog::{get_global_recorder, EVENT_NUMBER, EVENT_RECEIVER, EVENT_SENDER};
 use desync::DesyncMode;
 use detthread::DetThreadId;
 
 // TODO Why is this being re-exported without `pub use`?
 use crate::detthread::{get_det_id, THREAD_INITIALIZED};
 use crate::error::DesyncError;
-use crate::recordlog::{RecordEntry, RecordMetadata, RecordedEvent};
+use crate::recordlog::{RecordEntry, RecordMetadata, TivoEvent};
 #[cfg(test)]
 use crate::test::TEST_MODE;
 use anyhow::Context;
@@ -54,18 +54,16 @@ const RECORD_MODE_VAR: &str = "RR_MODE";
 const DESYNC_MODE_VAR: &str = "RR_DESYNC_MODE";
 const RECORD_FILE_VAR: &str = "RR_RECORD_FILE";
 
-#[cfg(test)]
 fn get_rr_mode() -> RRMode {
-    *TEST_MODE
+    #[cfg(test)]
+    return *TEST_MODE
         .get()
         .expect("TEST_MODE one-cell not initialized.")
         .lock()
-        .unwrap()
-}
+        .unwrap();
 
-#[cfg(not(test))]
-fn get_rr_mode() -> RRMode {
-    *RECORD_MODE.as_ref().expect("Cannot Get RR_MODE")
+    #[cfg(not(test))]
+    return *RECORD_MODE.as_ref().expect("Cannot Get RR_MODE");
 }
 
 ///
@@ -144,7 +142,14 @@ lazy_static! {
 
 thread_local! {
     static MAIN_THREAD_SPAN: EnteredSpan = {
-        span!(Level::INFO, "Thread", dti=?get_det_id()).entered()
+        let t = std::thread::current();
+
+        span!(Level::INFO,
+              "Thread",
+              dti=?get_det_id(),
+              name=t.name().unwrap_or("None")
+              ).
+            entered()
     }
 }
 
@@ -157,14 +162,26 @@ impl EventRecorder {
     }
 
     fn next_record_entry(&self) -> Option<RecordEntry> {
+        EVENT_NUMBER.with(|en| {
+            let mut en = en.borrow_mut();
+            *en += 1;
+            warn!("EVENT_NUMBER: {}", *en);
+        });
+
         EVENT_RECEIVER.with(|events| events.borrow_mut().next())
     }
 
     fn write_event_to_record(
         &self,
-        event: RecordedEvent,
+        event: TivoEvent,
         metadata: &RecordMetadata,
     ) -> desync::Result<()> {
+        EVENT_NUMBER.with(|en| {
+            let mut en = en.borrow_mut();
+            *en += 1;
+            warn!("EVENT_NUMBER: {}", *en);
+        });
+
         let entry: RecordEntry = RecordEntry {
             event,
             channel_variant: metadata.channel_variant,
@@ -197,15 +214,17 @@ impl EventRecorder {
 pub struct Tivo {}
 
 impl Tivo {
+    //
     pub fn init_tivo_thread_root_test() -> Tivo {
         info!("Initializing Thread Root.");
         Tivo::init_tivo_thread_root_test_do(false);
         Tivo {}
     }
 
-    pub fn init_tivo_thread_root_test_test() {
-        info!("Initializing Thread Root test mode.");
-        Tivo::init_tivo_thread_root_test_do(false);
+    pub fn init_tivo_thread_root_with_router() -> Tivo {
+        info!("Initializing Thread Root.");
+        Tivo::init_tivo_thread_root_test_do(true);
+        Tivo {}
     }
 
     fn init_tivo_thread_root_test_do(init_router: bool) {
@@ -223,8 +242,9 @@ impl Tivo {
             crate::ipc_channel::router::ROUTER.init();
         }
 
-        // Initv main threads span for logging. Allows main thread to also be labeled with its thread
-        // id.
+        // Main thread span is explicitly initialized here. We only use this for the main thread
+        // as it is easy enough to create a span for threads in the dethread::Builder::spawn
+        // function. Also for some reason having threads live here causes a panic...
         MAIN_THREAD_SPAN.with(|_| {});
     }
 

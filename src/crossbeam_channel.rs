@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use crate::desync::{self, DesyncMode};
 use crate::detthread::{self, get_det_id, DetThreadId};
 use crate::error::DesyncError;
-use crate::recordlog::{self, ChannelVariant, RecordMetadata, RecordedEvent};
+use crate::recordlog::{self, ChannelVariant, RecordMetadata, TivoEvent};
 use crate::rr::{self, DetChannelId, RecordEventChecker, SendRecordReplay};
 use crate::{get_rr_mode, BufferedValues, DESYNC_MODE};
 use crate::{EventRecorder, RRMode};
@@ -40,17 +40,25 @@ impl<T> Sender<T> {
         mode: RRMode,
         e: EventRecorder,
     ) -> Sender<T> {
-        info!("{}", crate::function_name!(),);
-        Sender {
+        let s = Sender {
             sender: real_sender,
             metadata,
             mode,
             event_recorder: e,
-        }
+        };
+        let _e = s.span(crate::function_name!());
+        info!("");
+        s
     }
 
     fn span(&self, fn_name: &str) -> EnteredSpan {
-        span!(Level::INFO, stringify!(Sender), fn_name).entered()
+        span!(
+            Level::INFO,
+            stringify!(CrossbeamSender),
+            fn_name,
+            "type" = type_name::<T>()
+        )
+        .entered()
     }
 
     pub fn send(&self, msg: T) -> Result<(), rc::SendError<T>> {
@@ -101,16 +109,16 @@ impl<T> Clone for Sender<T> {
 }
 
 impl<T> RecordEventChecker<rc::SendError<T>> for Sender<T> {
-    fn check_recorded_event(&self, re: &RecordedEvent) -> Result<(), RecordedEvent> {
+    fn check_recorded_event(&self, re: &TivoEvent) -> Result<(), TivoEvent> {
         match re {
-            RecordedEvent::CbSender => Ok(()),
-            _ => Err(RecordedEvent::CbSender),
+            TivoEvent::CrossbeamSender => Ok(()),
+            _ => Err(TivoEvent::CrossbeamSender),
         }
     }
 }
 
 impl<T> SendRecordReplay<T, rc::SendError<T>> for Sender<T> {
-    const EVENT_VARIANT: RecordedEvent = RecordedEvent::CbSender;
+    const EVENT_VARIANT: TivoEvent = TivoEvent::CrossbeamSender;
 
     fn underlying_send(&self, thread_id: DetThreadId, msg: T) -> Result<(), rc::SendError<T>> {
         self.sender
@@ -190,11 +198,11 @@ pub struct Receiver<T> {
 macro_rules! ImplRecordEvenChecker {
     ($err_type:ty, $succ: ident, $err:ident) => {
         impl<T> RecordEventChecker<$err_type> for Receiver<T> {
-            fn check_recorded_event(&self, re: &RecordedEvent) -> Result<(), RecordedEvent> {
+            fn check_recorded_event(&self, re: &TivoEvent) -> Result<(), TivoEvent> {
                 match re {
-                    RecordedEvent::$succ { sender_thread: _ } => Ok(()),
-                    RecordedEvent::$err(_) => Ok(()),
-                    _ => Err(RecordedEvent::$succ {
+                    TivoEvent::$succ { sender_thread: _ } => Ok(()),
+                    TivoEvent::$err(_) => Ok(()),
+                    _ => Err(TivoEvent::$succ {
                         sender_thread: DetThreadId::new(),
                     }),
                 }
@@ -207,27 +215,27 @@ macro_rules! ImplRecordEvenChecker {
 macro_rules! impl_recvrr {
     ($err_type:ty, $succ: ident, $err:ident) => {
         impl<T> rr::RecvRecordReplay<T, $err_type> for Receiver<T> {
-            fn recorded_event_succ(dtid: DetThreadId) -> recordlog::RecordedEvent {
-                RecordedEvent::$succ {
+            fn recorded_event_succ(dtid: DetThreadId) -> recordlog::TivoEvent {
+                TivoEvent::$succ {
                     sender_thread: dtid,
                 }
             }
 
-            fn recorded_event_err(e: &$err_type) -> recordlog::RecordedEvent {
-                RecordedEvent::$err(*e)
+            fn recorded_event_err(e: &$err_type) -> recordlog::TivoEvent {
+                TivoEvent::$err(*e)
             }
 
             fn replay_recorded_event(
                 &self,
-                event: RecordedEvent,
+                event: TivoEvent,
             ) -> desync::Result<Result<T, $err_type>> {
                 match event {
-                    RecordedEvent::$succ { sender_thread } => {
+                    TivoEvent::$succ { sender_thread } => {
                         let retval = self.replay_recv(&sender_thread)?;
                         Ok(Ok(retval))
                     }
-                    RecordedEvent::$err(e) => {
-                        trace!("Creating error event for: {:?}", RecordedEvent::$err(e));
+                    TivoEvent::$err(e) => {
+                        trace!("Creating error event for: {:?}", TivoEvent::$err(e));
                         Ok(Err(e))
                     }
                     _ => unreachable!("This should have been checked in RecordEventChecker"),
@@ -237,13 +245,21 @@ macro_rules! impl_recvrr {
     };
 }
 
-impl_recvrr!(rc::RecvError, CbRecvSucc, CbRecvErr);
-impl_recvrr!(rc::TryRecvError, CbTryRecvSucc, CbTryRecvErr);
-impl_recvrr!(rc::RecvTimeoutError, CbRecvTimeoutSucc, CbRecvTimeoutErr);
+impl_recvrr!(rc::RecvError, CrossbeamRecvSucc, CrossbeamRecvErr);
+impl_recvrr!(rc::TryRecvError, CrossbeamTryRecvSucc, CrossbeamTryRecvErr);
+impl_recvrr!(
+    rc::RecvTimeoutError,
+    CrossbeamRecvTimeoutSucc,
+    CrossbeamRecvTimeoutErr
+);
 
-ImplRecordEvenChecker!(rc::RecvError, CbRecvSucc, CbRecvErr);
-ImplRecordEvenChecker!(rc::TryRecvError, CbTryRecvSucc, CbTryRecvErr);
-ImplRecordEvenChecker!(rc::RecvTimeoutError, CbRecvTimeoutSucc, CbRecvTimeoutErr);
+ImplRecordEvenChecker!(rc::RecvError, CrossbeamRecvSucc, CrossbeamRecvErr);
+ImplRecordEvenChecker!(rc::TryRecvError, CrossbeamTryRecvSucc, CrossbeamTryRecvErr);
+ImplRecordEvenChecker!(
+    rc::RecvTimeoutError,
+    CrossbeamRecvTimeoutSucc,
+    CrossbeamRecvTimeoutErr
+);
 
 impl<T> Receiver<T> {
     pub(crate) fn new(
@@ -343,7 +359,13 @@ impl<T> Receiver<T> {
     }
 
     fn span(&self, fn_name: &str) -> EnteredSpan {
-        span!(Level::INFO, stringify!(Receiver), fn_name).entered()
+        span!(
+            Level::INFO,
+            stringify!(Receiver),
+            fn_name,
+            "type" = type_name::<T>()
+        )
+        .entered()
     }
 
     // The following methods are used for the select operation:
@@ -376,8 +398,8 @@ impl<T> Receiver<T> {
                     .push_back(msg);
                 true
             }
-            Err(DesyncError::Timeout) => {
-                debug!("No entry found while polling...");
+            Err(DesyncError::Timeout(t)) => {
+                debug!("Timed out while waiting for message of type: {:?}", t);
                 false
             }
             // TODO document why this is unreachable.
@@ -389,7 +411,7 @@ impl<T> Receiver<T> {
 // We need to make sure our ENV_LOGGER is initialized. We do this when the user of this library
 // creates channels. Below are the "entry points" to creating channels.
 pub fn after(duration: Duration) -> Receiver<Instant> {
-    let id = DetChannelId::new();
+    let id = DetChannelId::generate_new_unique_channel_id();
     let recorder = EventRecorder::get_global_recorder();
 
     let _s = span!(Level::INFO, stringify!(after)).entered();
@@ -408,7 +430,7 @@ pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
 
     let (sender, receiver) = crossbeam_channel::unbounded();
     let type_name = type_name::<T>().to_string();
-    let id = rr::DetChannelId::new();
+    let id = rr::DetChannelId::generate_new_unique_channel_id();
 
     let metadata =
         recordlog::RecordMetadata::new(type_name, ChannelVariant::CbUnbounded, id.clone());
@@ -432,7 +454,7 @@ pub fn bounded<T>(cap: usize) -> (Sender<T>, Receiver<T>) {
     // *ENV_LOGGER;
 
     let (sender, receiver) = crossbeam_channel::bounded(cap);
-    let id = DetChannelId::new();
+    let id = DetChannelId::generate_new_unique_channel_id();
 
     let type_name = type_name::<T>().to_string();
 
@@ -445,8 +467,7 @@ pub fn bounded<T>(cap: usize) -> (Sender<T>, Receiver<T>) {
 }
 
 pub fn never<T>() -> Receiver<T> {
-    // *ENV_LOGGER;
-    let id = DetChannelId::new();
+    let id = DetChannelId::generate_new_unique_channel_id();
 
     Receiver::new(
         get_rr_mode(),
@@ -465,7 +486,7 @@ pub fn never<T>() -> Receiver<T> {
 mod tests {
     use crate::crossbeam_channel as cb;
     use crate::recordlog::take_global_memory_recorder;
-    use crate::recordlog::{ChannelVariant, RecordedEvent};
+    use crate::recordlog::{ChannelVariant, TivoEvent};
     use crate::test;
     use crate::test::{
         rr_test, set_rr_mode, Receiver, ReceiverTimeout, Sender, TestChannel, ThreadSafe,
@@ -554,8 +575,8 @@ mod tests {
         test::simple_program::<Crossbeam>()?;
 
         let reference = test::simple_program_manual_log(
-            RecordedEvent::CbSender,
-            |dti| RecordedEvent::CbRecvSucc { sender_thread: dti },
+            TivoEvent::CrossbeamSender,
+            |dti| TivoEvent::CrossbeamRecvSucc { sender_thread: dti },
             ChannelVariant::CbUnbounded,
         );
         assert_eq!(reference, take_global_memory_recorder());
@@ -582,6 +603,11 @@ mod tests {
 
     #[test]
     fn recv_program_test() -> Result<()> {
+            tracing_subscriber::fmt::Subscriber::builder()
+            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .with_target(false)
+            .without_time()
+            .init();
         rr_test(test::recv_program::<Crossbeam>)
     }
 

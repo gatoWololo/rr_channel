@@ -33,7 +33,7 @@ pub mod ipc {
     use crate::detthread::DetThreadId;
     use crate::error::{DesyncError, RecvErrorRR};
     use crate::recordlog::{self, ChannelVariant, IpcSelectEvent, RecordEntry};
-    use crate::recordlog::{IpcErrorVariants, RecordMetadata, RecordedEvent};
+    use crate::recordlog::{IpcErrorVariants, RecordMetadata, TivoEvent};
     use crate::rr::SendRecordReplay;
     use crate::rr::{self, DetChannelId};
     use crate::rr::{RecordEventChecker, RecvRecordReplay};
@@ -158,11 +158,11 @@ pub mod ipc {
     }
 
     impl<T> RecordEventChecker<ipc_channel::ipc::IpcError> for IpcReceiver<T> {
-        fn check_recorded_event(&self, re: &RecordedEvent) -> Result<(), RecordedEvent> {
+        fn check_recorded_event(&self, re: &TivoEvent) -> Result<(), TivoEvent> {
             match re {
-                RecordedEvent::IpcRecvSucc { sender_thread: _ } => Ok(()),
-                RecordedEvent::IpcError(_) => Ok(()),
-                _ => Err(RecordedEvent::IpcRecvSucc {
+                TivoEvent::IpcRecvSucc { sender_thread: _ } => Ok(()),
+                TivoEvent::IpcError(_) => Ok(()),
+                _ => Err(TivoEvent::IpcRecvSucc {
                     // TODO: Is there a better value to show this is a mock DTI?
                     sender_thread: DetThreadId::new(),
                 }),
@@ -174,28 +174,28 @@ pub mod ipc {
     where
         T: for<'de> Deserialize<'de> + Serialize,
     {
-        fn recorded_event_succ(dtid: DetThreadId) -> recordlog::RecordedEvent {
-            RecordedEvent::IpcRecvSucc {
+        fn recorded_event_succ(dtid: DetThreadId) -> recordlog::TivoEvent {
+            TivoEvent::IpcRecvSucc {
                 sender_thread: dtid,
             }
         }
 
         // This isn't ideal, but IpcError doesn't easily implement serialize/deserialize, so this
         // is our best effort attempt.
-        fn recorded_event_err(e: &ipc_channel::ipc::IpcError) -> recordlog::RecordedEvent {
-            RecordedEvent::IpcError(<IpcReceiver<T>>::ipc_error_to_recorded_event(e))
+        fn recorded_event_err(e: &ipc_channel::ipc::IpcError) -> recordlog::TivoEvent {
+            TivoEvent::IpcError(<IpcReceiver<T>>::ipc_error_to_recorded_event(e))
         }
 
         fn replay_recorded_event(
             &self,
-            event: RecordedEvent,
+            event: TivoEvent,
         ) -> desync::Result<Result<T, ipc_channel::ipc::IpcError>> {
             match event {
-                RecordedEvent::IpcRecvSucc { sender_thread } => {
+                TivoEvent::IpcRecvSucc { sender_thread } => {
                     let retval = self.replay_recv(&sender_thread)?;
                     Ok(Ok(retval))
                 }
-                RecordedEvent::IpcError(variant) => {
+                TivoEvent::IpcError(variant) => {
                     Ok(Err(<IpcReceiver<T>>::recorded_event_to_ipc_error(variant)))
                 }
                 _ => unreachable!(
@@ -207,12 +207,12 @@ pub mod ipc {
     }
 
     impl<T> RecordEventChecker<ipc_channel::ipc::TryRecvError> for IpcReceiver<T> {
-        fn check_recorded_event(&self, re: &RecordedEvent) -> Result<(), RecordedEvent> {
+        fn check_recorded_event(&self, re: &TivoEvent) -> Result<(), TivoEvent> {
             match re {
-                RecordedEvent::IpcRecvSucc { sender_thread: _ } => Ok(()),
-                RecordedEvent::IpcTryRecvIpcError(_) => Ok(()),
-                RecordedEvent::IpcTryRecvErrorEmpty => Ok(()),
-                _ => Err(RecordedEvent::IpcRecvSucc {
+                TivoEvent::IpcRecvSucc { sender_thread: _ } => Ok(()),
+                TivoEvent::IpcTryRecvIpcError(_) => Ok(()),
+                TivoEvent::IpcTryRecvErrorEmpty => Ok(()),
+                _ => Err(TivoEvent::IpcRecvSucc {
                     // TODO: Is there a better value to show this is a mock DTI?
                     sender_thread: DetThreadId::new(),
                 }),
@@ -224,34 +224,34 @@ pub mod ipc {
     where
         T: for<'de> Deserialize<'de> + Serialize,
     {
-        fn recorded_event_succ(dtid: DetThreadId) -> recordlog::RecordedEvent {
-            RecordedEvent::IpcRecvSucc {
+        fn recorded_event_succ(dtid: DetThreadId) -> recordlog::TivoEvent {
+            TivoEvent::IpcRecvSucc {
                 sender_thread: dtid,
             }
         }
 
-        fn recorded_event_err(e: &ipc_channel::ipc::TryRecvError) -> recordlog::RecordedEvent {
+        fn recorded_event_err(e: &ipc_channel::ipc::TryRecvError) -> recordlog::TivoEvent {
             match e {
-                TryRecvError::Empty => RecordedEvent::IpcTryRecvErrorEmpty,
-                TryRecvError::IpcError(e) => RecordedEvent::IpcTryRecvIpcError(
-                    <IpcReceiver<T>>::ipc_error_to_recorded_event(e),
-                ),
+                TryRecvError::Empty => TivoEvent::IpcTryRecvErrorEmpty,
+                TryRecvError::IpcError(e) => {
+                    TivoEvent::IpcTryRecvIpcError(<IpcReceiver<T>>::ipc_error_to_recorded_event(e))
+                }
             }
         }
 
         fn replay_recorded_event(
             &self,
-            event: RecordedEvent,
+            event: TivoEvent,
         ) -> desync::Result<Result<T, ipc_channel::ipc::TryRecvError>> {
             match event {
-                RecordedEvent::IpcRecvSucc { sender_thread } => {
+                TivoEvent::IpcRecvSucc { sender_thread } => {
                     let retval = self.replay_recv(&sender_thread)?;
                     Ok(Ok(retval))
                 }
-                RecordedEvent::IpcTryRecvIpcError(variant) => Ok(Err(TryRecvError::IpcError(
+                TivoEvent::IpcTryRecvIpcError(variant) => Ok(Err(TryRecvError::IpcError(
                     <IpcReceiver<T>>::recorded_event_to_ipc_error(variant),
                 ))),
-                RecordedEvent::IpcTryRecvErrorEmpty => Ok(Err(TryRecvError::Empty)),
+                TivoEvent::IpcTryRecvErrorEmpty => Ok(Err(TryRecvError::Empty)),
                 _ => unreachable!(
                     "This should have already been checked in {}!",
                     stringify!(check_event_mismatch)
@@ -294,10 +294,10 @@ pub mod ipc {
     }
 
     impl<T> RecordEventChecker<Error> for IpcSender<T> {
-        fn check_recorded_event(&self, re: &RecordedEvent) -> Result<(), RecordedEvent> {
+        fn check_recorded_event(&self, re: &TivoEvent) -> Result<(), TivoEvent> {
             match re {
-                RecordedEvent::IpcSender => Ok(()),
-                _ => Err(RecordedEvent::IpcSender),
+                TivoEvent::IpcSender => Ok(()),
+                _ => Err(TivoEvent::IpcSender),
             }
         }
     }
@@ -306,7 +306,7 @@ pub mod ipc {
     where
         T: Serialize,
     {
-        const EVENT_VARIANT: RecordedEvent = RecordedEvent::IpcSender;
+        const EVENT_VARIANT: TivoEvent = TivoEvent::IpcSender;
 
         fn underlying_send(&self, thread_id: DetThreadId, msg: T) -> Result<(), Error> {
             self.sender.send((thread_id, msg))
@@ -333,7 +333,13 @@ pub mod ipc {
         }
 
         fn span(&self, fn_name: &str) -> EnteredSpan {
-            span!(Level::INFO, stringify!(IpcSender), fn_name).entered()
+            span!(
+                Level::INFO,
+                stringify!(IpcSender),
+                fn_name,
+                "type" = type_name::<T>()
+            )
+            .entered()
         }
 
         /// Send our det thread id along with the actual message for both
@@ -363,7 +369,7 @@ pub mod ipc {
         }
 
         pub fn connect(name: String) -> Result<IpcSender<T>, std::io::Error> {
-            let id = DetChannelId::new();
+            let id = DetChannelId::generate_new_unique_channel_id();
 
             let type_name = type_name::<T>().to_string();
             info!("Sender connected created: {:?} {:?}", id, type_name);
@@ -391,7 +397,7 @@ pub mod ipc {
         let mode = get_rr_mode();
 
         let (sender, receiver) = ripc::channel()?;
-        let id = DetChannelId::new();
+        let id = DetChannelId::generate_new_unique_channel_id();
         let type_name = type_name::<T>().to_string();
 
         let metadata = recordlog::RecordMetadata {
@@ -636,7 +642,7 @@ pub mod ipc {
                         }
                     }
 
-                    let event = RecordedEvent::IpcSelect {
+                    let event = TivoEvent::IpcSelect {
                         select_events: recorded_events,
                     };
                     // Ehh, we fake it here. We never check this value anyways.
@@ -663,10 +669,10 @@ pub mod ipc {
                         return Err((error, vec![]));
                     }
 
-                    // Here we put this thread to sleep if the entry is missing.
-                    // On record, the thread never returned from blocking...
                     let recorded_event = self.recorder.get_log_entry();
 
+                    // Here we put this thread to sleep if the entry is missing.
+                    // On record, the thread never returned from blocking...
                     if let Err(e @ DesyncError::NoEntryInLog) = recorded_event {
                         info!("Saw {:?}. Putting thread to sleep.", e);
                         desync::sleep_until_desync();
@@ -678,7 +684,7 @@ pub mod ipc {
                     }
 
                     match recorded_event.map_err(|e| (e, vec![]))?.event {
-                        RecordedEvent::IpcSelect { select_events } => {
+                        TivoEvent::IpcSelect { select_events } => {
                             let mut events: Vec<IpcSelectionResult> = Vec::new();
 
                             for event in select_events {
@@ -696,7 +702,7 @@ pub mod ipc {
                             Ok(Ok(events))
                         }
                         event => {
-                            let dummy = RecordedEvent::IpcSelect {
+                            let dummy = TivoEvent::IpcSelect {
                                 select_events: vec![],
                             };
                             let error = DesyncError::EventMismatch(event, dummy);
@@ -747,7 +753,7 @@ pub mod ipc {
                             Ok(IpcSelectionResult::ChannelClosed(*index))
                         }
                         Err(RecvErrorRR::Timeout) => {
-                            let e = DesyncError::Timeout;
+                            let e = DesyncError::Timeout(None);
                             error!(%e);
                             Err((e, None))
                         }
@@ -823,7 +829,7 @@ pub mod ipc {
                                         Some(IpcSelectionResult::ChannelClosed(index))));
                         }
                         Err(RecvErrorRR::Timeout) => {
-                            let error = DesyncError::Timeout;
+                            let error = DesyncError::Timeout(None);
                             error!(%error);
                             return Err((error, None));
                         }
@@ -897,7 +903,7 @@ pub mod ipc {
                         e @ Err(_) => return Ok(e),
                     };
 
-                    let event = RecordedEvent::IpcSelectAdd(index);
+                    let event = TivoEvent::IpcSelectAdd(index);
                     self.recorder
                         .write_event_to_record(event, &receiver.metadata)
                         // We use expect instead of '?' because I wouldn't know what (OpaqueIpcReceiver
@@ -940,7 +946,7 @@ pub mod ipc {
             metadata: &RecordMetadata,
         ) -> Result<(), DesyncError> {
             match recorded_entry.event {
-                RecordedEvent::IpcSelectAdd(expected_index) => {
+                TivoEvent::IpcSelectAdd(expected_index) => {
                     if expected_index != self.index {
                         let error = DesyncError::SelectIndexMismatch(expected_index, self.index);
                         error!(%error);
@@ -959,7 +965,7 @@ pub mod ipc {
                 }
                 event => {
                     let error =
-                        DesyncError::EventMismatch(event, RecordedEvent::IpcSelectAdd(self.index));
+                        DesyncError::EventMismatch(event, TivoEvent::IpcSelectAdd(self.index));
                     error!(%error);
                     Err(error)
                 }
@@ -1071,7 +1077,7 @@ pub mod ipc {
 mod test {
     use crate::ipc_channel::ipc;
     use crate::recordlog::take_global_memory_recorder;
-    use crate::recordlog::{ChannelVariant, RecordedEvent};
+    use crate::recordlog::{ChannelVariant, TivoEvent};
     use crate::test;
     use crate::test::set_rr_mode;
     use crate::test::{rr_test, Receiver, Sender, TestChannel, ThreadSafe, TryReceiver};
@@ -1188,8 +1194,8 @@ mod test {
         test::simple_program::<Ipc>()?;
 
         let reference = test::simple_program_manual_log(
-            RecordedEvent::IpcSender,
-            |dti| RecordedEvent::IpcRecvSucc { sender_thread: dti },
+            TivoEvent::IpcSender,
+            |dti| TivoEvent::IpcRecvSucc { sender_thread: dti },
             ChannelVariant::Ipc,
         );
         assert_eq!(reference, take_global_memory_recorder());

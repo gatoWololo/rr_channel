@@ -26,6 +26,7 @@ pub struct RouterProxy {
 }
 
 impl RouterProxy {
+    /// We want to initialize the lazy static associated with this. So call its empty method.
     pub fn init(&self) {}
 
     pub fn new() -> RouterProxy {
@@ -252,7 +253,7 @@ mod tests {
     use crate::ipc_channel::router::RouterProxy;
 
     use crate::recordlog::{
-        set_global_memory_replayer, ChannelVariant, IpcSelectEvent, RecordEntry, RecordedEvent,
+        set_global_memory_replayer, ChannelVariant, IpcSelectEvent, RecordEntry, TivoEvent,
     };
     use crate::rr::DetChannelId;
     use crate::test::{rr_test, set_rr_mode};
@@ -399,16 +400,24 @@ mod tests {
 
         // Router sends messages when routes are added to it!
         let cb_sender = RecordEntry::new(
-            RecordedEvent::CbSender,
+            TivoEvent::CrossbeamSender,
             ChannelVariant::CbUnbounded,
             router_main_interface.clone(),
             tn.clone(),
         );
+
+        main_thread_imr.push_back(RecordEntry::new(
+            TivoEvent::ThreadInitialized(router_thread.clone()),
+            ChannelVariant::None,
+            DetChannelId::fake(),
+            "Thread".to_string(),
+        ));
+
         main_thread_imr.push_back(cb_sender.clone());
 
         // Router sends messages when routes are added to it!
         main_thread_imr.push_back(RecordEntry::new(
-            RecordedEvent::IpcSender,
+            TivoEvent::IpcSender,
             ChannelVariant::Ipc,
             internal_router_channels.clone(),
             tn.clone(),
@@ -416,14 +425,14 @@ mod tests {
 
         // Init Router's internal IpcSelector.
         router_thread_imr.push_back(RecordEntry::new(
-            RecordedEvent::IpcSelectAdd(0),
+            TivoEvent::IpcSelectAdd(0),
             ChannelVariant::Ipc,
             internal_router_channels.clone(),
             tn.clone(),
         ));
 
         let select = RecordEntry::new(
-            RecordedEvent::IpcSelect {
+            TivoEvent::IpcSelect {
                 select_events: vec![IpcSelectEvent::MessageReceived(0, main_thread.clone())],
             },
             ChannelVariant::Ipc,
@@ -433,7 +442,7 @@ mod tests {
         router_thread_imr.push_back(select.clone());
 
         router_thread_imr.push_back(RecordEntry::new(
-            RecordedEvent::CbRecvSucc {
+            TivoEvent::CrossbeamRecvSucc {
                 sender_thread: main_thread.clone(),
             },
             ChannelVariant::CbUnbounded,
@@ -443,7 +452,7 @@ mod tests {
 
         // New route added to router, added to IpcSelect.
         router_thread_imr.push_back(RecordEntry::new(
-            RecordedEvent::IpcSelectAdd(1),
+            TivoEvent::IpcSelectAdd(1),
             ChannelVariant::Ipc,
             threads_sender.clone(),
             tn.clone(),
@@ -452,7 +461,7 @@ mod tests {
         // Router loops on selecting and sending.
         for _ in 0..iters {
             router_thread_imr.push_back(RecordEntry::new(
-                RecordedEvent::IpcSelect {
+                TivoEvent::IpcSelect {
                     select_events: vec![IpcSelectEvent::MessageReceived(1, thread2.clone())],
                 },
                 ChannelVariant::Ipc,
@@ -469,7 +478,7 @@ mod tests {
         // Router selects and forwards messages.
         for _ in 0..iters {
             router_thread_imr.push_back(RecordEntry::new(
-                RecordedEvent::IpcSelect {
+                TivoEvent::IpcSelect {
                     select_events: vec![IpcSelectEvent::MessageReceived(1, thread1.clone())],
                 },
                 ChannelVariant::Ipc,
@@ -478,18 +487,32 @@ mod tests {
             ));
 
             router_thread_imr.push_back(RecordEntry::new(
-                RecordedEvent::CbSender,
+                TivoEvent::CrossbeamSender,
                 ChannelVariant::CbUnbounded,
                 main_recv.clone(),
                 tn.clone(),
             ));
         }
 
+        main_thread_imr.push_back(RecordEntry::new(
+            TivoEvent::ThreadInitialized(thread1.clone()),
+            ChannelVariant::None,
+            DetChannelId::fake(),
+            "Thread".to_string(),
+        ));
+
+        main_thread_imr.push_back(RecordEntry::new(
+            TivoEvent::ThreadInitialized(thread2.clone()),
+            ChannelVariant::None,
+            DetChannelId::fake(),
+            "Thread".to_string(),
+        ));
+
         // Main thread reads messages from router. Thread 2 first.
         for _ in 0..2 * iters {
             main_thread_imr.push_back(
                 RecordEntry::new(
-                    RecordedEvent::CbRecvSucc {
+                    TivoEvent::CrossbeamRecvSucc {
                         sender_thread: router_thread.clone(),
                     },
                     ChannelVariant::CbUnbounded,
@@ -501,7 +524,7 @@ mod tests {
         }
 
         let ipc_sender = RecordEntry::new(
-            RecordedEvent::IpcSender,
+            TivoEvent::IpcSender,
             ChannelVariant::Ipc,
             threads_sender.clone(),
             tn.clone(),
@@ -524,7 +547,7 @@ mod tests {
         // Ack back from Router.
         main_thread_imr.push_back(
             RecordEntry::new(
-                RecordedEvent::CbRecvSucc {
+                TivoEvent::CrossbeamRecvSucc {
                     sender_thread: router_thread.clone(),
                 },
                 ChannelVariant::CbUnbounded,
@@ -539,7 +562,7 @@ mod tests {
 
         // Shutdown event read from channel.
         router_thread_imr.push_back(RecordEntry::new(
-            RecordedEvent::CbRecvSucc {
+            TivoEvent::CrossbeamRecvSucc {
                 sender_thread: main_thread.clone(),
             },
             ChannelVariant::CbUnbounded,
@@ -562,6 +585,7 @@ mod tests {
         manual_recordlog
     }
 
+    // Router tests explicitly init the ROUTER to get a
     rusty_fork_test! {
         #[test]
         fn add_route_test() -> Result<()> {
@@ -575,11 +599,18 @@ mod tests {
 
         #[test]
         fn route_ipc_receiver_to_new_crossbeam_receiver_mpsc_test() -> Result<()> {
+
             rr_test(|| route_ipc_receiver_to_new_crossbeam_receiver_mpsc(1_000))
         }
     }
+
     #[test]
     fn router_manual_recordlog_test() -> Result<()> {
+        // tracing_subscriber::fmt::Subscriber::builder()
+        //     .with_env_filter(EnvFilter::from_default_env())
+        //     .with_target(false)
+        //     .without_time()
+        //     .init();
         Tivo::init_tivo_thread_root_test();
 
         let iters: i32 = 1_000;

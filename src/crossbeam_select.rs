@@ -5,7 +5,7 @@ use crate::crossbeam_channel::{self, ChannelKind};
 use crate::detthread::DetThreadId;
 use crate::error::DesyncError;
 use crate::fn_basename;
-use crate::recordlog::{self, ChannelVariant, RecordedEvent, SelectEvent};
+use crate::recordlog::{self, ChannelVariant, SelectEvent, TivoEvent};
 use crate::rr::DetChannelId;
 use crate::DESYNC_MODE;
 use crate::{desync, detthread, get_rr_mode, EventRecorder};
@@ -13,7 +13,7 @@ use crate::{DesyncMode, DetMessage, RRMode};
 #[allow(unused_imports)]
 use tracing::{debug, error, info, span, span::EnteredSpan, trace, warn, Level};
 
-/// Our Select wrapper type must hold different types of Receivet<T>. We use this trait
+/// Our Select wrapper type must hold different types of Receiver<T>. We use this trait
 /// so we can hold different T's via a dynamic trait object.
 trait BufferedReceiver {
     /// Returns true if there is any buffered values in this receiver.
@@ -123,7 +123,7 @@ impl<'a> Select<'a> {
     }
 
     fn span(&self, fn_name: &str) -> EnteredSpan {
-        span!(Level::INFO, stringify!(Select), fn_name).entered()
+        span!(Level::INFO, stringify!(CrossbeamSelect), fn_name).entered()
     }
 
     pub fn ready(&mut self) -> usize {
@@ -157,7 +157,7 @@ impl<'a> Select<'a> {
                 );
 
                 self.event_recorder.write_event_to_record(
-                    RecordedEvent::CbSelectReady { select_index },
+                    TivoEvent::CrossbeamSelectReady { select_index },
                     metadata,
                 )?;
                 Ok(select_index)
@@ -166,9 +166,9 @@ impl<'a> Select<'a> {
                 let recorded_event = self.event_recorder.get_log_entry()?;
 
                 match recorded_event.event {
-                    RecordedEvent::CbSelectReady { select_index } => Ok(select_index),
+                    TivoEvent::CrossbeamSelectReady { select_index } => Ok(select_index),
                     event => {
-                        let dummy = RecordedEvent::CbSelectReady { select_index: 0 };
+                        let dummy = TivoEvent::CrossbeamSelectReady { select_index: 0 };
                         let error = DesyncError::EventMismatch(event, dummy);
                         error!(%error);
                         Err(error)
@@ -214,7 +214,7 @@ impl<'a> Select<'a> {
                 let recorded_entry = entry?;
 
                 match recorded_entry.event {
-                    RecordedEvent::CbSelect(event) => {
+                    TivoEvent::CrossbeamSelect(event) => {
                         // Verify the receiver has the entry. We check now, since
                         // once we return the SelectedOperation it is too late if it turns
                         // out the message is not there => "unrecoverable error".
@@ -230,7 +230,8 @@ impl<'a> Select<'a> {
                                         debug!("No such message found via polling.");
                                         // We failed to find the message we were expecting
                                         // this is a desynchonization.
-                                        let error = DesyncError::Timeout;
+                                        let error =
+                                            DesyncError::Timeout(Some(recorded_entry.type_name));
 
                                         error!(%error);
                                         return Err(error);
@@ -260,7 +261,8 @@ impl<'a> Select<'a> {
                             sender_thread: DetThreadId::new(),
                             selected_index: (0 - 1) as usize,
                         };
-                        let error = DesyncError::EventMismatch(e, RecordedEvent::CbSelect(dummy));
+                        let error =
+                            DesyncError::EventMismatch(e, TivoEvent::CrossbeamSelect(dummy));
                         error!(%error);
                         Err(error)
                     }
@@ -419,7 +421,7 @@ impl<'a> SelectedOperation<'a> {
                     Err(e) => (Err(e), SelectEvent::RecvError { selected_index }),
                 };
                 recorder
-                    .write_event_to_record(RecordedEvent::CbSelect(select_event), &r.metadata)?;
+                    .write_event_to_record(TivoEvent::CrossbeamSelect(select_event), &r.metadata)?;
                 Ok(msg)
             }
             // We do not use the select API at all on replays. Wait for correct

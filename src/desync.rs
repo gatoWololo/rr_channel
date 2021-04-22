@@ -104,7 +104,13 @@ pub(crate) fn handle_desync<T, E>(
             recv_msg().map(|t| t.1)
         }
         DesyncMode::Panic => {
-            panic!("Desynchonization found: {:?}", desync);
+            panic!(
+                "Desynchonization found for thread named: {:?}. Desync Reason: {:?}",
+                std::thread::current().name(),
+                desync
+            );
+            // TODO: Probably want to process exit here? Otherwise it is hard to tell which
+            // thread timedout as they will all seemingly time out.
         }
     }
 }

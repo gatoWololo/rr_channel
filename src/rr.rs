@@ -1,15 +1,16 @@
 //! Different Channel types share the same general method of doing RR through our
 //! per-channel buffers. This module encapsulates that logic via the
 
+use crate::EventRecorder;
 use crate::RRMode;
-use crate::{rr, EventRecorder};
 
 use crate::detthread::{self, get_det_id, DetThreadId, CHANNEL_ID};
 use crate::error::{DesyncError, RecvErrorRR};
 use crate::{desync, recordlog};
 use crate::{BufferedValues, DetMessage};
 
-use crate::recordlog::{RecordEntry, RecordMetadata, RecordedEvent};
+use crate::recordlog::{RecordEntry, RecordMetadata, TivoEvent};
+use core::any::type_name;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::fmt::{Display, Formatter};
@@ -40,12 +41,20 @@ impl Display for DetChannelId {
 impl DetChannelId {
     /// Create a DetChannelId using context's det_id() and channel_id()
     /// Assigns a unique id to this channel.
-    pub fn new() -> DetChannelId {
+    fn new() -> DetChannelId {
         let channel_id = CHANNEL_ID.with(|ci| ci.fetch_add(1, Ordering::SeqCst));
+        debug!("New Channel id generated for ID {:?}", channel_id);
         DetChannelId {
             det_thread_id: detthread::get_det_id(),
             channel_id,
         }
+    }
+
+    /// It is not obvious that DetChannelId::new() changes the global state by incrementing CHANNEL_ID.
+    /// this bit me before. Only allow DetChannelId generation via this function to make it more
+    /// explicit what is happening.
+    pub(crate) fn generate_new_unique_channel_id() -> DetChannelId {
+        DetChannelId::new()
     }
 
     pub(crate) fn from_raw(dti: DetThreadId, channel_id: u32) -> DetChannelId {
@@ -66,16 +75,10 @@ impl DetChannelId {
     }
 }
 
-impl Default for rr::DetChannelId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 pub(crate) trait RecordEventChecker<E> {
     /// Returns Ok if the passed event matches the expected event for Self. Otherwise returns
     /// Err of the expected event.
-    fn check_recorded_event(&self, re: &RecordedEvent) -> Result<(), RecordedEvent>;
+    fn check_recorded_event(&self, re: &TivoEvent) -> Result<(), TivoEvent>;
 
     /// Compare the expected values of the RecordEntry against the real values we're seeing. Some
     /// commands have significant error checking that makes the meaning of the code hard to
@@ -133,36 +136,42 @@ pub(crate) trait RecvRecordReplay<T, E>: RecordEventChecker<E> {
                 }
 
                 let record_entry = record_entry?;
+                let type_name = record_entry.type_name.clone();
                 self.check_event_mismatch(&record_entry, metadata)?;
 
-                Ok(Self::replay_recorded_event(self, record_entry.event)?)
+                let received =
+                    Self::replay_recorded_event(self, record_entry.event).map_err(|e| {
+                        if let DesyncError::Timeout(None) = e {
+                            DesyncError::Timeout(Some(type_name))
+                        } else {
+                            e
+                        }
+                    })?;
+                Ok(received)
             }
             RRMode::NoRR => Ok(recv_message().map(|v| v.1)),
         }
     }
 
     /// Given the deterministic thread id return the corresponding successful case
-    /// of RecordedEvent for record-logging.
-    fn recorded_event_succ(dtid: DetThreadId) -> recordlog::RecordedEvent;
+    /// of TivoEvent for record-logging.
+    fn recorded_event_succ(dtid: DetThreadId) -> recordlog::TivoEvent;
 
     /// Given the channel receive error, return the corresponding successful case
-    /// of RecordedEvent for record-logging. We take a reference here as there is no
+    /// of TivoEvent for record-logging. We take a reference here as there is no
     /// guarantee that our `E` implements Copy or Clone (like is the case for Ipc Error).
-    fn recorded_event_err(e: &E) -> recordlog::RecordedEvent;
+    fn recorded_event_err(e: &E) -> recordlog::TivoEvent;
 
     /// Produce the correct value based on the logged event from the recorded execution.
     /// Returns the results of replaying the event: Result<T, E> or a DesyncError if we're
     /// unable to replay the event.
-    fn replay_recorded_event(
-        &self,
-        event: recordlog::RecordedEvent,
-    ) -> desync::Result<Result<T, E>>;
+    fn replay_recorded_event(&self, event: recordlog::TivoEvent) -> desync::Result<Result<T, E>>;
 }
 
 /// Abstract over logic to send a message while recording or replaying results.
 pub(crate) trait SendRecordReplay<T, E>: RecordEventChecker<E> {
-    /// RecordedEvent variant for this type.
-    const EVENT_VARIANT: recordlog::RecordedEvent;
+    /// TivoEvent variant for this type.
+    const EVENT_VARIANT: recordlog::TivoEvent;
 
     /// In theory we shouldn't need to record send events. In practice, it is useful for debugging
     /// and for detecting when things have gone wrong.
@@ -187,10 +196,7 @@ pub(crate) trait SendRecordReplay<T, E>: RecordEventChecker<E> {
             return Err((error, msg));
         }
         let det_id = get_det_id();
-        info!(
-            "send<{}>(({:?}, {:?})",
-            metadata.type_name, metadata.id, det_id
-        );
+        info!("send(({:?}, {:?})", metadata.id, det_id);
         match mode {
             RRMode::Record => {
                 let result = self.underlying_send(det_id, msg);
@@ -248,7 +254,8 @@ pub(crate) fn recv_expected_message<T>(
     let _s = span!(
         Level::DEBUG,
         stringify!(recv_expected_message),
-        ?expected_sender
+        ?expected_sender,
+        "type" = type_name::<T>()
     )
     .entered();
     debug!("recv_from_sender()");
@@ -266,8 +273,16 @@ pub(crate) fn recv_expected_message<T>(
             Ok(k) => k,
             e @ Err(_) => {
                 error!(
-                    "timed out while wait for message from: {:?}",
-                    expected_sender
+                    "{:?} Timed out while wait for message from: {:?}.",
+                    get_det_id(),
+                    expected_sender,
+                );
+
+                let other_thread_msgs = buffer.len();
+                let other_keys = buffer.keys();
+                error!(
+                    "{} entries found buffered from other threads: {:?}",
+                    other_thread_msgs, other_keys,
                 );
                 e?
             }
@@ -291,8 +306,9 @@ pub(crate) fn recv_expected_message<T>(
 mod test {
     use crate::detthread::{spawn, DetThreadId};
     use crate::rr::{recv_expected_message, DetChannelId};
-    use crate::BufferedValues;
+    use crate::test::set_rr_mode;
     use crate::Tivo;
+    use crate::{BufferedValues, RRMode};
     use std::borrow::Borrow;
     use std::collections::VecDeque;
 
@@ -310,6 +326,8 @@ mod test {
     #[test]
     fn det_chan_id2() {
         Tivo::init_tivo_thread_root_test();
+        set_rr_mode(RRMode::NoRR);
+
         let c1 = DetChannelId::new();
         spawn(move || {
             let c2 = DetChannelId::new();

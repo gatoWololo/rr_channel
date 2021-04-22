@@ -1,6 +1,6 @@
 //! Error Module
 
-use crate::recordlog::{ChannelVariant, RecordEntry, RecordedEvent};
+use crate::recordlog::{ChannelVariant, RecordEntry, TivoEvent};
 use crate::rr::DetChannelId;
 use crossbeam_channel::{RecvError, RecvTimeoutError, TryRecvError};
 use serde::{Deserialize, Serialize};
@@ -28,7 +28,7 @@ impl From<RecvErrorRR> for DesyncError {
     fn from(e: RecvErrorRR) -> DesyncError {
         match e {
             RecvErrorRR::Disconnected => DesyncError::Disconnected,
-            RecvErrorRR::Timeout => DesyncError::Timeout,
+            RecvErrorRR::Timeout => DesyncError::Timeout(None),
         }
     }
 }
@@ -47,9 +47,9 @@ pub(crate) enum DesyncError {
     /// Channel ids don't match. log channel, vs current flavor.
     #[error("Mismatched channel IDs. Log showed {0} but actual was {1}")]
     ChannelMismatch(DetChannelId, DetChannelId),
-    /// RecordedEvent log message was different. logged event vs current event.
+    /// TivoEvent log message was different. logged event vs current event.
     #[error("Mismatched events. Log showed {0:?} but channel expected a {1:?}.")]
-    EventMismatch(RecordedEvent, RecordedEvent),
+    EventMismatch(TivoEvent, TivoEvent),
     // /// This thread did not get its DetThreadId initialized even though it should
     // /// have.
     // #[error("Uninitialized Thread")]
@@ -77,8 +77,8 @@ pub(crate) enum DesyncError {
     #[error("IpcReceiverSet expected a message, but channel returned closed at index {0}")]
     ChannelClosedUnexpected(u64),
     /// Waited too long and no message ever came.
-    #[error("Timed out!")]
-    Timeout,
+    #[error("Timed out! Waiting for message of type: {0:?}")]
+    Timeout(Option<String>),
     /// Thread woke up after assuming it had ran of the end of the log.
     /// While `NoEntryInLog` may mean that this thread simply blocked forever
     /// or "didn't make it this far", DesynchronizedWakeup means we put that

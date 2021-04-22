@@ -4,6 +4,9 @@ use std::sync::atomic::AtomicU32;
 use std::thread::JoinHandle;
 pub use std::thread::{current, panicking, park, park_timeout, sleep, yield_now};
 
+use crate::recordlog::{ChannelVariant, TivoEvent};
+use crate::rr::DetChannelId;
+use crate::{get_rr_mode, recordlog, EventRecorder, RRMode};
 use serde::{Deserialize, Serialize};
 use tracing::{error, event, info, span, Level};
 
@@ -98,7 +101,7 @@ impl DetThreadId {
     const MAX_SIZE: usize = 10;
 
     /// TODO DOCUMENT. Also should this be pub? That looks wrong...
-    pub fn new() -> DetThreadId {
+    pub(crate) fn new() -> DetThreadId {
         THREAD_INITIALIZED.with(|ti| {
             if !*ti.borrow() {
                 error!("thread not initialized");
@@ -182,12 +185,63 @@ impl Builder {
         F: Send + 'static,
         T: Send + 'static,
     {
+        // Spans are thread-local, to it just works(TM) that this span is technically covering the
+        // entire execution of the child thread
+        let _e = span!(Level::INFO, "detthread::spawn()").entered();
         let new_id = generate_new_child_id();
+        let recorder = EventRecorder::get_global_recorder();
+
+        match get_rr_mode() {
+            RRMode::Record => {
+                let event = TivoEvent::ThreadInitialized(new_id.clone());
+
+                // TODO: We shouldn't have metadata for thread events...
+                let metadata = recordlog::RecordMetadata::new(
+                    "Thread".to_string(),
+                    ChannelVariant::None,
+                    DetChannelId::fake(),
+                );
+                recorder.write_event_to_record(event, &metadata).unwrap();
+            }
+            RRMode::Replay => match recorder.get_log_entry() {
+                Ok(event) => match event.event {
+                    TivoEvent::ThreadInitialized(expected_dti) => {
+                        if expected_dti != new_id {
+                            let e = format!(
+                                "ThreadInitialized event mismatched DTIs. Expected {:?}, saw {:?}",
+                                expected_dti, new_id
+                            );
+                            error!("{}", e);
+                            panic!("{}", e);
+                        }
+                    }
+                    unexpected_event => {
+                        let e = format!(
+                            "Expected ThreadInitialized event, instead saw: {:?}",
+                            unexpected_event
+                        );
+                        error!("{}", e);
+                        panic!("{}", e);
+                    }
+                },
+                // Only happens when we run to the end of the log?
+                Err(e) => {
+                    error!(%e);
+                    panic!("{}", e);
+                }
+            },
+            RRMode::NoRR => {}
+        }
 
         self.builder.spawn(move || {
             initialize_new_thread(new_id.clone());
+            let t = std::thread::current();
 
-            let _s = span!(Level::INFO, "Thread", dti = ?new_id,).entered();
+            let _e = span!(Level::INFO,
+              "Thread",
+              dti= ? get_det_id(),
+              name=t.name().unwrap_or("None"))
+            .entered();
             event!(Level::INFO, "New Thread Spawned!");
             let h = f();
             event!(Level::INFO, "Thread Finished.");

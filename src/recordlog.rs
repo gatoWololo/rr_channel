@@ -63,9 +63,9 @@ pub enum ChannelVariant {
 /// event_id, and event. Everything else is metadata used for checks to ensure we're reading from
 /// the right channel.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub(crate) struct RecordEntry {
+pub struct RecordEntry {
     /// Actual event and all information needed to replay this event.
-    pub event: RecordedEvent,
+    pub event: TivoEvent,
     // TODO Replace this field with RecordMetadata type.
     pub channel_variant: ChannelVariant,
     /// Identifier of the channel who this entry was recorded for.
@@ -75,7 +75,7 @@ pub(crate) struct RecordEntry {
 
 impl RecordEntry {
     pub(crate) fn new(
-        event: RecordedEvent,
+        event: TivoEvent,
         channel_variant: ChannelVariant,
         chan_id: DetChannelId,
         type_name: String,
@@ -102,6 +102,10 @@ impl RecordEntry {
             return Err(error);
         }
 
+        // Checking types is redundant if channel IDs are the same types should be the same.
+        // TODO This is checked during channel creation events.
+        // if self.type_name != metadata.type_name
+
         Ok(())
     }
 }
@@ -111,54 +115,63 @@ impl RecordEntry {
 /// the error that was witnessed during record. On successful read, the variant contains
 /// the index or sender_thread_id where we should expect the message to arrive from.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub enum RecordedEvent {
-    CbSelectReady {
-        select_index: usize,
-    },
-    CbSelect(SelectEvent),
-    CbRecvSucc {
+pub enum TivoEvent {
+    // Crossbeam events.
+    CrossbeamSender,
+    CrossbeamRecvSucc {
         sender_thread: DetThreadId,
     },
     #[serde(with = "error::RecvErrorDef")]
-    CbRecvErr(crossbeam_channel::RecvError),
+    CrossbeamRecvErr(crossbeam_channel::RecvError),
+    CrossbeamSelectReady {
+        select_index: usize,
+    },
+    CrossbeamSelect(SelectEvent),
+
+    CrossbeamRecvTimeoutSucc {
+        sender_thread: DetThreadId,
+    },
+    #[serde(with = "error::RecvTimeoutErrorDef")]
+    CrossbeamRecvTimeoutErr(crossbeam_channel::RecvTimeoutError),
+
+    CrossbeamTryRecvSucc {
+        sender_thread: DetThreadId,
+    },
+    #[serde(with = "error::TryRecvErrorDef")]
+    CrossbeamTryRecvErr(crossbeam_channel::TryRecvError),
+
+    // std MPSC events.
+    MpscRecvTimeoutSucc {
+        sender_thread: DetThreadId,
+    },
     MpscRecvSucc {
         sender_thread: DetThreadId,
     },
     #[serde(with = "error::MpscRecvErrorDef")]
     MpscRecvErr(mpsc::RecvError),
-    CbTryRecvSucc {
-        sender_thread: DetThreadId,
-    },
-    #[serde(with = "error::TryRecvErrorDef")]
-    CbTryRecvErr(crossbeam_channel::TryRecvError),
+    MpscSender,
     MpscTryRecvSucc {
         sender_thread: DetThreadId,
     },
     #[serde(with = "error::MpscTryRecvErrorDef")]
     MpscTryRecvErr(mpsc::TryRecvError),
-    CbRecvTimeoutSucc {
-        sender_thread: DetThreadId,
-    },
-    #[serde(with = "error::RecvTimeoutErrorDef")]
-    CbRecvTimeoutErr(crossbeam_channel::RecvTimeoutError),
-    MpscRecvTimeoutSucc {
-        sender_thread: DetThreadId,
-    },
     #[serde(with = "error::MpscRecvTimeoutErrorDef")]
     MpscRecvTimeoutErr(mpsc::RecvTimeoutError),
+
+    // ipc-channel events.
     IpcRecvSucc {
         sender_thread: DetThreadId,
     },
     IpcError(IpcErrorVariants),
     IpcTryRecvErrorEmpty,
     IpcTryRecvIpcError(IpcErrorVariants),
-    CbSender,
-    MpscSender,
     IpcSender,
     IpcSelectAdd(/*index:*/ u64),
     IpcSelect {
         select_events: Vec<IpcSelectEvent>,
     },
+    /// Current thread spawned new child thread with this DTI.
+    ThreadInitialized(DetThreadId),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq)]
@@ -196,7 +209,6 @@ lazy_static::lazy_static! {
 }
 
 thread_local! {
-
     /// We have several requirements for our logger. Mainly:
     /// 1) Child threads can die at any time. We cannot have their information lost if they exit
     ///    before we have a time to flush their values to a file.
@@ -227,7 +239,12 @@ thread_local! {
     pub(crate) static EVENT_RECEIVER: RefCell<IntoIter<RecordEntry>> = {
         let mut gr = GLOBAL_REPLAYER.lock().unwrap();
         RefCell::new(gr.take_entry(&get_det_id()))
-    }
+    };
+
+    /// Keeps track of what event number we are per thread. This information is useful to know what
+    /// event we are currently on when looking at our tracing output. This is updated as events are
+    /// fetched or written to for record/replay respectively.
+    pub(crate) static EVENT_NUMBER: RefCell<u32> = RefCell::new(0);
 }
 
 /// TODO It seems there is repetition in the fields here and on LogEntry?

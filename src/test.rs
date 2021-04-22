@@ -15,12 +15,17 @@ use anyhow::Result;
 use crate::detthread::DET_ID_SPAWNER;
 use crate::detthread::THREAD_INITIALIZED;
 use crate::detthread::{get_det_id, DetIdSpawner, DetThreadId, CHANNEL_ID, DET_ID};
-use crate::recordlog::{ChannelVariant, RecordEntry, RecordedEvent};
+use crate::recordlog::{ChannelVariant, RecordEntry, TivoEvent};
 use crate::rr::DetChannelId;
 use crate::{RRMode, Tivo};
 use once_cell::sync::OnceCell;
 use tracing::info;
 
+/// We want to dynamically change the RRMode during testing. That is, run the test in Record mode,
+/// save the results, and then run it in Replay mode within the same process. To simulate this we
+/// use this variable which uses Mutex for internal mutability. We don't wanna have to lock()
+/// everytime during non-tests executions. So we make this a separate variable from RR_MODE. We
+/// only use this during testing.
 pub(crate) static TEST_MODE: OnceCell<Mutex<RRMode>> = OnceCell::new();
 
 /// Reset all global variables to their original starting value. Useful for record replay testing.
@@ -131,10 +136,12 @@ pub(crate) fn rr_test<T: Eq + Debug>(f: impl Fn() -> Result<T>) -> Result<()> {
     let _f = Tivo::init_tivo_thread_root_test();
 
     set_rr_mode(RRMode::Record);
+    info!("Running in RECORD mode.");
     let output1 = f()?;
 
     reset_test_state();
     set_rr_mode(RRMode::Replay);
+    info!("Running in REPLAY mode.");
     let output2 = f()?;
 
     assert_eq!(output1, output2);
@@ -156,8 +163,8 @@ where
 }
 
 pub(crate) fn simple_program_manual_log(
-    send_event: RecordedEvent,
-    recv_event: impl Fn(DetThreadId) -> RecordedEvent,
+    send_event: TivoEvent,
+    recv_event: impl Fn(DetThreadId) -> TivoEvent,
     variant: ChannelVariant,
 ) -> HashMap<DetThreadId, VecDeque<RecordEntry>> {
     let dti = get_det_id();

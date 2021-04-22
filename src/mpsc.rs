@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use crate::detthread::{get_det_id, DetThreadId};
 use crate::error::RecvErrorRR;
-use crate::recordlog::{self, ChannelVariant, RecordedEvent};
+use crate::recordlog::{self, ChannelVariant, TivoEvent};
 use crate::rr::SendRecordReplay;
 use crate::rr::{self, DetChannelId};
 use crate::rr::{RecordEventChecker, RecvRecordReplay};
@@ -43,11 +43,11 @@ pub enum RealSender<T> {
 macro_rules! ImplRecordEventChecker {
     ($err_type:ty, $succ: ident, $err:ident) => {
         impl<T> RecordEventChecker<$err_type> for Receiver<T> {
-            fn check_recorded_event(&self, re: &RecordedEvent) -> Result<(), RecordedEvent> {
+            fn check_recorded_event(&self, re: &TivoEvent) -> Result<(), TivoEvent> {
                 match re {
-                    RecordedEvent::$succ { sender_thread: _ } => Ok(()),
-                    RecordedEvent::$err(_) => Ok(()),
-                    _ => Err(RecordedEvent::$succ {
+                    TivoEvent::$succ { sender_thread: _ } => Ok(()),
+                    TivoEvent::$err(_) => Ok(()),
+                    _ => Err(TivoEvent::$succ {
                         sender_thread: DetThreadId::new(),
                     }),
                 }
@@ -60,27 +60,27 @@ macro_rules! ImplRecordEventChecker {
 macro_rules! impl_RR {
     ($err_type:ty, $succ: ident, $err:ident) => {
         impl<T> RecvRecordReplay<T, $err_type> for Receiver<T> {
-            fn recorded_event_succ(dtid: DetThreadId) -> recordlog::RecordedEvent {
-                RecordedEvent::$succ {
+            fn recorded_event_succ(dtid: DetThreadId) -> recordlog::TivoEvent {
+                TivoEvent::$succ {
                     sender_thread: dtid,
                 }
             }
 
-            fn recorded_event_err(e: &$err_type) -> recordlog::RecordedEvent {
-                RecordedEvent::$err(*e)
+            fn recorded_event_err(e: &$err_type) -> recordlog::TivoEvent {
+                TivoEvent::$err(*e)
             }
 
             fn replay_recorded_event(
                 &self,
-                event: RecordedEvent,
+                event: TivoEvent,
             ) -> desync::Result<Result<T, $err_type>> {
                 match event {
-                    RecordedEvent::$succ { sender_thread } => {
+                    TivoEvent::$succ { sender_thread } => {
                         let retval = self.replay_recv(&sender_thread)?;
                         Ok(Ok(retval))
                     }
-                    RecordedEvent::$err(e) => {
-                        trace!("Creating error event for: {:?}", RecordedEvent::$err(e));
+                    TivoEvent::$err(e) => {
+                        trace!("Creating error event for: {:?}", TivoEvent::$err(e));
                         Ok(Err(e))
                     }
                     _ => unreachable!(
@@ -274,16 +274,16 @@ where
 }
 
 impl<T> RecordEventChecker<mpsc::SendError<T>> for Sender<T> {
-    fn check_recorded_event(&self, re: &RecordedEvent) -> Result<(), RecordedEvent> {
+    fn check_recorded_event(&self, re: &TivoEvent) -> Result<(), TivoEvent> {
         match re {
-            RecordedEvent::MpscSender => Ok(()),
-            _ => Err(RecordedEvent::MpscSender),
+            TivoEvent::MpscSender => Ok(()),
+            _ => Err(TivoEvent::MpscSender),
         }
     }
 }
 
 impl<T> SendRecordReplay<T, mpsc::SendError<T>> for Sender<T> {
-    const EVENT_VARIANT: RecordedEvent = RecordedEvent::MpscSender;
+    const EVENT_VARIANT: TivoEvent = TivoEvent::MpscSender;
 
     fn underlying_send(&self, thread_id: DetThreadId, msg: T) -> Result<(), mpsc::SendError<T>> {
         self.sender.send((thread_id, msg))
@@ -329,7 +329,7 @@ pub fn sync_channel<T>(bound: usize) -> (Sender<T>, Receiver<T>) {
     let mode = get_rr_mode();
     let channel_type = ChannelVariant::MpscBounded;
     let type_name = type_name::<T>().to_string();
-    let id = DetChannelId::new();
+    let id = DetChannelId::generate_new_unique_channel_id();
 
     info!("Bounded mpsc channel created: {:?} {:?}", id, type_name);
     (
@@ -354,7 +354,7 @@ pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
     let (sender, receiver) = mpsc::channel();
     let channel_type = ChannelVariant::MpscUnbounded;
     let type_name = type_name::<T>().to_string();
-    let id = DetChannelId::new();
+    let id = DetChannelId::generate_new_unique_channel_id();
 
     info!("Unbounded mpsc channel created: {:?} {:?}", id, type_name);
 
