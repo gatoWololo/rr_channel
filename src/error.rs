@@ -60,9 +60,6 @@ pub(crate) enum DesyncError {
     /// An entry already exists for the specified index in IpcReceiverSet.
     #[error("IpcSelect Entry already exists at {0:?}")]
     SelectExistingEntry(u64),
-    /// IpcReceiverSet expected first index, but found second index.
-    #[error("IpcReceiverSet receiver add mismatch. Expected to add {0} but saw {1}")]
-    SelectIndexMismatch(u64, u64),
     /// Generic error used for situations where we already know we're
     /// desynchronized and want to alert caller.
     #[error("RR Channels are desynchronized.")]

@@ -6,10 +6,11 @@ use crate::detthread::DetThreadId;
 use crate::error::DesyncError;
 use crate::fn_basename;
 use crate::recordlog::{self, ChannelVariant, SelectEvent, TivoEvent};
-use crate::rr::DetChannelId;
-use crate::DESYNC_MODE;
+use crate::rr::{DetChannelId, RecordEventChecker};
+use crate::{check_events, DESYNC_MODE};
 use crate::{desync, detthread, get_rr_mode, EventRecorder};
 use crate::{DesyncMode, DetMessage, RRMode};
+
 #[allow(unused_imports)]
 use tracing::{debug, error, info, span, span::EnteredSpan, trace, warn, Level};
 
@@ -39,6 +40,23 @@ impl<T> BufferedReceiver for crossbeam_channel::Receiver<T> {
     }
 }
 
+struct SelectAddChecker {
+    actual_index: usize,
+}
+
+impl RecordEventChecker<()> for SelectAddChecker {
+    fn check_recorded_event(&self, re: &TivoEvent) -> Result<(), TivoEvent> {
+        match re {
+            TivoEvent::CrossbeamSelectAdd(expected_index)
+                if *expected_index == self.actual_index =>
+            {
+                Ok(())
+            }
+            _other => Err(TivoEvent::CrossbeamSelectAdd(self.actual_index)),
+        }
+    }
+}
+
 /// Wrapper type around crossbeam's Select.
 pub struct Select<'a> {
     selector: rc::Select<'a>,
@@ -46,7 +64,7 @@ pub struct Select<'a> {
     // Use existential to abstract over the `T` which may vary per receiver. We only care
     // if it has entries anyways, not the T contained within.
     receivers: HashMap<usize, &'a dyn BufferedReceiver>,
-    event_recorder: EventRecorder,
+    recorder: EventRecorder,
 }
 
 impl<'a> Select<'a> {
@@ -56,7 +74,7 @@ impl<'a> Select<'a> {
             mode: get_rr_mode(),
             selector: rc::Select::new(),
             receivers: HashMap::new(),
-            event_recorder: EventRecorder::get_global_recorder(),
+            recorder: EventRecorder::get_global_recorder(),
         }
     }
 
@@ -64,8 +82,6 @@ impl<'a> Select<'a> {
     /// Returns the index of the added operation.
     pub fn send<T>(&mut self, _s: &'a crossbeam_channel::Sender<T>) -> usize {
         unimplemented!("Send on select not supported?");
-        // log_trace("Select::send()");
-        // self.selector.send(&s.sender)
     }
 
     /// Adds a receive operation.
@@ -81,12 +97,33 @@ impl<'a> Select<'a> {
             ChannelKind::Bounded(r) | ChannelKind::Unbounded(r) => self.selector.recv(&r),
             ChannelKind::Never(r) => self.selector.recv(&r),
         };
+
+        let metadata = r.metadata.clone();
         if self.receivers.insert(index, r).is_some() {
             panic!(
                 "Entry already exists at {:?} This should be impossible.",
                 index
             );
         }
+
+        check_events(|| {
+            match self.mode {
+                RRMode::Record => {
+                    let event = TivoEvent::CrossbeamSelectAdd(index);
+                    self.recorder.write_event_to_record(event, &metadata)?;
+                }
+                RRMode::Replay => {
+                    let entry = self.recorder.get_log_entry()?;
+                    SelectAddChecker {
+                        actual_index: index,
+                    }
+                    .check_event_mismatch(&entry, &metadata)?;
+                }
+                RRMode::NoRR => {}
+            }
+            Ok(())
+        });
+
         index
     }
 
@@ -156,14 +193,14 @@ impl<'a> Select<'a> {
                     DetChannelId::fake(), // We fake it here. We never check this value anyways.
                 );
 
-                self.event_recorder.write_event_to_record(
+                self.recorder.write_event_to_record(
                     TivoEvent::CrossbeamSelectReady { select_index },
                     metadata,
                 )?;
                 Ok(select_index)
             }
             RRMode::Replay => {
-                let recorded_event = self.event_recorder.get_log_entry()?;
+                let recorded_event = self.recorder.get_log_entry()?;
 
                 match recorded_event.event {
                     TivoEvent::CrossbeamSelectReady { select_index } => Ok(select_index),
@@ -199,7 +236,7 @@ impl<'a> Select<'a> {
                 // Query our log to see what index was selected!() during the replay phase.
                 // ChannelVariant type not check on Select::select() but on Select::recv()
 
-                let entry = self.event_recorder.get_log_entry();
+                let entry = self.recorder.get_log_entry();
 
                 // Here we put this thread to sleep if the entry is missing.
                 // On record, the thread never returned from blocking...

@@ -4,7 +4,7 @@ pub mod router;
 pub use ipc_channel::Error;
 
 pub mod ipc {
-    use crate::{fn_basename, get_det_id, rr_channel_creation_event};
+    use crate::{check_events, fn_basename, get_det_id, rr_channel_creation_event};
     use ipc_channel::Error;
 
     #[allow(unused_imports)]
@@ -32,7 +32,7 @@ pub mod ipc {
     use crate::desync::DesyncMode;
     use crate::detthread::DetThreadId;
     use crate::error::{DesyncError, RecvErrorRR};
-    use crate::recordlog::{self, ChannelVariant, IpcSelectEvent, RecordEntry};
+    use crate::recordlog::{self, ChannelVariant, IpcSelectEvent};
     use crate::recordlog::{IpcErrorVariants, RecordMetadata, TivoEvent};
     use crate::rr::SendRecordReplay;
     use crate::rr::{self, DetChannelId};
@@ -526,8 +526,24 @@ pub mod ipc {
         recorder: EventRecorder,
     }
 
+    struct SelectAddChecker {
+        actual_index: u64,
+    }
+
+    impl RecordEventChecker<()> for SelectAddChecker {
+        fn check_recorded_event(&self, re: &TivoEvent) -> Result<(), TivoEvent> {
+            match re {
+                TivoEvent::IpcSelectAdd(expected_index) if *expected_index == self.actual_index => {
+                    Ok(())
+                }
+                _other => Err(TivoEvent::IpcSelectAdd(self.actual_index)),
+            }
+        }
+    }
+
     impl IpcReceiverSet {
         pub fn new() -> Result<IpcReceiverSet, std::io::Error> {
+            info!("IpcReceiverSet Created!");
             let recorder = EventRecorder::get_global_recorder();
 
             ipc_channel::ipc::IpcReceiverSet::new().map(|r| IpcReceiverSet {
@@ -551,11 +567,13 @@ pub mod ipc {
             T: for<'de> Deserialize<'de> + Serialize,
         {
             let _e = self.span(fn_basename!());
+            info!("Adding receiver.");
             self.do_add(receiver.to_opaque())
         }
 
         pub fn add_opaque(&mut self, receiver: OpaqueIpcReceiver) -> Result<u64, std::io::Error> {
             let _e = self.span(fn_basename!());
+            info!("Adding receiver.");
             self.do_add(receiver)
         }
 
@@ -563,6 +581,7 @@ pub mod ipc {
             self.rr_add(receiver)
                 .unwrap_or_else(|(e, receiver)| match *DESYNC_MODE {
                     DesyncMode::Panic => {
+                        error!(%e);
                         panic!("Desynchronization detected: {}", e);
                     }
                     DesyncMode::KeepGoing => {
@@ -890,52 +909,51 @@ pub mod ipc {
             receiver: OpaqueIpcReceiver,
         ) -> Result<Result<u64, io::Error>, (DesyncError, OpaqueIpcReceiver)> {
             if desync::program_desyned() {
-                let error = DesyncError::Desynchronized;
-                error!(%error);
-                return Err((error, receiver));
+                return Err((DesyncError::Desynchronized, receiver));
             }
 
             // After the first time we desynchronize, this is set to true and future times
             // we will be sent here.
             if self.desynced {
-                let error = DesyncError::Desynchronized;
-                error!(%error);
-                return Err((error, receiver));
+                return Err((DesyncError::Desynchronized, receiver));
             }
 
             match self.mode {
                 RRMode::Record => {
-                    let index = match self.receiver_set.add_opaque(receiver.opaque_receiver) {
-                        Ok(v) => v,
+                    match self.receiver_set.add_opaque(receiver.opaque_receiver) {
+                        Ok(index) => {
+                            let event = TivoEvent::IpcSelectAdd(index);
+                            self.recorder
+                                .write_event_to_record(event, &receiver.metadata)
+                                // We use expect instead of '?' because I wouldn't know what (OpaqueIpcReceiver
+                                // to return up from here? It has been consumed.
+                                .expect("Unable to write entry to log.");
+
+                            Ok(Ok(index))
+                        }
                         e @ Err(_) => return Ok(e),
-                    };
-
-                    let event = TivoEvent::IpcSelectAdd(index);
-                    self.recorder
-                        .write_event_to_record(event, &receiver.metadata)
-                        // We use expect instead of '?' because I wouldn't know what (OpaqueIpcReceiver
-                        // to return up from here? It has been consumed.
-                        .expect("Unable to write entry to log.");
-
-                    Ok(Ok(index))
+                    }
                 }
 
                 // Do not add receiver to IpcReceiverSet, instead move the receiver to our own
                 // `receivers` hashmap where the index returned here is the key.
                 RRMode::Replay => {
-                    let record_entry = match self.recorder.get_log_entry() {
-                        Err(e) => {
-                            return Err((e, receiver));
-                        }
-                        Ok(v) => v,
-                    };
-
-                    let metadata = &receiver.metadata;
                     let index = self.index;
+                    check_events(|| {
+                        let record_entry = self.recorder.get_log_entry()?;
 
-                    if let Err(e) = self.rr_add_check_mismatch(record_entry, metadata) {
-                        return Err((e, receiver));
-                    }
+                        SelectAddChecker {
+                            actual_index: index,
+                        }
+                        .check_event_mismatch(&record_entry, &receiver.metadata)?;
+
+                        // Is this even needed? I think it is kinda redundant.
+                        if self.receivers.get(self.index as usize).is_some() {
+                            let error = DesyncError::SelectExistingEntry(index);
+                            return Err(error);
+                        }
+                        Ok(())
+                    });
 
                     self.receivers.insert(self.index as usize, receiver);
 
@@ -943,39 +961,6 @@ pub mod ipc {
                     Ok(Ok(index))
                 }
                 RRMode::NoRR => Ok(self.receiver_set.add_opaque(receiver.opaque_receiver)),
-            }
-        }
-
-        /// Performs error checking for rr_add function.
-        fn rr_add_check_mismatch(
-            &self,
-            recorded_entry: RecordEntry,
-            metadata: &RecordMetadata,
-        ) -> Result<(), DesyncError> {
-            match recorded_entry.event {
-                TivoEvent::IpcSelectAdd(expected_index) => {
-                    if expected_index != self.index {
-                        let error = DesyncError::SelectIndexMismatch(expected_index, self.index);
-                        error!(%error);
-                        return Err(error);
-                    }
-
-                    if self.receivers.get(self.index as usize).is_some() {
-                        let error = DesyncError::SelectExistingEntry(self.index);
-                        error!(%error);
-                        return Err(error);
-                    }
-
-                    recorded_entry.check_mismatch(metadata)?;
-
-                    Ok(())
-                }
-                event => {
-                    let error =
-                        DesyncError::EventMismatch(event, TivoEvent::IpcSelectAdd(self.index));
-                    error!(%error);
-                    Err(error)
-                }
             }
         }
 

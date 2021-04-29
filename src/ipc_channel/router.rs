@@ -179,6 +179,8 @@ struct Router {
 /// OMAR: Must wrap since it is not public.
 impl Router {
     fn new(msg_receiver: Receiver<RouterMsg>, wakeup_receiver: IpcReceiver<()>) -> Router {
+        let _e = span!(Level::INFO, stringify!(Router), "fn" = fn_basename!()).entered();
+
         let mut ipc_receiver_set = IpcReceiverSet::new().unwrap();
         let msg_wakeup_id = ipc_receiver_set.add(wakeup_receiver).unwrap();
         Router {
@@ -190,16 +192,19 @@ impl Router {
     }
 
     fn run(&mut self) {
+        let _e = span!(Level::INFO, stringify!(Router), "fn" = fn_basename!()).entered();
+
         while let Ok(results) = self.ipc_receiver_set.select() {
             for result in results.into_iter() {
                 match result {
                     IpcSelectionResult::MessageReceived(id, _) if id == self.msg_wakeup_id => {
-                        match self
-                            .msg_receiver
-                            .recv()
-                            .expect("rr_channel:: RouterProxy::run(): Unable to receive message.")
-                        {
+                        match self.msg_receiver.recv().unwrap_or_else(|_| {
+                            let e = "Unable to receive message.";
+                            error!(%e);
+                            panic!("{}", e);
+                        }) {
                             RouterMsg::AddRoute(receiver, handler) => {
+                                debug!("RouterMsg::AddRoute");
                                 let new_receiver_id =
                                     self.ipc_receiver_set.add_opaque(receiver).expect(
                                         "rr_channel:: RouterProxy::run(): Could not add_opaque",
@@ -208,6 +213,7 @@ impl Router {
                                 // println!("Added receiver {:?} at {:?} for handler", id, new_receiver_id);
                             }
                             RouterMsg::Shutdown(sender) => {
+                                debug!("RouterMsg::Shutdown");
                                 sender
                                     .send(())
                                     .expect("Failed to send confirmation of shutdown.");
@@ -216,13 +222,21 @@ impl Router {
                         }
                     }
                     IpcSelectionResult::MessageReceived(id, message) => {
-                        let handler = self.handlers.get_mut(&id).
-                            unwrap_or_else(|| panic!("rr_channel:: RouterProxy::run(): MessageReceived, No such handler: {:?}", id));
+                        debug!("IpcSelectionResult::MessageReceived");
+                        let handler = self.handlers.get_mut(&id).unwrap_or_else(|| {
+                            let e = format!("MessageReceived, No such handler: {:?}", id);
+                            error!(%e);
+                            panic!("{}", e);
+                        });
                         handler(message)
                     }
                     IpcSelectionResult::ChannelClosed(id) => {
-                        let _handler = self.handlers.remove(&id).
-                            unwrap_or_else(|| panic!("rr_channel:: RouterProxy::run(): Channel Closed, No such handler: {:?}", id));
+                        debug!("IpcSelectionResult::ChannelClosed");
+                        let _handler = self.handlers.remove(&id).unwrap_or_else(|| {
+                            let e = format!("Channel Closed, No such handler: {:?}", id);
+                            error!(%e);
+                            panic!("{}", e);
+                        });
                     }
                 }
             }
@@ -615,52 +629,45 @@ mod tests {
         manual_recordlog.insert(thread2, imr2);
         manual_recordlog.insert(main_thread, main_thread_imr);
         manual_recordlog.insert(router_thread, router_thread_imr);
-        // println!("{:?}", manual_recordlog);
         manual_recordlog
     }
 
     // Router tests explicitly init the ROUTER to get a
     rusty_fork_test! {
-        #[test]
-        fn add_route_test() -> Result<()> {
-            rr_test(add_route)
+    #[test]
+    fn add_route_test() -> Result<()> {
+        rr_test(add_route)
+    }
+
+    #[test]
+    fn add_route_mpsc_test() -> Result<()> {
+        rr_test(add_route_mpsc)
+    }
+
+    #[test]
+    fn route_ipc_receiver_to_new_crossbeam_receiver_mpsc_test() -> Result<()> {
+        rr_test(|| route_ipc_receiver_to_new_crossbeam_receiver_mpsc(1_000))
+    }
+
+    #[test]
+    fn router_manual_recordlog_test() -> Result<()> {
+        Tivo::init_tivo_thread_root_test();
+
+        let iters: i32 = 1_000;
+        set_global_memory_replayer(get_manual_recordlog(iters));
+        set_rr_mode(RRMode::Replay);
+
+        let results = route_ipc_receiver_to_new_crossbeam_receiver_mpsc(iters)?;
+        let mut refv = vec![];
+        for i in 0..iters {
+            refv.push((2, i));
+        }
+        for i in 0..iters {
+            refv.push((1, i));
         }
 
-        #[test]
-        fn add_route_mpsc_test() -> Result<()> {
-            rr_test(add_route_mpsc)
-        }
-
-        #[test]
-        fn route_ipc_receiver_to_new_crossbeam_receiver_mpsc_test() -> Result<()> {
-
-            rr_test(|| route_ipc_receiver_to_new_crossbeam_receiver_mpsc(1_000))
-        }
-
-        #[test]
-        fn router_manual_recordlog_test() -> Result<()> {
-            // tracing_subscriber::fmt::Subscriber::builder()
-            //     // .with_env_filter(EnvFilter::from_default_env())
-            //     .with_target(false)
-            //     .without_time()
-            //     .init();
-            Tivo::init_tivo_thread_root_test();
-
-            let iters: i32 = 1_000;
-            set_global_memory_replayer(get_manual_recordlog(iters));
-            set_rr_mode(RRMode::Replay);
-
-            let results = route_ipc_receiver_to_new_crossbeam_receiver_mpsc(iters)?;
-            let mut refv = vec![];
-            for i in 0..iters {
-                refv.push((2, i));
-            }
-            for i in 0..iters {
-                refv.push((1, i));
-            }
-
-            assert_eq!(results, refv);
-            Ok(())
-        }
+        assert_eq!(results, refv);
+        Ok(())
+    }
     }
 }

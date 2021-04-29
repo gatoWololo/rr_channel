@@ -66,11 +66,7 @@ fn get_rr_mode() -> RRMode {
             .expect("TEST_MODE one-cell not initialized.")
             .lock()
             .unwrap();
-
-        #[allow(unreachable_code)]
-        {
-            unreachable!("Never rechable in test mode")
-        };
+        unreachable!();
     } else {
         *RECORD_MODE.as_ref().expect("Cannot Get RR_MODE")
     }
@@ -331,4 +327,13 @@ pub(crate) fn rr_channel_creation_event<T>(
         RRMode::NoRR => {}
     }
     Ok(())
+}
+
+// Uses closure to easily propagate error and handle it one location, makes code cleaner for
+// functions that don't return desync::Result<()>
+fn check_events(checker: impl Fn() -> desync::Result<()>) {
+    if let Err(e) = checker() {
+        error!(%e);
+        panic!("{}", e);
+    }
 }

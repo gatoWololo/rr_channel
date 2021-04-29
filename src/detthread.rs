@@ -6,7 +6,7 @@ pub use std::thread::{current, panicking, park, park_timeout, sleep, yield_now};
 
 use crate::recordlog::{ChannelVariant, TivoEvent};
 use crate::rr::{DetChannelId, RecordEventChecker};
-use crate::{get_rr_mode, recordlog, EventRecorder, RRMode};
+use crate::{check_events, get_rr_mode, recordlog, EventRecorder, RRMode};
 use serde::{Deserialize, Serialize};
 use tracing::{error, event, info, span, Level};
 
@@ -210,42 +210,31 @@ impl Builder {
         let _e = span!(Level::INFO, "detthread::spawn()").entered();
         let new_id = generate_new_child_id();
         let recorder = EventRecorder::get_global_recorder();
+        let metadata = recordlog::RecordMetadata::new(
+            "Thread".to_string(),
+            ChannelVariant::None,
+            DetChannelId::fake(),
+        );
 
         match get_rr_mode() {
             RRMode::Record => {
                 let event = TivoEvent::ThreadInitialized(new_id.clone());
 
                 // TODO: We shouldn't have metadata for thread events this requires a refactoring
-                // of the recordlog entries.
-                let metadata = recordlog::RecordMetadata::new(
-                    "Thread".to_string(),
-                    ChannelVariant::None,
-                    DetChannelId::fake(),
-                );
+                // of the recordlog entries. Ehh, it might not be worth fixing.
                 recorder.write_event_to_record(event, &metadata).unwrap();
             }
             RRMode::Replay => {
-                match recorder.get_log_entry() {
-                    Ok(event) => {
-                        let tsc = ThreadSpawnChecker {
-                            thread_id: new_id.clone(),
-                        };
-                        let metadata = recordlog::RecordMetadata::new(
-                            "Thread".to_string(),
-                            ChannelVariant::None,
-                            DetChannelId::fake(),
-                        );
+                check_events(|| {
+                    let event = recorder.get_log_entry()?;
+                    let tsc = ThreadSpawnChecker {
+                        thread_id: new_id.clone(),
+                    };
 
-                        // Can't propagate error up, panic.
-                        if let Err(e) = tsc.check_event_mismatch(&event, &metadata) {
-                            panic!("{}", e);
-                        }
-                    }
-                    Err(e) => {
-                        error!(%e);
-                        panic!("{}", e);
-                    }
-                }
+                    // Can't propagate error up, panic.
+                    tsc.check_event_mismatch(&event, &metadata)?;
+                    Ok(())
+                });
             }
             RRMode::NoRR => {}
         }

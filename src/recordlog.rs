@@ -50,6 +50,7 @@ pub enum ChannelVariant {
     MpscBounded,
     MpscUnbounded,
     CbUnbounded,
+    CbSelect,
     CbAfter,
     CbBounded,
     CbNever,
@@ -127,6 +128,7 @@ pub enum TivoEvent {
         select_index: usize,
     },
     CrossbeamSelect(SelectEvent),
+    CrossbeamSelectAdd(/*index*/ usize),
 
     CrossbeamRecvTimeoutSucc {
         sender_thread: DetThreadId,
