@@ -89,7 +89,7 @@ lazy_static! {
         let mode = match value.to_ascii_lowercase().as_str() {
                     "record" => RRMode::Record,
                     "replay" => RRMode::Replay,
-                    "noRR"   => RRMode::NoRR,
+                    "norr"   => RRMode::NoRR,
                     e        => anyhow::bail!("Unknown record and replay mode: {}", e),
                 };
 

@@ -1086,18 +1086,21 @@ macro_rules! rr_channel_internal {
 /// # #[macro_use]
 /// # extern crate rr_channel;
 /// # fn main() {
+/// rr_channel::Tivo::init_tivo_thread_root_test();
 /// use std::thread;
+/// use rr_channel::detthread;
+/// std::env::set_var("RR_MODE", "norr");
 /// use std::time::Duration;
 /// use rr_channel::crossbeam_channel::{never, unbounded};
 ///
 /// let (s1, r1) = unbounded();
 /// let (s2, r2) = unbounded();
 ///
-/// thread::spawn(move || {
+/// detthread::spawn(move || {
 ///     thread::sleep(Duration::from_secs(1));
 ///     s1.send(10).unwrap();
 /// });
-/// thread::spawn(move || {
+/// detthread::spawn(move || {
 ///     thread::sleep(Duration::from_millis(500));
 ///     s2.send(20).unwrap();
 /// });

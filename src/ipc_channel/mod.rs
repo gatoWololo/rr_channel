@@ -1078,7 +1078,8 @@ mod test {
     use anyhow::Result;
     use ipc_channel::ipc::{IpcError, TryRecvError};
     use rusty_fork::rusty_fork_test;
-    use serde::export::Formatter;
+    use std::fmt::Formatter;
+    //use serde::export::Formatter;
     use serde::{Deserialize, Serialize};
     use std::error::Error;
 
