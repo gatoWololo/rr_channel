@@ -1,6 +1,6 @@
 //! Error Module
 
-use crate::recordlog::{ChannelVariant, RecordEntry, TivoEvent};
+use crate::recordlog::{ChannelVariant, TivoEvent};
 use crate::rr::DetChannelId;
 use crossbeam_channel::{RecvError, RecvTimeoutError, TryRecvError};
 use serde::{Deserialize, Serialize};
@@ -82,9 +82,13 @@ pub(crate) enum DesyncError {
     /// thread to sleep and it was woken up by a desync somewhere.
     #[error("Thread woke up after assuming it had ran of the end of the log.")]
     DesynchronizedWakeup,
+  
     /// Unable to write event to log.
-    #[error("Cannot write event to recordlog. Reason {0}")]
-    CannotWriteEventToLog(#[source] crossbeam_channel::SendError<RecordEntry>),
+    ///1. execution dome has been called 2. TIVO execution object has been dropped early
+    //#[error("Cannot write event to recordlog. Reason {0}")]
+    #[error("Execution Thread tried to wakeup after it has been dropped.")]
+    //CannotWriteEventToLog(#[source] crossbeam_channel::SendError<RecordEntry>),
+    CannotWriteEventToLog,
 }
 
 // We want to Serialize Types defined in other crates. So we copy their definition here.

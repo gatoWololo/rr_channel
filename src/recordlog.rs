@@ -75,19 +75,6 @@ pub struct RecordEntry {
 }
 
 impl RecordEntry {
-    pub(crate) fn new(
-        event: TivoEvent,
-        channel_variant: ChannelVariant,
-        chan_id: DetChannelId,
-        type_name: String,
-    ) -> RecordEntry {
-        RecordEntry {
-            event,
-            channel_variant,
-            chan_id,
-            type_name,
-        }
-    }
 
     pub(crate) fn check_mismatch(&self, metadata: &RecordMetadata) -> Result<(), DesyncError> {
         if self.channel_variant != metadata.channel_variant {
@@ -233,7 +220,7 @@ thread_local! {
         let (s, r) = crossbeam_channel::unbounded();
         let mut gr = GLOBAL_RECORDER.lock().expect("Unable to acquire GLOBAL_RECORDER lock.");
 
-        let e = "Cannot acquire mutable reference to GLOBAL_RECORDER. It has been taken.";
+        let e = "Cannot acquire to GLOBAL_RECORDER. It has been taken - perhaps tivo object has been dropped or the main thread was prematurely terminated/dropped.";
         let global_recorder = gr.as_mut().expect(e);
         global_recorder.add_receiver(get_det_id(), r);
         s
@@ -283,10 +270,9 @@ impl GlobalReplayer {
         let _s = Self::span(fn_basename!());
         info!("Initialized from file {:?}", path);
 
-        let input = std::fs::read_to_string(&path).unwrap();
+        let input = std::fs::read_to_string(&path).expect(&format!("No such file found: {}.", path));
 
-        let replayer: HashMap<DetThreadId, VecDeque<RecordEntry>> = ron::from_str(&input).unwrap();
-
+        let replayer: HashMap<DetThreadId, VecDeque<RecordEntry>> = ron::from_str(&input).expect(&format!("Unable to parse file {}.", path));
         GlobalReplayer { replayer }
     }
 

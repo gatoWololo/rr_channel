@@ -1,5 +1,5 @@
-#![feature(trait_alias)]
-#![feature(const_type_name)]
+//#![feature(trait_alias)]
+//#![feature(const_type_name)]
 
 use std::collections::{HashMap, VecDeque};
 use std::env::var;
@@ -198,8 +198,7 @@ impl EventRecorder {
         debug!("About to recordlog entry: {:?}", entry);
         EVENT_SENDER
             .with(|event_sender| event_sender.send(entry))
-            .map_err(|e| DesyncError::CannotWriteEventToLog(e))?;
-
+            .map_err(|_e| DesyncError::CannotWriteEventToLog)?;
         Ok(())
     }
 
