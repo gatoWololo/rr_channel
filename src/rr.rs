@@ -204,11 +204,11 @@ pub(crate) trait SendRecordReplay<T, E>: RecordEventChecker<E> {
         match mode {
             RRMode::Record => {
                 let result = self.underlying_send(det_id, msg);
-                recordlog
-                    .write_event_to_record(Self::EVENT_VARIANT, &metadata)
+                if let Err(e) = recordlog.write_event_to_record(Self::EVENT_VARIANT, &metadata) {
+                    panic!("Unable to write to log: {}", e)
+                }
                     // Use expect here instead of '?' as I don't have a 'T' to return as the error
                     // type of this function expects.
-                    .expect("Unable to write to log");
                 Ok(result)
             }
             RRMode::Replay => {

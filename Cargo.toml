@@ -27,6 +27,6 @@ structopt = "0.3"
 [dev-dependencies]
 once_cell = "1.7"
 env_logger = "0.7.1"
-rand = "0.7.3"
+rand = "0.8.4"
 anyhow = "1.0"
 rusty-fork = { git = "https://github.com/daxpedda/rusty-fork/", rev = "84cb492c2e39f57022e64172d0a97c4305a0c242"}
