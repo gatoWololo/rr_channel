@@ -75,6 +75,19 @@ pub struct RecordEntry {
 }
 
 impl RecordEntry {
+    pub(crate) fn new(
+        event: TivoEvent,
+        channel_variant: ChannelVariant,
+        chan_id: DetChannelId,
+        type_name: String,
+    ) -> RecordEntry {
+        RecordEntry {
+            event,
+            channel_variant,
+            chan_id,
+            type_name,
+        }
+    }
 
     pub(crate) fn check_mismatch(&self, metadata: &RecordMetadata) -> Result<(), DesyncError> {
         if self.channel_variant != metadata.channel_variant {
