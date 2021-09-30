@@ -432,4 +432,16 @@ mod tests {
         foreign_thread_spawn();
     }
     }
+
+
+    //Minimal test case to show execution_done error when thread still sends message after calling execution_done(being dropped).
+    //When we call execution done on the main thread it drops all the receivers
+    #[test]
+    #[should_panic(expected = "Thread called after being dropped!")]
+    fn called_after_execution_done() {
+        let tivo  = Tivo::init_tivo_thread_root_test();
+        let (sender, _) = rr_channel::crossbeam_channel::unbounded::<i32>();
+        tivo.execution_done().unwrap();
+        sender.send(1).unwrap(); 
+    }
 }
