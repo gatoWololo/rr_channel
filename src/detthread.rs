@@ -436,7 +436,6 @@ mod tests {
     //Minimal test case to show execution_done error when thread still sends message after calling execution_done(being dropped).
     //When we call execution done on the main thread it drops all the receivers
     #[test]
-    #[ignore]
     #[should_panic(expected = "called `Result::unwrap()` on an `Err` value: \"SendError(..)\"")]
     fn called_after_execution_done() {
         let tivo  = Tivo::init_tivo_thread_root_test();
