@@ -327,13 +327,13 @@ mod tests {
         let _f = Tivo::init_tivo_thread_root_test();
 
         let mut v1: Vec<JoinHandle<_>> = vec![];
-        let number_of_threads = thread_rng().gen_range(1, 15);
+        let number_of_threads = thread_rng().gen_range(1..15);
 
         for i in 1..=number_of_threads {
             let h1 = spawn(move || {
                 // Wait a random amount of time, so that threads spawned after us have a chance
                 // to spawn their children first.
-                let n = thread_rng().gen_range(1, 15);
+                let n = thread_rng().gen_range(1..15);
                 std::thread::sleep(Duration::from_millis(n));
 
                 let a = [i];
@@ -433,14 +433,14 @@ mod tests {
     }
     }
 
-
     //Minimal test case to show execution_done error when thread still sends message after calling execution_done(being dropped).
     //When we call execution done on the main thread it drops all the receivers
     #[test]
+    #[ignore]
     #[should_panic(expected = "Thread called after being dropped!")]
     fn called_after_execution_done() {
         let tivo  = Tivo::init_tivo_thread_root_test();
-        let (sender, _) = rr_channel::crossbeam_channel::unbounded::<i32>();
+        let (sender, _) = crossbeam_channel::unbounded::<i32>();
         tivo.execution_done().unwrap();
         sender.send(1).unwrap(); 
     }

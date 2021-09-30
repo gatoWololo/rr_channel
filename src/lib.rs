@@ -1,5 +1,5 @@
-//#![feature(trait_alias)]
-//#![feature(const_type_name)]
+#![feature(trait_alias)]
+#![feature(const_type_name)]
 
 use std::collections::{HashMap, VecDeque};
 use std::env::var;
