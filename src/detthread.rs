@@ -437,11 +437,12 @@ mod tests {
     //When we call execution done on the main thread it drops all the receivers
     #[test]
     #[ignore]
-    #[should_panic(expected = "Thread called after being dropped!")]
+    #[should_panic(expected = "called `Result::unwrap()` on an `Err` value: \"SendError(..)\"")]
     fn called_after_execution_done() {
         let tivo  = Tivo::init_tivo_thread_root_test();
+        set_rr_mode(RRMode::Record);
         let (sender, _) = crossbeam_channel::unbounded::<i32>();
-        tivo.execution_done().unwrap();
+        tivo.execution_done();
         sender.send(1).unwrap(); 
     }
 }
