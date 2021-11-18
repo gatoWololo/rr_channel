@@ -7,6 +7,11 @@ use std::{thread, time};
 fn main() {
     let tivo = rr_channel::Tivo::init_tivo_thread_root_test();
 
+    tracing_subscriber::fmt::Subscriber::builder()
+            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .with_target(false)
+            .without_time()
+            .init();
     let mut tx = Vec::new(); //transmiter
     let mut rx_set = IpcReceiverSet::new().unwrap();
     let mut join_handle_vec = Vec::new();

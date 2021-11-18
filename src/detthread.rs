@@ -3,7 +3,6 @@ use std::fmt::Debug;
 use std::sync::atomic::AtomicU32;
 use std::thread::JoinHandle;
 pub use std::thread::{current, panicking, park, park_timeout, sleep, yield_now};
-
 use crate::recordlog::{ChannelVariant, TivoEvent};
 use crate::rr::{DetChannelId, RecordEventChecker};
 use crate::{check_events, get_rr_mode, recordlog, EventRecorder, RRMode};
@@ -180,6 +179,33 @@ impl RecordEventChecker<()> for ThreadSpawnChecker {
     }
 }
 
+
+
+struct ThreadChecker {
+    thread_id: DetThreadId,
+}
+
+// We don't care about the () here.
+impl RecordEventChecker<()> for ThreadChecker {
+    fn check_recorded_event(&self, re: &TivoEvent) -> Result<(), TivoEvent> {
+        let err_case = Err(TivoEvent::ThreadSpawned(self.thread_id.clone()));
+        match re {
+            TivoEvent::ThreadSpawned(expected_dti) => {
+                if *expected_dti != self.thread_id {
+                    return err_case;
+                }
+                return Ok(());
+            }
+            _ => return err_case,
+        }
+    }
+}
+
+
+
+
+
+
 impl Builder {
     pub fn new() -> Builder {
         Builder {
@@ -240,6 +266,9 @@ impl Builder {
             RRMode::NoRR => {}
         }
 
+
+
+
         self.builder.spawn(move || {
             initialize_new_thread(new_id.clone());
             let t = std::thread::current();
@@ -250,6 +279,32 @@ impl Builder {
               name=t.name().unwrap_or("None"))
             .entered();
             event!(Level::INFO, "New Thread Spawned!");
+
+            match get_rr_mode() {
+                RRMode::Record => {
+                    //define ThreadSpawned ------------------------------
+                    let event = TivoEvent::ThreadSpawned(new_id.clone());
+
+                    // TODO: We shouldn't have metadata for thread events this requires a refactoring
+                    // of the recordlog entries. Ehh, it might not be worth fixing.
+                    recorder.write_event_to_record(event, &metadata).unwrap();
+                }
+                RRMode::Replay => {
+                    check_events(|| {
+                        let event = recorder.get_log_entry()?;
+                        let tsc2 = ThreadChecker {
+                            thread_id: new_id.clone(),
+                        };
+
+                        // Can't propagate error up, panic.
+                        tsc2.check_event_mismatch(&event, &metadata)?;
+                        Ok(())
+                    });
+                    
+                }
+                RRMode::NoRR => {}
+            }
+
             let h = f();
             event!(Level::INFO, "Thread Finished.");
             h
@@ -262,7 +317,7 @@ impl Default for Builder {
         Builder::new()
     }
 }
-
+//BHAVA!!
 /// Set all necessary state for newly spawned thread. This function should only be called from
 /// inside the new child thread.
 fn initialize_new_thread(new_id: DetThreadId) {
@@ -444,4 +499,66 @@ mod tests {
         tivo.execution_done();
         sender.send(1).unwrap(); 
     }
+
+    //test case to check if all the spawned threads are being recorded in recordlog, escpecially the ones which are not after being spawned
+    //
+    //Step 1: find all events which are event threadspawned
+    //Step 2: find a record entry for it
+    //Step 3: if found say okay PASS else say FAIL
+
+    #[test]
+    fn spawned_thread_recordreplay_test() {
+        Tivo::init_tivo_thread_root_test();
+        set_rr_mode(RRMode::Record);
+
+        let mut handles = vec![];
+
+        for _ in 1..10 {
+            let h = crate::detthread::spawn(move || {
+
+            });
+            handles.push(h);
+        }
+
+       for h in handles {
+           h.join().unwrap();
+       }
+
+    }
+
+
+RRMode::Record => {
+    //define ThreadSpawned ------------------------------
+    let event = TivoEvent::ThreadSpawned(new_id.clone());
+    // TODO: We shouldn't have metadata for thread events this requires a refactoring
+    // of the recordlog entries. Ehh, it might not be worth fixing.
+    recorder.write_event_to_record(event, &metadata).unwrap();
+
+
+
+
+        let reference = test::simple_program_manual_log(
+            TivoEvent::CrossbeamSender,
+            |dti| TivoEvent::CrossbeamRecvSucc { sender_thread: dti },
+            ChannelVariant::CbUnbounded,
+        );
+            assert_eq!(reference, take_global_memory_recorder());
+            Ok(())
+    }
+
+
+
+
+        if let Err(e) = h.join() {
+            std::panic::resume_unwind(e);
+        }
+
+
+
+
+        foreign_thread_spawn();
+    }
+
+
+
 }
