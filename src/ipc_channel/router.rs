@@ -273,6 +273,11 @@ mod tests {
     use crate::test::{rr_test, set_rr_mode};
     use crate::{detthread, RRMode, Tivo};
 
+
+      fn spawn() -> Result<()> {
+//HEY
+
+    }
     /// Doesn't actually test much, but exercises the common code paths for the router.
     /// This will always be deterministic as there is no multiple producers.
     fn add_route() -> Result<()> {
@@ -642,6 +647,11 @@ mod tests {
     #[test]
     fn add_route_mpsc_test() -> Result<()> {
         rr_test(add_route_mpsc)
+    }
+
+    #[test]
+    fn spawned_thread_recordreplay_test() -> Result<()> {
+       rr_test(add_spawn)
     }
 
     #[test]

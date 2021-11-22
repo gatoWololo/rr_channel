@@ -9,6 +9,7 @@ use crate::{check_events, get_rr_mode, recordlog, EventRecorder, RRMode};
 use serde::{Deserialize, Serialize};
 use tracing::{error, event, info, span, Level};
 
+
 thread_local! {
     /// DET_ID must be set before accessing the DET_ID_SPAWNER as it relies on DET_ID for correct
     /// behavior.
@@ -300,7 +301,7 @@ impl Builder {
                         tsc2.check_event_mismatch(&event, &metadata)?;
                         Ok(())
                     });
-                    
+
                 }
                 RRMode::NoRR => {}
             }
@@ -339,8 +340,6 @@ mod tests {
     use std::time::Duration;
 
     use rand::{thread_rng, Rng};
-    use rusty_fork::rusty_fork_test;
-
     use crate::crossbeam_channel::unbounded;
     use crate::detthread::{generate_new_child_id, init_foreign_thread};
     use crate::test::set_rr_mode;
@@ -426,6 +425,7 @@ mod tests {
         }
     }
 
+
     #[test]
     #[should_panic(expected = "thread not initialized")]
     fn foreign_thread_spawn_panic() {
@@ -465,7 +465,6 @@ mod tests {
         Tivo::init_tivo_thread_root_test();
     }
 
-    rusty_fork_test! {
     #[test]
     fn thread_id_assignment_test() {
         set_rr_mode(RRMode::NoRR);
@@ -486,7 +485,6 @@ mod tests {
 
         foreign_thread_spawn();
     }
-    }
 
     //Minimal test case to show execution_done error when thread still sends message after calling execution_done(being dropped).
     //When we call execution done on the main thread it drops all the receivers
@@ -497,68 +495,6 @@ mod tests {
         set_rr_mode(RRMode::Record);
         let (sender, _) = crossbeam_channel::unbounded::<i32>();
         tivo.execution_done();
-        sender.send(1).unwrap(); 
+        sender.send(1).unwrap();
     }
-
-    //test case to check if all the spawned threads are being recorded in recordlog, escpecially the ones which are not after being spawned
-    //
-    //Step 1: find all events which are event threadspawned
-    //Step 2: find a record entry for it
-    //Step 3: if found say okay PASS else say FAIL
-
-    #[test]
-    fn spawned_thread_recordreplay_test() {
-        Tivo::init_tivo_thread_root_test();
-        set_rr_mode(RRMode::Record);
-
-        let mut handles = vec![];
-
-        for _ in 1..10 {
-            let h = crate::detthread::spawn(move || {
-
-            });
-            handles.push(h);
-        }
-
-       for h in handles {
-           h.join().unwrap();
-       }
-
-    }
-
-
-RRMode::Record => {
-    //define ThreadSpawned ------------------------------
-    let event = TivoEvent::ThreadSpawned(new_id.clone());
-    // TODO: We shouldn't have metadata for thread events this requires a refactoring
-    // of the recordlog entries. Ehh, it might not be worth fixing.
-    recorder.write_event_to_record(event, &metadata).unwrap();
-
-
-
-
-        let reference = test::simple_program_manual_log(
-            TivoEvent::CrossbeamSender,
-            |dti| TivoEvent::CrossbeamRecvSucc { sender_thread: dti },
-            ChannelVariant::CbUnbounded,
-        );
-            assert_eq!(reference, take_global_memory_recorder());
-            Ok(())
-    }
-
-
-
-
-        if let Err(e) = h.join() {
-            std::panic::resume_unwind(e);
-        }
-
-
-
-
-        foreign_thread_spawn();
-    }
-
-
-
 }
