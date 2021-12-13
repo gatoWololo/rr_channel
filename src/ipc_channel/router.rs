@@ -273,11 +273,6 @@ mod tests {
     use crate::test::{rr_test, set_rr_mode};
     use crate::{detthread, RRMode, Tivo};
 
-
-      fn spawn() -> Result<()> {
-//HEY
-
-    }
     /// Doesn't actually test much, but exercises the common code paths for the router.
     /// This will always be deterministic as there is no multiple producers.
     fn add_route() -> Result<()> {
@@ -432,7 +427,7 @@ mod tests {
         ));
 
         main_thread_imr.push_back(RecordEntry::new(
-            TivoEvent::ThreadInitialized(router_thread.clone()),
+            TivoEvent::NewThreadSpawned(router_thread.clone()),
             ChannelVariant::None,
             DetChannelId::fake(),
             "Thread".to_string(),
@@ -541,14 +536,14 @@ mod tests {
         }
 
         main_thread_imr.push_back(RecordEntry::new(
-            TivoEvent::ThreadInitialized(thread1.clone()),
+            TivoEvent::NewThreadSpawned(thread1.clone()),
             ChannelVariant::None,
             DetChannelId::fake(),
             "Thread".to_string(),
         ));
 
         main_thread_imr.push_back(RecordEntry::new(
-            TivoEvent::ThreadInitialized(thread2.clone()),
+            TivoEvent::NewThreadSpawned(thread2.clone()),
             ChannelVariant::None,
             DetChannelId::fake(),
             "Thread".to_string(),
@@ -647,11 +642,6 @@ mod tests {
     #[test]
     fn add_route_mpsc_test() -> Result<()> {
         rr_test(add_route_mpsc)
-    }
-
-    #[test]
-    fn spawned_thread_recordreplay_test() -> Result<()> {
-       rr_test(add_spawn)
     }
 
     #[test]

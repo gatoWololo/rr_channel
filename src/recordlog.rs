@@ -1,4 +1,3 @@
-use crate::detthread::generate_new_child_id;
 use std::collections::hash_map::Entry;
 use std::collections::vec_deque::IntoIter;
 use std::collections::{HashMap, VecDeque};
@@ -174,9 +173,10 @@ pub enum TivoEvent {
         select_events: Vec<IpcSelectEvent>,
     },
     /// Current thread spawned new child thread with this DTI.
-    ThreadInitialized(DetThreadId),
+    NewThreadSpawned(DetThreadId),
     ChannelCreation,
-    ThreadSpawned(DetThreadId)
+    ///Newly spawned child thread DTI is recorded as an event
+    NewlySpawnedThreadRecording(DetThreadId)
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq)]

@@ -4,7 +4,6 @@ use std::{thread, time};
 use rr_channel::crossbeam_channel::Select;
 use rr_channel::detthread;
 
-
 fn main() {
     tracing_subscriber::fmt::Subscriber::builder()
             .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
