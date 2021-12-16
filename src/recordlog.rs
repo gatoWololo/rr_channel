@@ -1,4 +1,3 @@
-use crate::detthread::generate_new_child_id;
 use std::collections::hash_map::Entry;
 use std::collections::vec_deque::IntoIter;
 use std::collections::{HashMap, VecDeque};
@@ -241,17 +240,15 @@ thread_local! {
         s
     };
 
-//function of EVENT_RECEIVER - creates a refcell with new entry for each det_id value
+    pub(crate) static EVENT_RECEIVER: RefCell<IntoIter<RecordEntry>> = {
+        let mut gr = GLOBAL_REPLAYER.lock().unwrap();
+        RefCell::new(gr.take_entry(&get_det_id()))
+    };
 
-pub(crate) static EVENT_RECEIVER: RefCell<IntoIter<RecordEntry>> = {
-    let mut gr = GLOBAL_REPLAYER.lock().unwrap();
-    RefCell::new(gr.take_entry(&get_det_id()))
-};
-
-/// Keeps track of what event number we are per thread. This information is useful to know what
-/// event we are currently on when looking at our tracing output. This is updated as events are
-/// fetched or written to for record/replay respectively.
-pub(crate) static EVENT_NUMBER: RefCell<u32> = RefCell::new(0);
+    /// Keeps track of what event number we are per thread. This information is useful to know what
+    /// event we are currently on when looking at our tracing output. This is updated as events are
+    /// fetched or written to for record/replay respectively.
+    pub(crate) static EVENT_NUMBER: RefCell<u32> = RefCell::new(0);
 }
 
 /// TODO It seems there is repetition in the fields here and on LogEntry?
@@ -420,6 +417,7 @@ impl GlobalRecorder {
         use anyhow::bail;
 
         info!("Flushing Global recordlog.");
+
         if self.path.is_none() {
             bail!("Flush called in record mode?");
         }

@@ -9,7 +9,6 @@ use crate::{check_events, get_rr_mode, recordlog, EventRecorder, RRMode};
 use serde::{Deserialize, Serialize};
 use tracing::{error, event, info, span, Level};
 
-
 thread_local! {
     /// DET_ID must be set before accessing the DET_ID_SPAWNER as it relies on DET_ID for correct
     /// behavior.
@@ -180,13 +179,10 @@ impl RecordEventChecker<()> for ThreadSpawnChecker {
     }
 }
 
-
-
 struct ThreadChecker {
     thread_id: DetThreadId,
 }
 
-// We don't care about the () here.
 impl RecordEventChecker<()> for ThreadChecker {
     fn check_recorded_event(&self, re: &TivoEvent) -> Result<(), TivoEvent> {
         let err_case = Err(TivoEvent::ThreadSpawned(self.thread_id.clone()));
@@ -201,11 +197,6 @@ impl RecordEventChecker<()> for ThreadChecker {
         }
     }
 }
-
-
-
-
-
 
 impl Builder {
     pub fn new() -> Builder {
@@ -267,9 +258,6 @@ impl Builder {
             RRMode::NoRR => {}
         }
 
-
-
-
         self.builder.spawn(move || {
             initialize_new_thread(new_id.clone());
             let t = std::thread::current();
@@ -283,21 +271,17 @@ impl Builder {
 
             match get_rr_mode() {
                 RRMode::Record => {
-                    //define ThreadSpawned ------------------------------
                     let event = TivoEvent::ThreadSpawned(new_id.clone());
-
-                    // TODO: We shouldn't have metadata for thread events this requires a refactoring
-                    // of the recordlog entries. Ehh, it might not be worth fixing.
                     recorder.write_event_to_record(event, &metadata).unwrap();
                 }
                 RRMode::Replay => {
                     check_events(|| {
                         let event = recorder.get_log_entry()?;
+
                         let tsc2 = ThreadChecker {
                             thread_id: new_id.clone(),
                         };
 
-                        // Can't propagate error up, panic.
                         tsc2.check_event_mismatch(&event, &metadata)?;
                         Ok(())
                     });
@@ -318,7 +302,7 @@ impl Default for Builder {
         Builder::new()
     }
 }
-//BHAVA!!
+
 /// Set all necessary state for newly spawned thread. This function should only be called from
 /// inside the new child thread.
 fn initialize_new_thread(new_id: DetThreadId) {
@@ -336,14 +320,19 @@ fn initialize_new_thread(new_id: DetThreadId) {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{HashMap, VecDeque};
     use std::thread::JoinHandle;
     use std::time::Duration;
 
     use rand::{thread_rng, Rng};
+    use rusty_fork::rusty_fork_test;
+
     use crate::crossbeam_channel::unbounded;
-    use crate::detthread::{generate_new_child_id, init_foreign_thread};
+    use crate::detthread::{generate_new_child_id, init_foreign_thread, DetThreadId};
     use crate::test::set_rr_mode;
     use crate::{RRMode, Tivo};
+    use crate::recordlog::{ChannelVariant, RecordEntry, TivoEvent, take_global_memory_recorder};
+    use crate::rr::DetChannelId;
 
     use super::{get_det_id, spawn};
 
@@ -425,7 +414,6 @@ mod tests {
         }
     }
 
-
     #[test]
     #[should_panic(expected = "thread not initialized")]
     fn foreign_thread_spawn_panic() {
@@ -465,6 +453,7 @@ mod tests {
         Tivo::init_tivo_thread_root_test();
     }
 
+    rusty_fork_test! {
     #[test]
     fn thread_id_assignment_test() {
         set_rr_mode(RRMode::NoRR);
@@ -484,6 +473,35 @@ mod tests {
         set_rr_mode(RRMode::NoRR);
 
         foreign_thread_spawn();
+    }
+
+    #[test]
+    fn spawned_thread_recordreplay_test() {
+
+        Tivo::init_tivo_thread_root_test();
+
+        set_rr_mode(RRMode::Record);
+        let h2 = crate::detthread::spawn(move || {
+        });
+        h2.join().expect("Couldn't wait on thread");
+
+
+        let dti = DetThreadId::from(vec![].as_slice());
+        let child_dti = DetThreadId::from(vec![1].as_slice());
+        let mut hm = HashMap::new();
+
+        let mut rf = VecDeque::new();
+        let re = RecordEntry::new(TivoEvent::ThreadSpawned(child_dti.clone()), ChannelVariant::None, DetChannelId::from_raw(dti.clone(), 0), "Thread".to_string());
+        rf.push_back(re);
+        hm.insert(child_dti.clone(), rf);
+
+        let mut rf = VecDeque::new();
+        let re = RecordEntry::new(TivoEvent::ThreadInitialized(child_dti.clone()), ChannelVariant::None, DetChannelId::from_raw(dti.clone(), 0),"Thread".to_string());
+        rf.push_back(re);
+        hm.insert(dti, rf);
+
+        assert_eq!(hm, take_global_memory_recorder());
+        }
     }
 
     //Minimal test case to show execution_done error when thread still sends message after calling execution_done(being dropped).
