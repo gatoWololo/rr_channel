@@ -273,12 +273,6 @@ impl Builder {
             match get_rr_mode() {
                 RRMode::Record => {
                     let event = TivoEvent::NewlySpawnedThreadRecording(new_id.clone());
-<<<<<<< HEAD
-=======
-
-                    // TODO: We shouldn't have metadata for thread events this requires a refactoring
-                    // of the recordlog entries. Ehh, it might not be worth fixing.
->>>>>>> 72487f33cf2e5007b2757865b4c30c47bea3d26b
                     recorder.write_event_to_record(event, &metadata).unwrap();
                 }
                 RRMode::Replay => {
