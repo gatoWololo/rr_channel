@@ -5,6 +5,11 @@ use rr_channel::crossbeam_channel::Select;
 use rr_channel::detthread;
 
 fn main() {
+   tracing_subscriber::fmt::Subscriber::builder()
+            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .with_target(false)
+            .without_time()
+            .init();
     let tivo = rr_channel::Tivo::init_tivo_thread_root_test();
     let mut tx = Vec::new(); //transmiter
     let mut rx = Vec::new(); //receiver
