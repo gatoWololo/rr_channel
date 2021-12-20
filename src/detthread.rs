@@ -166,9 +166,9 @@ struct ThreadSpawnChecker {
 // We don't care about the () here.
 impl RecordEventChecker<()> for ThreadSpawnChecker {
     fn check_recorded_event(&self, re: &TivoEvent) -> Result<(), TivoEvent> {
-        let err_case = Err(TivoEvent::ThreadInitialized(self.thread_id.clone()));
+        let err_case = Err(TivoEvent::NewThreadSpawned(self.thread_id.clone()));
         match re {
-            TivoEvent::ThreadInitialized(expected_dti) => {
+            TivoEvent::NewThreadSpawned(expected_dti) => {
                 if *expected_dti != self.thread_id {
                     return err_case;
                 }
@@ -185,9 +185,9 @@ struct ThreadChecker {
 
 impl RecordEventChecker<()> for ThreadChecker {
     fn check_recorded_event(&self, re: &TivoEvent) -> Result<(), TivoEvent> {
-        let err_case = Err(TivoEvent::ThreadSpawned(self.thread_id.clone()));
+        let err_case = Err(TivoEvent::NewlySpawnedThreadRecording(self.thread_id.clone()));
         match re {
-            TivoEvent::ThreadSpawned(expected_dti) => {
+            TivoEvent::NewlySpawnedThreadRecording(expected_dti) => {
                 if *expected_dti != self.thread_id {
                     return err_case;
                 }
@@ -237,7 +237,7 @@ impl Builder {
 
         match get_rr_mode() {
             RRMode::Record => {
-                let event = TivoEvent::ThreadInitialized(new_id.clone());
+                let event = TivoEvent::NewThreadSpawned(new_id.clone());
 
                 // TODO: We shouldn't have metadata for thread events this requires a refactoring
                 // of the recordlog entries. Ehh, it might not be worth fixing.
@@ -271,7 +271,7 @@ impl Builder {
 
             match get_rr_mode() {
                 RRMode::Record => {
-                    let event = TivoEvent::ThreadSpawned(new_id.clone());
+                    let event = TivoEvent::NewlySpawnedThreadRecording(new_id.clone());
                     recorder.write_event_to_record(event, &metadata).unwrap();
                 }
                 RRMode::Replay => {
@@ -491,12 +491,12 @@ mod tests {
         let mut hm = HashMap::new();
 
         let mut rf = VecDeque::new();
-        let re = RecordEntry::new(TivoEvent::ThreadSpawned(child_dti.clone()), ChannelVariant::None, DetChannelId::from_raw(dti.clone(), 0), "Thread".to_string());
+        let re = RecordEntry::new(TivoEvent::NewlySpawnedThreadRecording(child_dti.clone()), ChannelVariant::None, DetChannelId::from_raw(dti.clone(), 0), "Thread".to_string());
         rf.push_back(re);
         hm.insert(child_dti.clone(), rf);
 
         let mut rf = VecDeque::new();
-        let re = RecordEntry::new(TivoEvent::ThreadInitialized(child_dti.clone()), ChannelVariant::None, DetChannelId::from_raw(dti.clone(), 0),"Thread".to_string());
+        let re = RecordEntry::new(TivoEvent::NewThreadSpawned(child_dti.clone()), ChannelVariant::None, DetChannelId::from_raw(dti.clone(), 0),"Thread".to_string());
         rf.push_back(re);
         hm.insert(dti, rf);
 

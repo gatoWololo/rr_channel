@@ -173,9 +173,9 @@ pub enum TivoEvent {
         select_events: Vec<IpcSelectEvent>,
     },
     /// Current thread spawned new child thread with this DTI.
-    ThreadInitialized(DetThreadId),
+    NewThreadSpawned(DetThreadId),
     ChannelCreation,
-    ThreadSpawned(DetThreadId)
+    NewlySpawnedThreadRecording(DetThreadId)
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq)]
