@@ -175,6 +175,10 @@ pub enum TivoEvent {
     /// Current thread spawned new child thread with this DTI.
     NewThreadSpawned(DetThreadId),
     ChannelCreation,
+<<<<<<< HEAD
+=======
+    ///Newly spawned child thread DTI is recorded as an event
+>>>>>>> 72487f33cf2e5007b2757865b4c30c47bea3d26b
     NewlySpawnedThreadRecording(DetThreadId)
 }
 

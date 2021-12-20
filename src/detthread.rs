@@ -269,9 +269,16 @@ impl Builder {
             .entered();
             event!(Level::INFO, "New Thread Spawned!");
 
+            //recording every child thread that was spawned as the event NewlySpawnedThreadRecording
             match get_rr_mode() {
                 RRMode::Record => {
                     let event = TivoEvent::NewlySpawnedThreadRecording(new_id.clone());
+<<<<<<< HEAD
+=======
+
+                    // TODO: We shouldn't have metadata for thread events this requires a refactoring
+                    // of the recordlog entries. Ehh, it might not be worth fixing.
+>>>>>>> 72487f33cf2e5007b2757865b4c30c47bea3d26b
                     recorder.write_event_to_record(event, &metadata).unwrap();
                 }
                 RRMode::Replay => {
@@ -474,6 +481,7 @@ mod tests {
 
         foreign_thread_spawn();
     }
+    }
 
     #[test]
     fn spawned_thread_recordreplay_test() {
@@ -513,6 +521,40 @@ mod tests {
         set_rr_mode(RRMode::Record);
         let (sender, _) = crossbeam_channel::unbounded::<i32>();
         tivo.execution_done();
-        sender.send(1).unwrap();
+        sender.send(1).unwrap(); 
+    }
+
+    //Minimal test case that first runs on record mode that populates the recordlog
+    //and then compare it against hand feed programatically created manual replay
+    //Checks if recording of child spawn and parent spawn happens properly
+
+    #[test]
+    fn spawned_thread_recordreplay_test() -> Result<()>
+    {
+
+        Tivo::init_tivo_thread_root_test();
+
+        set_rr_mode(RRMode::Record);
+        let h2 = crate::detthread::spawn(move || {
+        });
+        h2.join().expect("Couldn't wait on thread");
+
+
+        let dti = DetThreadId::from(vec![].as_slice());
+        let child_dti = DetThreadId::from(vec![1].as_slice());
+        let mut hm = HashMap::new();
+
+        let mut rf = VecDeque::new();
+        let re = RecordEntry::new(TivoEvent::NewlySpawnedThreadRecording(child_dti.clone()), ChannelVariant::None, DetChannelId::from_raw(dti.clone(), 0), "Thread".to_string());
+        rf.push_back(re);
+        hm.insert(child_dti.clone(), rf);
+
+        let mut rf = VecDeque::new();
+        let re = RecordEntry::new(TivoEvent::NewThreadSpawned(child_dti.clone()), ChannelVariant::None, DetChannelId::from_raw(dti.clone(), 0),"Thread".to_string());
+        rf.push_back(re);
+        hm.insert(dti, rf);
+
+        assert_eq!(hm, take_global_memory_recorder());
+        Ok(())
     }
 }
